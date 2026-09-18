@@ -449,7 +449,7 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
 
             <TouchableOpacity style={styles.disconnectLink} onPress={onDisconnect}>
               <Text style={[styles.disconnectLinkText, { color: colors.danger }]}>
-                Disconnect & Switch Wallet
+                Logout
               </Text>
             </TouchableOpacity>
           </ScrollView>

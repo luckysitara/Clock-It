@@ -36,6 +36,10 @@ import {
   buildRepayTx,
   buildCreateP2POfferTx,
   buildFundP2POfferTx,
+  buildRepayPawnOfferTx,
+  buildCancelPawnOfferTx,
+  buildCreatePoolTx,
+  buildStakeSkrTx,
 } from './src/solana/onChainService';
 import {
   signAndSendSeekerTransaction,
@@ -146,6 +150,16 @@ function MainApp() {
   const [solBalance, setSolBalance] = useState<number>(0);
   const [isLoadingPools, setIsLoadingPools] = useState<boolean>(false);
   const [showAssetsModal, setShowAssetsModal] = useState<boolean>(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<any>(null);
+
+  const showToast = (msg: string) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastMessage(msg);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 2800);
+  };
 
   // Fast, independent wallet asset balance query
   const refreshWalletAssets = async (userPubkey: PublicKey, net: SolanaNetwork) => {
@@ -179,8 +193,8 @@ function MainApp() {
         setWalletAssets(assets);
         setSolBalance(assets.solBalance);
       }
-    } catch (err) {
-      console.warn('Error fetching wallet assets:', err);
+    } catch (e) {
+      console.log('Error refreshing assets:', e);
     }
   };
 
@@ -232,59 +246,46 @@ function MainApp() {
 
   // When wallet connects or network changes, trigger instant asset query and parallel protocol fetch
   useEffect(() => {
-    if (session) {
-      // 1. Immediately fetch wallet assets in ~500ms
+    if (session?.publicKey) {
       refreshWalletAssets(session.publicKey, selectedNetwork);
-      // 2. Concurrently load protocol data in background
       loadProtocolData(session.publicKey, session.skrHandle, selectedNetwork);
     }
-  }, [session, selectedNetwork]);
+  }, [session?.publicKey, selectedNetwork]);
 
-  // 1-tap devnet faucet airdrop
+  // Request Devnet SOL / USDC airdrop
   const handleAirdrop = async () => {
     if (!session) return;
     try {
-      const sig = await requestDevnetAirdrop(session.publicKey);
-      Alert.alert('🚰 Test Funds Received', '+1.0 SOL funded to your wallet.');
+      await requestDevnetAirdrop(session.publicKey);
       await refreshWalletAssets(session.publicKey, selectedNetwork);
+      showToast('Devnet SOL & USDC Airdropped!');
     } catch (err: any) {
       Alert.alert('Funding Notice', err?.message || 'Faucet limit reached. Please wait a moment.');
     }
   };
 
-  // Disconnect / Switch Wallet
+  // Logout handler with sleek toast feedback (no annoying OS alert popup)
   const handleDisconnect = () => {
     setShowAssetsModal(false);
-    Alert.alert(
-      'Disconnect Wallet',
-      `Disconnect active session for @${session?.skrHandle}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Disconnect',
-          style: 'destructive',
-          onPress: () => {
-            setSession(null);
-            setOrders([]);
-            devnetOrdersRef.current = [];
-            devnetOffersRef.current = INITIAL_COMMUNITY_OFFERS;
-            setOffers(INITIAL_COMMUNITY_OFFERS);
-            setUserProfile(null);
-            setSolBalance(0);
-            setWalletAssets({
-              network: 'devnet',
-              solBalance: 0,
-              usdcBalance: 0,
-              skrBalance: 0,
-              bonkBalance: 0,
-              hasSeekerGenesisToken: false,
-              totalUsdValue: 0,
-              tokenList: [],
-            });
-          },
-        },
-      ]
-    );
+    const handle = session?.skrHandle ? `@${session.skrHandle}` : 'wallet';
+    setSession(null);
+    setOrders([]);
+    devnetOrdersRef.current = [];
+    devnetOffersRef.current = INITIAL_COMMUNITY_OFFERS;
+    setOffers(INITIAL_COMMUNITY_OFFERS);
+    setUserProfile(null);
+    setSolBalance(0);
+    setWalletAssets({
+      network: 'devnet',
+      solBalance: 0,
+      usdcBalance: 0,
+      skrBalance: 0,
+      bonkBalance: 0,
+      hasSeekerGenesisToken: false,
+      totalUsdValue: 0,
+      tokenList: [],
+    });
+    showToast(`Logged out of ${handle}`);
   };
 
   // Execute real Borrow transaction
@@ -316,7 +317,9 @@ function MainApp() {
     }
 
     const poolAuthority = new PublicKey(pool.authority);
-    const collateralLamports = Math.round(collateralUnits * 1_000_000_000);
+    const collateralLamports = collateralName === 'SOL'
+      ? Math.round(collateralUnits * 1_000_000_000)
+      : Math.round(collateralUnits);
     const isPoolLiquid = pool.totalLiquidity >= borrowAmount;
 
     const { tx, escrowPDA, loanId } = await buildBorrowTx(
@@ -534,7 +537,10 @@ function MainApp() {
       const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
 
       const solMatch = name.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
-      const parsedUnits = solMatch ? parseFloat(solMatch[1]) : 1;
+      const skrMatch = name.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
+      const parsedSol = solMatch ? parseFloat(solMatch[1]) : 0;
+      const parsedSkr = skrMatch ? parseFloat(skrMatch[1]) : 0;
+      const parsedUnits = solMatch ? parsedSol : (skrMatch ? parsedSkr : 1);
       const isNft = name.toLowerCase().includes('nft') || name.toLowerCase().includes('monke');
 
       const newOffer: P2POffer = {
@@ -556,14 +562,16 @@ function MainApp() {
       devnetOffersRef.current = [newOffer, ...devnetOffersRef.current.filter((o) => o.id !== offerId)];
       setOffers(devnetOffersRef.current);
 
-      // Deduct SOL for collateral or escrow rent
+      // Deduct SOL or SKR for collateral or escrow rent
       setWalletAssets((prev) => {
-        const deduct = solMatch ? parsedUnits : 0.005;
-        const newSol = Math.max(0, parseFloat((prev.solBalance - deduct).toFixed(3)));
+        const deductSol = solMatch ? parsedSol : 0.005;
+        const newSol = Math.max(0, parseFloat((prev.solBalance - deductSol).toFixed(3)));
+        const newSkr = skrMatch ? Math.max(0, Math.round(prev.skrBalance - parsedSkr)) : prev.skrBalance;
         return {
           ...prev,
           solBalance: newSol,
-          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + prev.skrBalance * 0.0192).toFixed(2)),
+          skrBalance: newSkr,
+          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
         };
       });
 
@@ -679,6 +687,332 @@ function MainApp() {
     }
   };
 
+  // Execute real on-chain P2P Pawn Repay & Collateral Unlock
+  const handleRepayPawnOffer = async (offer: P2POffer) => {
+    if (!session) return;
+
+    const totalDue = parseFloat((offer.requestedAmount + offer.interestOffered).toFixed(2));
+    const solMatch = offer.collateralName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
+    const skrMatch = offer.collateralName.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
+    const returnSol = solMatch ? parseFloat(solMatch[1]) : 0;
+    const returnSkr = skrMatch ? parseFloat(skrMatch[1]) : 0;
+
+    try {
+      const tx = await buildRepayPawnOfferTx(session.publicKey, offer);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      // Update offer status to 'Repaid'
+      devnetOffersRef.current = devnetOffersRef.current.map((o) =>
+        o.id === offer.id ? { ...o, status: 'Repaid' as OfferStatus, solscanUrl, txSignature: sig } : o
+      );
+      setOffers([...devnetOffersRef.current]);
+
+      // Release collateral back to user's wallet and deduct repaid USDC
+      setWalletAssets((prev) => {
+        const newUsdc = Math.max(0, parseFloat((prev.usdcBalance - totalDue).toFixed(2)));
+        const newSol = parseFloat((prev.solBalance + returnSol).toFixed(3));
+        const newSkr = Math.round(prev.skrBalance + returnSkr);
+        return {
+          ...prev,
+          usdcBalance: newUsdc,
+          solBalance: newSol,
+          skrBalance: newSkr,
+          totalUsdValue: parseFloat((newSol * 101.12 + newUsdc + newSkr * 0.0192).toFixed(2)),
+        };
+      });
+
+      setUserProfile((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          reputationScore: Math.min(100, prev.reputationScore + 10),
+          totalLoansCompleted: prev.totalLoansCompleted + 1,
+        };
+      });
+
+      setTransactionNotice({
+        type: 'repay',
+        title: 'Pawn Repaid & Collateral Unlocked!',
+        subtitle: `Repaid $${totalDue} USDC. Your ${offer.collateralName} has been unlocked from the Escrow PDA and returned to your wallet.`,
+        amount: `$${totalDue} USDC`,
+        collateral: offer.collateralName,
+        txSignature: sig,
+        escrowAddress: offer.escrowAddress,
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Done',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        setTransactionNotice({
+          type: 'error',
+          title: 'Repayment Cancelled',
+          subtitle: 'Transaction was cancelled in your wallet.',
+          primaryBtnText: 'Dismiss',
+        });
+        return;
+      }
+      setTransactionNotice({
+        type: 'error',
+        title: 'Repayment Notice',
+        subtitle: err?.message || 'Failed to complete pawn repayment.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
+  // Cancel P2P Pawn and withdraw collateral
+  const handleCancelPawnOffer = async (offer: P2POffer) => {
+    if (!session) return;
+
+    const solMatch = offer.collateralName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
+    const skrMatch = offer.collateralName.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
+    const returnSol = solMatch ? parseFloat(solMatch[1]) : (skrMatch ? 0 : 0.005);
+    const returnSkr = skrMatch ? parseFloat(skrMatch[1]) : 0;
+
+    try {
+      const tx = await buildCancelPawnOfferTx(session.publicKey, offer);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      // Remove offer from active list
+      devnetOffersRef.current = devnetOffersRef.current.filter((o) => o.id !== offer.id);
+      setOffers([...devnetOffersRef.current]);
+
+      // Return collateral to wallet
+      setWalletAssets((prev) => {
+        const newSol = parseFloat((prev.solBalance + returnSol).toFixed(3));
+        const newSkr = Math.round(prev.skrBalance + returnSkr);
+        return {
+          ...prev,
+          solBalance: newSol,
+          skrBalance: newSkr,
+          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
+        };
+      });
+
+      setTransactionNotice({
+        type: 'success',
+        title: 'Pawn Cancelled',
+        subtitle: `Your ${offer.collateralName} has been unlocked from escrow back to your wallet.`,
+        amount: `${returnSol} SOL`,
+        collateral: offer.collateralName,
+        txSignature: sig,
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Done',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        return;
+      }
+      setTransactionNotice({
+        type: 'error',
+        title: 'Cancel Notice',
+        subtitle: err?.message || 'Failed to cancel pawn offer.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
+  // Execute real on-chain InitializePool transaction for Individual / Circle
+  const handleCreatePool = async (
+    name: string,
+    poolType: 'Individual' | 'Circle',
+    aprPercent: number,
+    maxLtvPercent: number,
+    minDays: number,
+    maxDays: number,
+    initialLiquidity: number
+  ) => {
+    if (!session) return;
+
+    if (selectedNetwork === 'mainnet-beta') {
+      Alert.alert(
+        'Devnet Testing Mode',
+        'ClockLend smart contracts are currently running on Solana Devnet.\n\nWould you like to switch to Devnet to create this lending desk?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
+        ]
+      );
+      return;
+    }
+
+    const poolId = Math.floor(100 + Math.random() * 900);
+    const interestRateBps = Math.round(aprPercent * 100);
+    const maxLtvBps = Math.round(maxLtvPercent * 100);
+
+    try {
+      const { tx, poolPDA } = await buildCreatePoolTx(
+        session.publicKey,
+        poolId,
+        poolType,
+        name,
+        interestRateBps,
+        maxLtvBps,
+        minDays,
+        maxDays
+      );
+
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      console.log('Lending pool created on-chain:', sig);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      const newPool: LendingPool = {
+        id: poolId,
+        poolType,
+        authority: session.publicKey.toBase58(),
+        name,
+        liquidityMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        totalLiquidity: initialLiquidity,
+        totalBorrowed: 0,
+        stakedSkrAmount: poolType === 'Individual' ? 500 : 2500,
+        interestRateBps,
+        maxLtvBps,
+        minDurationDays: minDays,
+        maxDurationDays: maxDays,
+        loansOriginated: 0,
+        loansRepaid: 0,
+        successRate: 100,
+        isVerifiedMerchant: false,
+      };
+
+      setPools((prev) => [newPool, ...prev.filter((p) => p.id !== poolId)]);
+
+      // Adjust mock wallet assets for rent-exemption fees
+      setWalletAssets((prev) => {
+        const deduct = 0.005;
+        const newSol = Math.max(0, parseFloat((prev.solBalance - deduct).toFixed(3)));
+        return {
+          ...prev,
+          solBalance: newSol,
+          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + prev.skrBalance * 0.0192).toFixed(2)),
+        };
+      });
+
+      setTransactionNotice({
+        type: 'borrow',
+        title: 'Lending Desk Initialized!',
+        subtitle: `"${name}" (${poolType}) is now live on Solana Devnet. Borrowers can now request loans directly against your desk!`,
+        amount: `$${initialLiquidity} USDC Capacity`,
+        collateral: `${aprPercent.toFixed(1)}% APR • ${maxLtvPercent.toFixed(0)}% Max LTV`,
+        txSignature: sig,
+        escrowAddress: poolPDA.toBase58(),
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Dismiss',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        setTransactionNotice({
+          type: 'error',
+          title: 'Initialization Cancelled',
+          subtitle: 'Transaction was cancelled in your wallet.',
+          primaryBtnText: 'Dismiss',
+        });
+        return;
+      }
+      console.warn('InitializePool transaction failed:', err);
+      setTransactionNotice({
+        type: 'error',
+        title: 'Initialization Notice',
+        subtitle: err?.message || 'Could not initialize pool on-chain.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
+  // Execute real on-chain Stake SKR Reputation Bond transaction
+  const handleStakeSkr = async (amount: number) => {
+    if (!session) return;
+
+    if (selectedNetwork === 'mainnet-beta') {
+      Alert.alert(
+        'Devnet Testing Mode',
+        'ClockLend smart contracts and reputation escrows are running on Solana Devnet.\n\nWould you like to switch to Devnet to stake your SKR bond?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
+        ]
+      );
+      return;
+    }
+
+    try {
+      const { tx, profilePDA, escrowPDA } = await buildStakeSkrTx(session.publicKey, amount);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      console.log('SKR staked on-chain:', sig);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      // Update user profile reputation & tier
+      setUserProfile((prev) => {
+        const currentStaked = (prev?.stakedSkr || 0) + amount;
+        let newTier: 'Diamond' | 'Gold' | 'Silver' | 'Standard' = 'Standard';
+        if (currentStaked >= 5000) newTier = 'Diamond';
+        else if (currentStaked >= 2500) newTier = 'Gold';
+        else if (currentStaked >= 1000) newTier = 'Silver';
+
+        const currentScore = prev?.reputationScore || 70;
+        const newScore = Math.min(100, currentScore + Math.max(5, Math.floor(amount / 200)));
+        const newDiscount = Math.min(3.0, parseFloat(((prev?.aprDiscount || 0) + 0.5).toFixed(1)));
+
+        return {
+          pubkey: session.publicKey.toBase58(),
+          stakedSkr: currentStaked,
+          totalLoansCompleted: prev?.totalLoansCompleted || 0,
+          totalLoansDefaulted: prev?.totalLoansDefaulted || 0,
+          reputationScore: newScore,
+          tier: newTier,
+          aprDiscount: newDiscount,
+        };
+      });
+
+      // Deduct staked SKR and 0.002 SOL rent
+      setWalletAssets((prev) => {
+        const newSkr = Math.max(0, Math.round(prev.skrBalance - amount));
+        const newSol = Math.max(0, parseFloat((prev.solBalance - 0.002).toFixed(3)));
+        return {
+          ...prev,
+          skrBalance: newSkr,
+          solBalance: newSol,
+          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
+        };
+      });
+
+      setTransactionNotice({
+        type: 'borrow',
+        title: '💎 SKR Reputation Bond Staked!',
+        subtitle: `Staked ${amount.toLocaleString()} SKR into Protocol Escrow (${escrowPDA.toBase58().slice(0, 8)}...). Your credit score, 90% LTV, and tier discount are now active on-chain!`,
+        amount: `${amount.toLocaleString()} SKR`,
+        collateral: 'Seeker Reputation Escrow',
+        txSignature: sig,
+        escrowAddress: escrowPDA.toBase58(),
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Done',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        setTransactionNotice({
+          type: 'error',
+          title: 'Staking Cancelled',
+          subtitle: 'Transaction was cancelled in your wallet.',
+          primaryBtnText: 'Dismiss',
+        });
+        return;
+      }
+      console.warn('Stake SKR failed:', err);
+      setTransactionNotice({
+        type: 'error',
+        title: 'Staking Notice',
+        subtitle: err?.message || 'Could not complete SKR reputation bond on-chain.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
   // 1. Splash Screen
   if (showSplash) {
     return <SplashScreenView onFinish={() => setShowSplash(false)} />;
@@ -705,6 +1039,15 @@ function MainApp() {
             setSession(newSession);
           }}
         />
+        {toastMessage && (
+          <View
+            style={[styles.toastContainer, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}
+            pointerEvents="none"
+          >
+            <Ionicons name="checkmark-circle" size={18} color={colors.primary} style={{ marginRight: 8 }} />
+            <Text style={[styles.toastText, { color: colors.text }]}>{toastMessage}</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -767,11 +1110,15 @@ function MainApp() {
           <MerchantDesksView
             pools={pools}
             offers={offers}
+            userPubkey={session.publicKey.toBase58()}
             onSelectPool={(pool) => {
               setActiveTab('BORROW');
             }}
             onFundPawnOffer={handleFundPawnOffer}
             onCreatePawnOffer={handleCreatePawnOffer}
+            onRepayPawnOffer={handleRepayPawnOffer}
+            onCancelPawnOffer={handleCancelPawnOffer}
+            onCreatePool={handleCreatePool}
             onNfcBumpCircle={() => {
               loadProtocolData(session.publicKey, session.skrHandle);
             }}
@@ -803,14 +1150,7 @@ function MainApp() {
             userProfile={currentProfile}
             skrHandle={session.skrHandle}
             walletAssets={walletAssets}
-            onStakeSkr={(amount) => {
-              if (userProfile) {
-                setUserProfile({
-                  ...userProfile,
-                  stakedSkr: userProfile.stakedSkr + amount,
-                });
-              }
-            }}
+            onStakeSkr={handleStakeSkr}
             onOpenAssetsModal={() => setShowAssetsModal(true)}
             onDisconnectWallet={handleDisconnect}
             onLockApp={() => {
@@ -943,6 +1283,17 @@ function MainApp() {
         data={transactionNotice}
         onClose={() => setTransactionNotice(null)}
       />
+
+      {/* Floating In-App Toast Notification */}
+      {toastMessage && (
+        <View
+          style={[styles.toastContainer, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}
+          pointerEvents="none"
+        >
+          <Ionicons name="checkmark-circle" size={18} color={colors.primary} style={{ marginRight: 8 }} />
+          <Text style={[styles.toastText, { color: colors.text }]}>{toastMessage}</Text>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -998,5 +1349,26 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '900',
+  },
+  toastContainer: {
+    position: 'absolute',
+    bottom: 84,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 24,
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+    zIndex: 9999,
+  },
+  toastText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

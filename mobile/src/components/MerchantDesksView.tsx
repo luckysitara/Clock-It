@@ -16,18 +16,34 @@ import { LendingPool, P2POffer } from '../types';
 interface MerchantDesksViewProps {
   pools: LendingPool[];
   offers: P2POffer[];
+  userPubkey?: string;
   onSelectPool: (pool: LendingPool) => void;
   onFundPawnOffer: (offerId: number) => void;
   onCreatePawnOffer: (name: string, reqAmount: number, profit: number, days: number) => void;
+  onRepayPawnOffer?: (offer: P2POffer) => void;
+  onCancelPawnOffer?: (offer: P2POffer) => void;
+  onCreatePool?: (
+    name: string,
+    poolType: 'Individual' | 'Circle',
+    aprPercent: number,
+    maxLtvPercent: number,
+    minDays: number,
+    maxDays: number,
+    initialLiquidity: number
+  ) => void;
   onNfcBumpCircle: () => void;
 }
 
 export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
   pools,
   offers,
+  userPubkey,
   onSelectPool,
   onFundPawnOffer,
   onCreatePawnOffer,
+  onRepayPawnOffer,
+  onCancelPawnOffer,
+  onCreatePool,
   onNfcBumpCircle,
 }) => {
   const { colors } = useTheme();
@@ -35,12 +51,76 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
   const [nfcModal, setNfcModal] = useState<boolean>(false);
   const [isNfcActive, setIsNfcActive] = useState<boolean>(false);
 
+  // New desk / pool modal state
+  const [createPoolModal, setCreatePoolModal] = useState<boolean>(false);
+  const [deskName, setDeskName] = useState<string>('Solana Chad Vault');
+  const [deskType, setDeskType] = useState<'Individual' | 'Circle'>('Individual');
+  const [deskApr, setDeskApr] = useState<string>('8.0');
+  const [deskLtv, setDeskLtv] = useState<string>('85');
+  const [deskMinDays, setDeskMinDays] = useState<string>('7');
+  const [deskMaxDays, setDeskMaxDays] = useState<string>('30');
+  const [deskLiquidity, setDeskLiquidity] = useState<string>('500');
+
+  const handleCreatePoolSubmit = () => {
+    const apr = parseFloat(deskApr);
+    const ltv = parseFloat(deskLtv);
+    const minD = parseInt(deskMinDays, 10);
+    const maxD = parseInt(deskMaxDays, 10);
+    const liq = parseFloat(deskLiquidity);
+
+    if (!deskName.trim()) {
+      Alert.alert('Missing Name', 'Please enter a name for your lending desk.');
+      return;
+    }
+    if (isNaN(apr) || apr <= 0 || apr > 100) {
+      Alert.alert('Invalid APR', 'Please enter a valid fixed APR between 1% and 100%.');
+      return;
+    }
+    if (isNaN(ltv) || ltv <= 10 || ltv > 95) {
+      Alert.alert('Invalid LTV', 'Max LTV must be between 10% and 95%.');
+      return;
+    }
+    if (isNaN(minD) || isNaN(maxD) || minD < 1 || maxD < minD) {
+      Alert.alert('Invalid Duration', 'Max duration must be greater than or equal to min duration.');
+      return;
+    }
+    if (isNaN(liq) || liq <= 0) {
+      Alert.alert('Invalid Liquidity', 'Please enter a valid initial liquidity amount.');
+      return;
+    }
+
+    setCreatePoolModal(false);
+    if (onCreatePool) {
+      onCreatePool(deskName.trim(), deskType, apr, ltv, minD, maxD, liq);
+    }
+  };
+
   // New pawn modal
   const [pawnModal, setPawnModal] = useState<boolean>(false);
   const [assetName, setAssetName] = useState<string>('0.5 SOL');
   const [reqAmount, setReqAmount] = useState<string>('50');
   const [profitAmount, setProfitAmount] = useState<string>('5');
   const [duration, setDuration] = useState<string>('7');
+
+  // Pawn filtering: All, My Pawns, Funded by Me, Completed
+  const [pawnFilter, setPawnFilter] = useState<'ALL' | 'MY_PAWNS' | 'FUNDED' | 'COMPLETED'>('ALL');
+
+  const myPawnsCount = offers.filter((o) => userPubkey && o.creator === userPubkey).length;
+  const fundedByMeCount = offers.filter((o) => userPubkey && o.funder === userPubkey).length;
+  const completedCount = offers.filter((o) => o.status === 'Repaid' || o.status === 'Defaulted').length;
+
+  const filteredOffers = offers.filter((offer) => {
+    if (pawnFilter === 'MY_PAWNS') {
+      return Boolean(userPubkey && offer.creator === userPubkey);
+    }
+    if (pawnFilter === 'FUNDED') {
+      return Boolean(userPubkey && offer.funder === userPubkey);
+    }
+    if (pawnFilter === 'COMPLETED') {
+      return offer.status === 'Repaid' || offer.status === 'Defaulted';
+    }
+    return true;
+  });
 
   const triggerNfcBump = () => {
     setIsNfcActive(true);
@@ -110,13 +190,24 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
         </View>
 
         {subTab === 'POOLS' ? (
-          <TouchableOpacity
-            style={[styles.nfcChip, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}
-            onPress={() => setNfcModal(true)}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.nfcChipText, { color: colors.primary }]}>📡 Bump NFC</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {onCreatePool && (
+              <TouchableOpacity
+                style={[styles.newPawnChip, { backgroundColor: colors.primary }]}
+                onPress={() => setCreatePoolModal(true)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.newPawnChipText, { color: colors.primaryText }]}>+ Create Desk</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={[styles.nfcChip, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}
+              onPress={() => setNfcModal(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.nfcChipText, { color: colors.primary }]}>📡 NFC (Soon)</Text>
+            </TouchableOpacity>
+          </View>
         ) : (
           <TouchableOpacity
             style={[styles.newPawnChip, { backgroundColor: colors.primary }]}
@@ -135,42 +226,80 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
             {pools.length === 0 ? (
               <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
                 <Text style={styles.emptyIcon}>🏦</Text>
-                <Text style={[styles.emptyTitle, { color: colors.text }]}>Discovering Lending Desks</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>No Lending Desks Found</Text>
                 <Text style={[styles.emptySub, { color: colors.textSecondary }]}>
-                  Searching for active peer lending desks...
+                  Be the first to create an on-chain lending desk with your own terms and liquidity!
                 </Text>
+                {onCreatePool && (
+                  <TouchableOpacity
+                    style={[styles.newPawnActionBtn, { backgroundColor: colors.primary, marginTop: 8 }]}
+                    onPress={() => setCreatePoolModal(true)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.newPawnActionText, { color: colors.primaryText }]}>+ Create Lending Desk</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             ) : (
-              pools.map((pool) => (
-                <View
-                  key={pool.id}
-                  style={[styles.deskCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}
-                >
-                  <View style={styles.deskHeader}>
-                    <View style={styles.deskTitleRow}>
-                      <Text style={styles.deskIcon}>{pool.poolType === 'Circle' ? '⭕' : '🏛️'}</Text>
-                      <View>
-                        <View style={styles.deskNameRow}>
-                          <Text style={[styles.deskName, { color: colors.text }]}>{pool.name}</Text>
-                          {pool.isVerifiedMerchant && (
-                            <View style={[styles.verifiedTag, { backgroundColor: colors.badgeBg }]}>
-                              <Text style={[styles.verifiedTagText, { color: colors.primary }]}>VERIFIED</Text>
+              pools.map((pool) => {
+                const isMyDesk = Boolean(userPubkey && pool.authority.toLowerCase() === userPubkey.toLowerCase());
+                return (
+                  <View
+                    key={pool.id}
+                    style={[
+                      styles.deskCard,
+                      { backgroundColor: colors.card, borderColor: isMyDesk ? colors.primary : colors.cardBorder },
+                      isMyDesk && { borderWidth: 1.5 },
+                    ]}
+                  >
+                    <View style={styles.deskHeader}>
+                      <View style={styles.deskTitleRow}>
+                        <Text style={styles.deskIcon}>{pool.poolType === 'Circle' ? '⭕' : '🏛️'}</Text>
+                        <View style={{ flex: 1 }}>
+                          <View style={[styles.deskNameRow, { flexWrap: 'wrap' }]}>
+                            <Text style={[styles.deskName, { color: colors.text }]}>{pool.name}</Text>
+                            {pool.isVerifiedMerchant && (
+                              <View style={[styles.verifiedTag, { backgroundColor: colors.badgeBg }]}>
+                                <Text style={[styles.verifiedTagText, { color: colors.primary }]}>VERIFIED</Text>
+                              </View>
+                            )}
+                            {isMyDesk && (
+                              <View style={[styles.verifiedTag, { backgroundColor: 'rgba(234, 179, 8, 0.15)', borderColor: '#eab308', borderWidth: 1 }]}>
+                                <Text style={[styles.verifiedTagText, { color: '#eab308' }]}>👑 YOUR DESK</Text>
+                              </View>
+                            )}
+                            <View
+                              style={[
+                                styles.verifiedTag,
+                                {
+                                  backgroundColor:
+                                    pool.poolType === 'Circle' ? 'rgba(168, 85, 247, 0.15)' : 'rgba(59, 130, 246, 0.15)',
+                                },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.verifiedTagText,
+                                  { color: pool.poolType === 'Circle' ? '#c084fc' : '#60a5fa' },
+                                ]}
+                              >
+                                {pool.poolType.toUpperCase()}
+                              </Text>
                             </View>
-                          )}
+                          </View>
+                          <Text style={[styles.deskAuthority, { color: colors.textMuted }]} numberOfLines={1}>
+                            {pool.authority.slice(0, 4)}...{pool.authority.slice(-4)} • {pool.minDurationDays}-{pool.maxDurationDays}d term
+                          </Text>
                         </View>
-                        <Text style={[styles.deskAuthority, { color: colors.textMuted }]} numberOfLines={1}>
-                          {pool.authority.slice(0, 4)}...{pool.authority.slice(-4)}
+                      </View>
+
+                      <View style={styles.rateCol}>
+                        <Text style={[styles.rateValue, { color: colors.primary }]}>
+                          {(pool.interestRateBps / 100).toFixed(1)}%
                         </Text>
+                        <Text style={[styles.rateLabel, { color: colors.textMuted }]}>Fixed APR</Text>
                       </View>
                     </View>
-
-                    <View style={styles.rateCol}>
-                      <Text style={[styles.rateValue, { color: colors.primary }]}>
-                        {(pool.interestRateBps / 100).toFixed(1)}%
-                      </Text>
-                      <Text style={[styles.rateLabel, { color: colors.textMuted }]}>Fixed APR</Text>
-                    </View>
-                  </View>
 
                   <View style={[styles.metricsRow, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
                     <View style={styles.metric}>
@@ -199,126 +328,533 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                     <Text style={[styles.borrowDeskBtnText, { color: colors.text }]}>Borrow from this Desk →</Text>
                   </TouchableOpacity>
                 </View>
-              ))
-            )}
-          </View>
+              );
+            })
+          )}
+        </View>
         )}
 
         {/* SUBTAB 2: P2P PAWNS */}
         {subTab === 'PAWNS' && (
           <View>
-            {offers.length === 0 ? (
+            {/* Filter Bar */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.pawnFilterBar}
+            >
+              {[
+                { id: 'ALL', label: `All (${offers.length})` },
+                { id: 'MY_PAWNS', label: `My Pawns (${myPawnsCount})` },
+                { id: 'FUNDED', label: `Funded (${fundedByMeCount})` },
+                { id: 'COMPLETED', label: `Completed (${completedCount})` },
+              ].map((f) => (
+                <TouchableOpacity
+                  key={f.id}
+                  style={[
+                    styles.pawnFilterChip,
+                    { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                    pawnFilter === f.id && { backgroundColor: colors.badgeBg, borderColor: colors.primary },
+                  ]}
+                  onPress={() => setPawnFilter(f.id as any)}
+                  activeOpacity={0.7}
+                >
+                  <Text
+                    style={[
+                      styles.pawnFilterChipText,
+                      { color: colors.textSecondary },
+                      pawnFilter === f.id && { color: colors.primary, fontWeight: '800' },
+                    ]}
+                  >
+                    {f.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {filteredOffers.length === 0 ? (
               <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
                 <Text style={styles.emptyIcon}>🃏</Text>
-                <Text style={[styles.emptyTitle, { color: colors.text }]}>No P2P Pawns Listed Yet</Text>
-                <Text style={[styles.emptySub, { color: colors.textSecondary }]}>
-                  Be the first to list a cNFT or digital asset for peer funding!
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                  {pawnFilter === 'MY_PAWNS'
+                    ? 'No Pawns Created Yet'
+                    : pawnFilter === 'FUNDED'
+                    ? 'No Funded Pawns Yet'
+                    : pawnFilter === 'COMPLETED'
+                    ? 'No Completed Pawns Yet'
+                    : 'No P2P Pawns Listed Yet'}
                 </Text>
-                <TouchableOpacity
-                  style={[styles.newPawnActionBtn, { backgroundColor: colors.primary }]}
-                  onPress={() => setPawnModal(true)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.newPawnActionText, { color: colors.primaryText }]}>+ List First Pawn</Text>
-                </TouchableOpacity>
+                <Text style={[styles.emptySub, { color: colors.textSecondary }]}>
+                  {pawnFilter === 'MY_PAWNS'
+                    ? 'You have not listed any pawns yet. Tap "+ New Pawn" to escrow an asset and borrow directly from peers.'
+                    : pawnFilter === 'FUNDED'
+                    ? 'You have not funded any peer pawns. Browse open pawns to fund and earn high APY yield.'
+                    : pawnFilter === 'COMPLETED'
+                    ? 'Completed and repaid pawn loans will appear in this history.'
+                    : 'Be the first to list a digital asset or NFT for peer funding!'}
+                </Text>
+                {pawnFilter === 'MY_PAWNS' && (
+                  <TouchableOpacity
+                    style={[styles.newPawnActionBtn, { backgroundColor: colors.primary }]}
+                    onPress={() => setPawnModal(true)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.newPawnActionText, { color: colors.primaryText }]}>+ List First Pawn</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             ) : (
-              offers.map((offer) => (
-                <View
-                  key={offer.id}
-                  style={[styles.pawnCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}
-                >
-                  <View style={styles.pawnHeader}>
-                    <View>
-                      <Text style={[styles.pawnTitle, { color: colors.text }]}>{offer.collateralName}</Text>
-                      <Text style={[styles.pawnBorrower, { color: colors.textMuted }]}>
-                        Creator: {offer.creator.slice(0, 4)}...{offer.creator.slice(-4)}
-                      </Text>
-                    </View>
-                    <View style={[styles.statusChip, { backgroundColor: colors.badgeBg }]}>
-                      <Text style={[styles.statusText, { color: colors.primary }]}>{offer.status.toUpperCase()}</Text>
-                    </View>
-                  </View>
+              filteredOffers.map((offer) => {
+                const isCreator = Boolean(userPubkey && offer.creator.toLowerCase() === userPubkey.toLowerCase());
+                const isFunder = Boolean(userPubkey && offer.funder && offer.funder.toLowerCase() === userPubkey.toLowerCase());
+                const totalDue = parseFloat((offer.requestedAmount + offer.interestOffered).toFixed(2));
+                const isRepaid = offer.status === 'Repaid';
 
-                  <View style={[styles.metricsRow, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
-                    <View style={styles.metric}>
-                      <Text style={[styles.mLabel, { color: colors.textMuted }]}>Ask Principal</Text>
-                      <Text style={[styles.mValue, { color: colors.text }]}>${offer.requestedAmount} USDC</Text>
-                    </View>
-                    <View style={styles.metric}>
-                      <Text style={[styles.mLabel, { color: colors.textMuted }]}>Lender Yield</Text>
-                      <Text style={[styles.mValue, { color: colors.primary }]}>+${offer.interestOffered}</Text>
-                    </View>
-                    <View style={styles.metric}>
-                      <Text style={[styles.mLabel, { color: colors.textMuted }]}>Duration</Text>
-                      <Text style={[styles.mValue, { color: colors.text }]}>{offer.durationDays}d</Text>
-                    </View>
-                  </View>
-
-                  {offer.escrowAddress && (
-                    <View style={[styles.escrowRow, { borderColor: colors.cardBorder }]}>
-                      <View style={styles.escrowInfo}>
-                        <Text style={[styles.escrowLabel, { color: colors.textMuted }]}>Escrow:</Text>
-                        <Text style={[styles.escrowValue, { color: colors.primary }]}>
-                          {offer.escrowAddress.slice(0, 6)}...{offer.escrowAddress.slice(-6)}
+                return (
+                  <View
+                    key={offer.id}
+                    style={[
+                      styles.pawnCard,
+                      { backgroundColor: colors.card, borderColor: colors.cardBorder },
+                      isRepaid && { borderColor: 'rgba(34, 197, 94, 0.3)' },
+                    ]}
+                  >
+                    <View style={styles.pawnHeader}>
+                      <View>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={[styles.pawnTitle, { color: colors.text }]}>{offer.collateralName}</Text>
+                          {isCreator && (
+                            <View style={[styles.ownerTag, { backgroundColor: colors.badgeBg }]}>
+                              <Text style={[styles.ownerTagText, { color: colors.primary }]}>YOUR PAWN</Text>
+                            </View>
+                          )}
+                          {isFunder && (
+                            <View style={[styles.ownerTag, { backgroundColor: 'rgba(59, 130, 246, 0.15)' }]}>
+                              <Text style={[styles.ownerTagText, { color: '#3b82f6' }]}>FUNDED BY YOU</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={[styles.pawnBorrower, { color: colors.textMuted }]}>
+                          Creator: {isCreator ? 'You' : `${offer.creator.slice(0, 4)}...${offer.creator.slice(-4)}`}
                         </Text>
                       </View>
-                      {offer.solscanUrl && (
-                        <TouchableOpacity
-                          onPress={() => Linking.openURL(offer.solscanUrl!)}
-                          style={[styles.solscanChip, { backgroundColor: colors.badgeBg }]}
-                          activeOpacity={0.7}
+                      <View
+                        style={[
+                          styles.statusChip,
+                          {
+                            backgroundColor: isRepaid
+                              ? 'rgba(34, 197, 94, 0.15)'
+                              : offer.status === 'Funded'
+                              ? 'rgba(59, 130, 246, 0.15)'
+                              : colors.badgeBg,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusText,
+                            {
+                              color: isRepaid
+                                ? '#22c55e'
+                                : offer.status === 'Funded'
+                                ? '#3b82f6'
+                                : colors.primary,
+                            },
+                          ]}
                         >
-                          <Text style={[styles.solscanChipText, { color: colors.primary }]}>Solscan ↗</Text>
-                        </TouchableOpacity>
-                      )}
+                          {isRepaid ? 'COMPLETED' : offer.status.toUpperCase()}
+                        </Text>
+                      </View>
                     </View>
-                  )}
 
-                  {offer.status === 'Open' ? (
-                    <TouchableOpacity
-                      style={[styles.fundBtn, { backgroundColor: colors.primary }]}
-                      onPress={() => onFundPawnOffer(offer.id)}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={[styles.fundBtnText, { color: colors.primaryText }]}>
-                        ⚡ Fund & Earn +${offer.interestOffered} USDC
-                      </Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <View style={[styles.fundedNote, { backgroundColor: colors.cardAlt }]}>
-                      <Text style={[styles.fundedNoteText, { color: colors.textMuted }]}>🔒 Funded & Escrowed</Text>
+                    <View style={[styles.metricsRow, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
+                      <View style={styles.metric}>
+                        <Text style={[styles.mLabel, { color: colors.textMuted }]}>Ask Principal</Text>
+                        <Text style={[styles.mValue, { color: colors.text }]}>${offer.requestedAmount} USDC</Text>
+                      </View>
+                      <View style={styles.metric}>
+                        <Text style={[styles.mLabel, { color: colors.textMuted }]}>Lender Yield</Text>
+                        <Text style={[styles.mValue, { color: colors.primary }]}>+${offer.interestOffered}</Text>
+                      </View>
+                      <View style={styles.metric}>
+                        <Text style={[styles.mLabel, { color: colors.textMuted }]}>Duration</Text>
+                        <Text style={[styles.mValue, { color: colors.text }]}>{offer.durationDays}d</Text>
+                      </View>
                     </View>
-                  )}
-                </View>
-              ))
+
+                    {offer.escrowAddress && (
+                      <View style={[styles.escrowRow, { borderColor: colors.cardBorder }]}>
+                        <View style={styles.escrowInfo}>
+                          <Text style={[styles.escrowLabel, { color: colors.textMuted }]}>Escrow:</Text>
+                          <Text style={[styles.escrowValue, { color: colors.primary }]}>
+                            {offer.escrowAddress.slice(0, 6)}...{offer.escrowAddress.slice(-6)}
+                          </Text>
+                        </View>
+                        {offer.solscanUrl && (
+                          <TouchableOpacity
+                            onPress={() => Linking.openURL(offer.solscanUrl!)}
+                            style={[styles.solscanChip, { backgroundColor: colors.badgeBg }]}
+                            activeOpacity={0.7}
+                          >
+                            <Text style={[styles.solscanChipText, { color: colors.primary }]}>Solscan ↗</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    )}
+
+                    {/* CONTEXT-AWARE ACTION SECTION */}
+                    {offer.status === 'Open' ? (
+                      isCreator ? (
+                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                          <View style={[styles.fundedNote, { flex: 1, backgroundColor: colors.cardAlt }]}>
+                            <Text style={[styles.fundedNoteText, { color: colors.textSecondary }]}>
+                              ⏳ Awaiting Peer Funder
+                            </Text>
+                          </View>
+                          {onCancelPawnOffer && (
+                            <TouchableOpacity
+                              style={[styles.cancelBtn, { borderColor: colors.cardBorder }]}
+                              onPress={() => onCancelPawnOffer(offer)}
+                              activeOpacity={0.8}
+                            >
+                              <Text style={[styles.cancelBtnText, { color: colors.textMuted }]}>Cancel & Withdraw</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={[styles.fundBtn, { backgroundColor: colors.primary }]}
+                          onPress={() => onFundPawnOffer(offer.id)}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={[styles.fundBtnText, { color: colors.primaryText }]}>
+                            ⚡ Fund & Earn +${offer.interestOffered} USDC
+                          </Text>
+                        </TouchableOpacity>
+                      )
+                    ) : offer.status === 'Funded' ? (
+                      isCreator ? (
+                        <View>
+                          <View style={[styles.fundedNote, { backgroundColor: 'rgba(239, 68, 68, 0.08)', marginBottom: 10 }]}>
+                            <Text style={[styles.fundedNoteText, { color: '#ef4444' }]}>
+                              🚨 Funded! Repay ${totalDue} USDC to unlock your {offer.collateralName} from escrow.
+                            </Text>
+                          </View>
+                          {onRepayPawnOffer && (
+                            <TouchableOpacity
+                              style={[styles.fundBtn, { backgroundColor: colors.primary }]}
+                              onPress={() => onRepayPawnOffer(offer)}
+                              activeOpacity={0.85}
+                            >
+                              <Text style={[styles.fundBtnText, { color: colors.primaryText }]}>
+                                ⚡ Repay ${totalDue} USDC & Unlock Collateral
+                              </Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      ) : isFunder ? (
+                        <View style={[styles.fundedNote, { backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
+                          <Text style={[styles.fundedNoteText, { color: '#3b82f6' }]}>
+                            💼 Funded by You — Awaiting borrower repayment (+${offer.interestOffered} USDC yield).
+                          </Text>
+                        </View>
+                      ) : (
+                        <View style={[styles.fundedNote, { backgroundColor: colors.cardAlt }]}>
+                          <Text style={[styles.fundedNoteText, { color: colors.textMuted }]}>🔒 Funded & In Escrow</Text>
+                        </View>
+                      )
+                    ) : (
+                      <View style={[styles.fundedNote, { backgroundColor: 'rgba(34, 197, 94, 0.08)' }]}>
+                        <Text style={[styles.fundedNoteText, { color: '#22c55e', fontWeight: '700' }]}>
+                          ✅ Completed — Collateral Unlocked & Returned
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                );
+              })
             )}
           </View>
         )}
       </ScrollView>
+
+      {/* CREATE NEW LENDING DESK MODAL */}
+      <Modal visible={createPoolModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.cardBorder, maxHeight: '88%', paddingHorizontal: 16 }]}>
+            <ScrollView showsVerticalScrollIndicator={false} style={{ width: '100%' }} contentContainerStyle={{ alignItems: 'center', paddingBottom: 16 }}>
+              <Text style={styles.modalNfcIcon}>🏛️</Text>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>Create Lending Desk</Text>
+              <Text style={[styles.modalDesc, { color: colors.textSecondary }]}>
+                Deploy an on-chain lending pool with your own custom interest rate, LTV, and liquidity terms.
+              </Text>
+
+              {/* Pool Type Selection */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>DESK TYPE</Text>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                  <TouchableOpacity
+                    style={[
+                      styles.typeSelectorBtn,
+                      { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                      deskType === 'Individual' && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                    ]}
+                    onPress={() => setDeskType('Individual')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 20, marginBottom: 4 }}>🏛️</Text>
+                    <Text
+                      style={[
+                        styles.typeSelectorText,
+                        { color: colors.textSecondary },
+                        deskType === 'Individual' && { color: colors.primary, fontWeight: '700' },
+                      ]}
+                    >
+                      Individual Desk
+                    </Text>
+                    <Text style={[styles.typeSelectorSub, { color: colors.textMuted }]}>Direct 1-on-1 lending</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.typeSelectorBtn,
+                      { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                      deskType === 'Circle' && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                    ]}
+                    onPress={() => setDeskType('Circle')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 20, marginBottom: 4 }}>⭕</Text>
+                    <Text
+                      style={[
+                        styles.typeSelectorText,
+                        { color: colors.textSecondary },
+                        deskType === 'Circle' && { color: colors.primary, fontWeight: '700' },
+                      ]}
+                    >
+                      Circle Pool
+                    </Text>
+                    <Text style={[styles.typeSelectorSub, { color: colors.textMuted }]}>Trusted peer circle</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* Desk Name */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>DESK NAME</Text>
+                <TextInput
+                  style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                  value={deskName}
+                  onChangeText={setDeskName}
+                  placeholder="e.g. Solana Chad Vault"
+                  placeholderTextColor={colors.textMuted}
+                />
+                <View style={styles.quickChipsRow}>
+                  {['Alpha Vault', 'Chad Lending', 'Seeker Genesis', 'DeFi Circle'].map((preset) => (
+                    <TouchableOpacity
+                      key={preset}
+                      style={[
+                        styles.quickChip,
+                        { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                        deskName === preset && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                      ]}
+                      onPress={() => setDeskName(preset)}
+                    >
+                      <Text
+                        style={[
+                          styles.quickChipText,
+                          { color: colors.textSecondary },
+                          deskName === preset && { color: colors.primary, fontWeight: '700' },
+                        ]}
+                      >
+                        {preset}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* APR & Max LTV */}
+              <View style={styles.inputRow}>
+                <View style={[styles.inputGroup, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>FIXED APR (%)</Text>
+                  <TextInput
+                    style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                    value={deskApr}
+                    onChangeText={setDeskApr}
+                    keyboardType="numeric"
+                  />
+                  <View style={styles.quickChipsRow}>
+                    {['5.0', '8.0', '12.0'].map((apr) => (
+                      <TouchableOpacity
+                        key={apr}
+                        style={[
+                          styles.quickChip,
+                          { flex: 1, backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                          deskApr === apr && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                        ]}
+                        onPress={() => setDeskApr(apr)}
+                      >
+                        <Text
+                          style={[
+                            styles.quickChipText,
+                            { color: colors.textSecondary },
+                            deskApr === apr && { color: colors.primary, fontWeight: '700' },
+                          ]}
+                        >
+                          {apr}%
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={[styles.inputGroup, { flex: 1, marginLeft: 10 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>MAX LTV (%)</Text>
+                  <TextInput
+                    style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                    value={deskLtv}
+                    onChangeText={setDeskLtv}
+                    keyboardType="numeric"
+                  />
+                  <View style={styles.quickChipsRow}>
+                    {['75', '85', '90'].map((ltv) => (
+                      <TouchableOpacity
+                        key={ltv}
+                        style={[
+                          styles.quickChip,
+                          { flex: 1, backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                          deskLtv === ltv && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                        ]}
+                        onPress={() => setDeskLtv(ltv)}
+                      >
+                        <Text
+                          style={[
+                            styles.quickChipText,
+                            { color: colors.textSecondary },
+                            deskLtv === ltv && { color: colors.primary, fontWeight: '700' },
+                          ]}
+                        >
+                          {ltv}%
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              {/* Duration range */}
+              <View style={styles.inputRow}>
+                <View style={[styles.inputGroup, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>MIN TERM (DAYS)</Text>
+                  <TextInput
+                    style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                    value={deskMinDays}
+                    onChangeText={setDeskMinDays}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={[styles.inputGroup, { flex: 1, marginLeft: 10 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>MAX TERM (DAYS)</Text>
+                  <TextInput
+                    style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                    value={deskMaxDays}
+                    onChangeText={setDeskMaxDays}
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+
+              {/* Initial Capacity / Liquidity */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>INITIAL LIQUIDITY (USDC)</Text>
+                <TextInput
+                  style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                  value={deskLiquidity}
+                  onChangeText={setDeskLiquidity}
+                  keyboardType="numeric"
+                />
+                <View style={styles.quickChipsRow}>
+                  {['100', '250', '500', '1000'].map((liq) => (
+                    <TouchableOpacity
+                      key={liq}
+                      style={[
+                        styles.quickChip,
+                        { flex: 1, backgroundColor: colors.cardAlt, borderColor: colors.cardBorder },
+                        deskLiquidity === liq && { borderColor: colors.primary, backgroundColor: colors.badgeBg },
+                      ]}
+                      onPress={() => setDeskLiquidity(liq)}
+                    >
+                      <Text
+                        style={[
+                          styles.quickChipText,
+                          { color: colors.textSecondary },
+                          deskLiquidity === liq && { color: colors.primary, fontWeight: '700' },
+                        ]}
+                      >
+                        ${liq}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Protocol Note */}
+              <View style={[styles.protocolNote, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
+                <Text style={[styles.protocolNoteText, { color: colors.textSecondary }]}>
+                  ⚡ Initializing this desk creates an on-chain Pool PDA and Vault PDA via ClockLend Program (HAjGx...jsH3). Other users will see your desk immediately.
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.bumpActionBtn, { backgroundColor: colors.primary, marginTop: 8 }]}
+                onPress={handleCreatePoolSubmit}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.bumpActionText, { color: colors.primaryText }]}>
+                  🚀 Deploy Desk on Devnet
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setCreatePoolModal(false)}>
+                <Text style={[styles.modalCloseText, { color: colors.textSecondary }]}>Cancel</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* NFC BUMP MODAL */}
       <Modal visible={nfcModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
             <Text style={styles.modalNfcIcon}>📡</Text>
+            <View style={[styles.verifiedTag, { backgroundColor: 'rgba(234, 179, 8, 0.15)', borderColor: '#eab308', borderWidth: 1, marginBottom: 12 }]}>
+              <Text style={[styles.verifiedTagText, { color: '#eab308' }]}>HARDWARE NFC • COMING SOON</Text>
+            </View>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Seeker Phone Bump (NFC)</Text>
             <Text style={[styles.modalDesc, { color: colors.textSecondary }]}>
-              Hold your Seeker smartphone back-to-back with a trusted peer to instantly establish an authenticated lending circle.
+              Hold your Seeker smartphone back-to-back with a trusted peer to instantly establish an authenticated lending circle via hardware NFC chips.
             </Text>
 
+            <View style={[styles.protocolNote, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder, marginBottom: 16 }]}>
+              <Text style={[styles.protocolNoteText, { color: colors.textSecondary }]}>
+                🔒 Requires physical Seeker Secure Element NFC driver integration. This feature will be enabled in an upcoming Solana Mobile firmware release.
+              </Text>
+            </View>
+
             <TouchableOpacity
-              style={[styles.bumpActionBtn, { backgroundColor: colors.primary }]}
-              onPress={triggerNfcBump}
-              disabled={isNfcActive}
+              style={[styles.bumpActionBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder, borderWidth: 1, opacity: 0.6 }]}
+              disabled={true}
+              activeOpacity={1}
             >
-              <Text style={[styles.bumpActionText, { color: colors.primaryText }]}>
-                {isNfcActive ? 'Reading Hardware NFC...' : 'Simulate Phone Bump'}
+              <Text style={[styles.bumpActionText, { color: colors.textMuted }]}>
+                ⏳ Hardware NFC — Coming Soon
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setNfcModal(false)}>
-              <Text style={[styles.modalCloseText, { color: colors.textSecondary }]}>Cancel</Text>
+              <Text style={[styles.modalCloseText, { color: colors.textSecondary }]}>Close</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -773,5 +1309,70 @@ const styles = StyleSheet.create({
   quickChipText: {
     fontSize: 11,
     fontWeight: '600',
+  },
+  pawnFilterBar: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14,
+    paddingHorizontal: 2,
+  },
+  pawnFilterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  pawnFilterChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  ownerTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  ownerTagText: {
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  cancelBtn: {
+    height: 44,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  typeSelectorBtn: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  typeSelectorText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  typeSelectorSub: {
+    fontSize: 10,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  protocolNote: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 12,
+    width: '100%',
+  },
+  protocolNoteText: {
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'center',
   },
 });

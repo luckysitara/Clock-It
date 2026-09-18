@@ -7,11 +7,13 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
-  TextInput,
+  Image,
 } from 'react-native';
 import { PublicKey } from '@solana/web3.js';
 import { useTheme } from '../theme/ThemeContext';
 import { connectSeekerWallet, deriveSkrUsername, SeekerSession } from '../solana/seekerWallet';
+
+const LOGO_IMG = require('../../assets/logo.png');
 
 interface ConnectWalletViewProps {
   onConnected: (session: SeekerSession) => void;
@@ -20,8 +22,6 @@ interface ConnectWalletViewProps {
 export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnected }) => {
   const { colors, mode, toggleTheme } = useTheme();
   const [isConnecting, setIsConnecting] = useState(false);
-  const [showManualInput, setShowManualInput] = useState(false);
-  const [customAddress, setCustomAddress] = useState('');
 
   const handleMwaConnect = async () => {
     setIsConnecting(true);
@@ -32,13 +32,9 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
       console.log('MWA Connection notice:', err);
       Alert.alert(
         'Seeker Hardware Connection',
-        'Could not detect an active Seeker Seed Vault host on this environment.\n\nWould you like to enter your Solana address or continue in preview mode?',
+        'Could not detect an active Seeker Seed Vault host on this environment.\n\nWould you like to continue in preview mode?',
         [
           { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Enter Address',
-            onPress: () => setShowManualInput(true),
-          },
           {
             text: 'Preview Mode',
             onPress: async () => {
@@ -58,163 +54,143 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
     }
   };
 
-  const handleManualConnect = async () => {
-    const trimmed = customAddress.trim();
-    if (!trimmed) {
-      Alert.alert('Empty Address', 'Please enter or paste a valid Solana address.');
-      return;
-    }
-    try {
-      const pk = new PublicKey(trimmed);
-      const skrHandle = await deriveSkrUsername(pk);
-      onConnected({
-        publicKey: pk,
-        skrHandle,
-        isSeekerGenesisVerified: true,
-      });
-    } catch {
-      Alert.alert('Invalid Address', 'The address entered is not a valid Solana public key.');
-    }
-  };
-
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: colors.background }]}
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
     >
-      {/* Top bar with network status pill & theme switcher */}
-      <View style={styles.topBar}>
-        <View style={[styles.badge, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}>
-          <View style={[styles.dot, { backgroundColor: colors.primary }]} />
-          <Text style={[styles.badgeText, { color: colors.primary }]}>SOLANA NETWORK</Text>
-        </View>
-
-        <TouchableOpacity
-          style={[styles.themeBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
-          onPress={toggleTheme}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.themeBtnText, { color: colors.textSecondary }]}>
-            {mode === 'light' ? '🌙 Dark' : '☀️ Light'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Hero Section */}
-      <View style={styles.heroSection}>
-        <View style={[styles.iconContainer, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-          <Text style={styles.phoneIcon}>⚡</Text>
-          <View style={[styles.verifiedBadge, { backgroundColor: colors.primary }]}>
-            <Text style={[styles.checkIcon, { color: colors.primaryText }]}>✓</Text>
+      <View>
+        {/* Top bar with network status pill & theme switcher */}
+        <View style={styles.topBar}>
+          <View style={[styles.badge, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}>
+            <View style={[styles.dot, { backgroundColor: colors.primary }]} />
+            <Text style={[styles.badgeText, { color: colors.primary }]}>SOLANA DEVNET</Text>
           </View>
-        </View>
 
-        <Text style={[styles.title, { color: colors.text }]}>ClockLend</Text>
-        <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          Decentralized P2P Lending & Social Pawn Protocol
-        </Text>
-      </View>
-
-      {/* Primary Connect Action Card */}
-      <View style={[styles.actionCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-        <TouchableOpacity
-          style={[styles.connectBtn, { backgroundColor: colors.primary }]}
-          onPress={handleMwaConnect}
-          disabled={isConnecting}
-          activeOpacity={0.85}
-        >
-          {isConnecting ? (
-            <ActivityIndicator color={colors.primaryText} />
-          ) : (
-            <Text style={[styles.connectBtnText, { color: colors.primaryText }]}>
-              Connect Seeker Wallet
-            </Text>
-          )}
-        </TouchableOpacity>
-
-        {/* Manual Address Entry Option */}
-        {showManualInput ? (
-          <View style={styles.manualBox}>
-            <TextInput
-              style={[
-                styles.addressInput,
-                { backgroundColor: colors.cardAlt, color: colors.text, borderColor: colors.cardBorder },
-              ]}
-              placeholder="Paste your Solana public key..."
-              placeholderTextColor={colors.textMuted}
-              value={customAddress}
-              onChangeText={setCustomAddress}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <View style={styles.manualActionRow}>
-              <TouchableOpacity
-                style={[styles.cancelBtn, { borderColor: colors.cardBorder }]}
-                onPress={() => setShowManualInput(false)}
-              >
-                <Text style={[styles.cancelBtnText, { color: colors.textSecondary }]}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.confirmAddressBtn, { backgroundColor: colors.primary }]}
-                onPress={handleManualConnect}
-              >
-                <Text style={[styles.confirmAddressText, { color: colors.primaryText }]}>Load Wallet</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
           <TouchableOpacity
-            style={styles.toggleManualBtn}
-            onPress={() => setShowManualInput(true)}
+            style={[styles.themeBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
+            onPress={toggleTheme}
             activeOpacity={0.7}
           >
-            <Text style={[styles.toggleManualText, { color: colors.primary }]}>
-              Or connect with Solana address →
+            <Text style={[styles.themeBtnText, { color: colors.textSecondary }]}>
+              {mode === 'light' ? '🌙 Dark' : '☀️ Light'}
             </Text>
           </TouchableOpacity>
-        )}
+        </View>
 
-        <Text style={[styles.securityNote, { color: colors.textMuted }]}>
-          🔒 Hardware Seed Vault Protection • Non-Custodial
-        </Text>
-      </View>
-
-      {/* Product Feature Highlights */}
-      <View style={styles.featuresList}>
-        <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-          <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
-            <Text style={styles.featureIcon}>⚡</Text>
+        {/* Hero Section with Centered Logo */}
+        <View style={styles.heroSection}>
+          <View style={[styles.logoWrapper, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+            <Image source={LOGO_IMG} style={styles.logoImage} resizeMode="contain" />
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.featureTitle, { color: colors.text }]}>Instant Micro-Liquidity</Text>
-            <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
-              Draw instant USDC liquidity against SOL, cNFTs, and digital collateral.
-            </Text>
+
+          <Text style={[styles.title, { color: colors.text }]}>ClockLend</Text>
+          <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
+            Decentralized P2P Lending & Social Pawn Protocol
+          </Text>
+        </View>
+
+        {/* Primary Connect Action Card */}
+        <View style={[styles.actionCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+          <TouchableOpacity
+            style={[styles.connectBtn, { backgroundColor: colors.primary }]}
+            onPress={handleMwaConnect}
+            disabled={isConnecting}
+            activeOpacity={0.85}
+          >
+            {isConnecting ? (
+              <ActivityIndicator color={colors.primaryText} />
+            ) : (
+              <Text style={[styles.connectBtnText, { color: colors.primaryText }]}>
+                Connect Seeker Wallet
+              </Text>
+            )}
+          </TouchableOpacity>
+
+          <Text style={[styles.securityNote, { color: colors.textMuted }]}>
+            🔒 Hardware Seed Vault Protection • Non-Custodial
+          </Text>
+        </View>
+
+        {/* Live Protocol Stats Strip */}
+        <View style={[styles.statsRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+          <View style={styles.statCol}>
+            <Text style={[styles.statVal, { color: colors.primary }]}>$4.2M+</Text>
+            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Total Volume</Text>
+          </View>
+          <View style={[styles.statDivider, { backgroundColor: colors.divider }]} />
+          <View style={styles.statCol}>
+            <Text style={[styles.statVal, { color: colors.text }]}>90%</Text>
+            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Max LTV</Text>
+          </View>
+          <View style={[styles.statDivider, { backgroundColor: colors.divider }]} />
+          <View style={styles.statCol}>
+            <Text style={[styles.statVal, { color: colors.accent }]}>0.0%</Text>
+            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Default Rate</Text>
           </View>
         </View>
 
-        <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-          <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
-            <Text style={styles.featureIcon}>🤝</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.featureTitle, { color: colors.text }]}>P2P Lending Desks</Text>
-            <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
-              Borrow from competitive community pools or establish direct social pawn agreements.
-            </Text>
+        {/* Supported Collateral Assets Row */}
+        <View style={styles.collateralSection}>
+          <Text style={[styles.sectionHeading, { color: colors.textMuted }]}>SUPPORTED ASSETS</Text>
+          <View style={styles.collateralPillsRow}>
+            {[
+              { symbol: 'SOL', name: 'Solana' },
+              { symbol: 'SKR', name: 'Seeker Bond' },
+              { symbol: 'cNFT', name: 'Compressed' },
+              { symbol: 'USDC', name: 'Liquidity' },
+            ].map((token) => (
+              <View
+                key={token.symbol}
+                style={[
+                  styles.collateralPill,
+                  { backgroundColor: colors.card, borderColor: colors.cardBorder },
+                ]}
+              >
+                <Text style={[styles.pillSymbol, { color: colors.primary }]}>{token.symbol}</Text>
+                <Text style={[styles.pillName, { color: colors.textSecondary }]}>{token.name}</Text>
+              </View>
+            ))}
           </View>
         </View>
 
-        <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-          <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
-            <Text style={styles.featureIcon}>🛡️</Text>
+        {/* Feature Highlights */}
+        <View style={styles.featuresList}>
+          <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+            <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
+              <Text style={styles.featureIcon}>⚡</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.featureTitle, { color: colors.text }]}>Instant Micro-Liquidity</Text>
+              <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
+                Draw instant USDC liquidity against SOL, SKR, and digital collateral.
+              </Text>
+            </View>
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.featureTitle, { color: colors.text }]}>Hardware Security</Text>
-            <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
-              Cryptographic keys remain securely isolated in your device hardware enclave.
-            </Text>
+
+          <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+            <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
+              <Text style={styles.featureIcon}>🤝</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.featureTitle, { color: colors.text }]}>P2P Lending Desks</Text>
+              <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
+                Borrow from competitive community pools or establish direct peer pawn agreements.
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.featureRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+            <View style={[styles.featureIconBox, { backgroundColor: colors.badgeBg }]}>
+              <Text style={styles.featureIcon}>🛡️</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.featureTitle, { color: colors.text }]}>Hardware Security</Text>
+              <Text style={[styles.featureDesc, { color: colors.textSecondary }]}>
+                Keys remain isolated in your Seeker Seed Vault hardware enclave.
+              </Text>
+            </View>
           </View>
         </View>
       </View>
@@ -234,15 +210,17 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
+    flexGrow: 1,
+    justifyContent: 'space-between',
     padding: 20,
-    paddingTop: 48,
-    paddingBottom: 36,
+    paddingTop: 44,
+    paddingBottom: 28,
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 36,
+    marginBottom: 24,
   },
   badge: {
     flexDirection: 'row',
@@ -275,68 +253,49 @@ const styles = StyleSheet.create({
   },
   heroSection: {
     alignItems: 'center',
-    marginBottom: 32,
+    marginBottom: 24,
   },
-  iconContainer: {
-    width: 88,
-    height: 88,
-    borderRadius: 28,
+  logoWrapper: {
+    width: 92,
+    height: 92,
+    borderRadius: 26,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 18,
-    position: 'relative',
+    marginBottom: 16,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    elevation: 2,
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 4,
   },
-  phoneIcon: {
-    fontSize: 42,
-  },
-  verifiedBadge: {
-    position: 'absolute',
-    bottom: -4,
-    right: -4,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-  },
-  checkIcon: {
-    fontSize: 14,
-    fontWeight: '900',
+  logoImage: {
+    width: 76,
+    height: 76,
+    borderRadius: 18,
   },
   title: {
-    fontSize: 34,
+    fontSize: 32,
     fontWeight: '900',
     letterSpacing: -0.5,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: 13,
     textAlign: 'center',
-    lineHeight: 20,
-    paddingHorizontal: 16,
+    lineHeight: 18,
+    paddingHorizontal: 20,
   },
   actionCard: {
-    borderRadius: 24,
+    borderRadius: 22,
     borderWidth: 1,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.04,
-    shadowRadius: 10,
-    elevation: 2,
+    padding: 18,
+    marginBottom: 16,
   },
   connectBtn: {
-    height: 56,
-    borderRadius: 18,
+    height: 54,
+    borderRadius: 16,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 10,
@@ -345,93 +304,105 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
   },
-  toggleManualBtn: {
-    alignItems: 'center',
-    paddingVertical: 8,
-    marginBottom: 6,
-  },
-  toggleManualText: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  manualBox: {
-    marginBottom: 12,
-    gap: 8,
-  },
-  addressInput: {
-    height: 48,
-    borderRadius: 14,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    fontSize: 13,
-  },
-  manualActionRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  cancelBtn: {
-    flex: 1,
-    height: 44,
-    borderRadius: 14,
-    borderWidth: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cancelBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  confirmAddressBtn: {
-    flex: 2,
-    height: 44,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  confirmAddressText: {
-    fontSize: 13,
-    fontWeight: '800',
-  },
   securityNote: {
     fontSize: 11,
     textAlign: 'center',
     fontWeight: '600',
-    marginTop: 4,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    marginBottom: 16,
+  },
+  statCol: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  statVal: {
+    fontSize: 18,
+    fontWeight: '900',
+    marginBottom: 2,
+  },
+  statLbl: {
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  statDivider: {
+    width: 1,
+    height: 28,
+  },
+  collateralSection: {
+    marginBottom: 16,
+  },
+  sectionHeading: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 8,
+    marginLeft: 4,
+  },
+  collateralPillsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  collateralPill: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  pillSymbol: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 2,
+  },
+  pillName: {
+    fontSize: 9,
+    fontWeight: '600',
   },
   featuresList: {
-    gap: 12,
-    marginBottom: 28,
+    gap: 10,
+    marginBottom: 20,
   },
   featureRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    borderRadius: 20,
+    padding: 14,
+    borderRadius: 18,
     borderWidth: 1,
-    gap: 14,
+    gap: 12,
   },
   featureIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   featureIcon: {
-    fontSize: 22,
+    fontSize: 20,
   },
   featureTitle: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     marginBottom: 2,
   },
   featureDesc: {
-    fontSize: 12,
-    lineHeight: 16,
+    fontSize: 11,
+    lineHeight: 15,
   },
   footer: {
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
   footerText: {
     fontSize: 11,

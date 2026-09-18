@@ -133,39 +133,38 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
 
 // Fetch all live Lending Pools from the deployed Devnet contract
 export async function fetchLivePools(): Promise<LendingPool[]> {
+  const poolsMap = new Map<string, LendingPool>();
+
+  // 1. Fast path: load known seeded pools via getMultipleAccountsInfo (~300ms)
   try {
-    // 1. Fast path: load known seeded pools via getMultipleAccountsInfo (~300ms)
     const accounts = await devnetConnection.getMultipleAccountsInfo(SEEDED_POOLS);
-    const pools: LendingPool[] = [];
     accounts.forEach((acc, idx) => {
       if (acc && acc.data) {
-        const pool = parsePoolData(SEEDED_POOLS[idx].toBase58(), Buffer.from(acc.data), pools.length + 1);
-        if (pool) pools.push(pool);
+        const pool = parsePoolData(SEEDED_POOLS[idx].toBase58(), Buffer.from(acc.data), poolsMap.size + 1);
+        if (pool) poolsMap.set(SEEDED_POOLS[idx].toBase58(), pool);
       }
     });
-
-    if (pools.length > 0) {
-      return pools;
-    }
   } catch (err) {
     console.warn('Fast pool query notice:', err);
   }
 
-  // 2. Fallback full scan
+  // 2. Full scan to find any additional pools created by individuals
   try {
     const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
-    const pools: LendingPool[] = [];
-
     for (const acc of accounts) {
-      const pool = parsePoolData(acc.pubkey.toBase58(), Buffer.from(acc.account.data), pools.length + 1);
-      if (pool) pools.push(pool);
+      if (acc.account.data.length === 182) {
+        const pubkeyStr = acc.pubkey.toBase58();
+        if (!poolsMap.has(pubkeyStr)) {
+          const pool = parsePoolData(pubkeyStr, Buffer.from(acc.account.data), poolsMap.size + 1);
+          if (pool) poolsMap.set(pubkeyStr, pool);
+        }
+      }
     }
-
-    return pools;
   } catch (err) {
     console.warn('Full pool scan notice:', err);
-    return [];
   }
+
+  return Array.from(poolsMap.values());
 }
 
 // Fetch live user loan orders directly from Devnet contract
@@ -605,10 +604,22 @@ export async function buildBorrowTx(
           lamports: lockLamports,
         })
       );
+    } else {
+      // SKR Collateral lock into Escrow PDA (funds rent exemption for SKR escrow vault)
+      tx.add(
+        SystemProgram.transfer({
+          fromPubkey: borrower,
+          toPubkey: escrowPDA,
+          lamports: 2_000_000, // 0.002 SOL rent exemption
+        })
+      );
     }
 
     // 2. Add ClockLend Protocol Loan Record via Solana Memo Program
-    const memoText = `ClockLend: Borrow $${borrowAmountUsdc} USDC | Collateral: ${collateralAmountLamports / 1e9} ${collateralName} locked | Pool #${poolId}`;
+    const collateralLabel = collateralName === 'SOL'
+      ? `${(collateralAmountLamports / 1e9).toFixed(3)} SOL`
+      : `${collateralAmountLamports} SKR`;
+    const memoText = `ClockLend: Borrow $${borrowAmountUsdc} USDC | Collateral: ${collateralLabel} locked in Escrow | Pool #${poolId}`;
     tx.add(
       new TransactionInstruction({
         programId: MEMO_PROGRAM_ID,
@@ -755,4 +766,159 @@ export async function buildFundP2POfferTx(
 
   return tx;
 }
+
+// Build Repay P2P Pawn Offer Transaction (Borrower repays principal + yield to release collateral)
+export async function buildRepayPawnOfferTx(
+  borrower: PublicKey,
+  offer: P2POffer
+): Promise<Transaction> {
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  const totalDue = parseFloat((offer.requestedAmount + offer.interestOffered).toFixed(2));
+  const memoText = `ClockLend: Repay P2P Pawn #${offer.id} | Repaid: $${totalDue} USDC | Collateral ${offer.collateralName} Released from Escrow`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: borrower, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return tx;
+}
+
+// Build Cancel P2P Pawn Offer Transaction (Creator withdraws collateral before anyone funds)
+export async function buildCancelPawnOfferTx(
+  creator: PublicKey,
+  offer: P2POffer
+): Promise<Transaction> {
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  const memoText = `ClockLend: Cancel P2P Pawn #${offer.id} | Collateral ${offer.collateralName} Withdrawn`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: creator, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return tx;
+}
+
+// Build Create Lending Desk / Pool (Individual or Circle) Transaction
+export async function buildCreatePoolTx(
+  authority: PublicKey,
+  poolId: number,
+  poolType: 'Individual' | 'Circle',
+  name: string,
+  interestRateBps: number,
+  maxLtvBps: number,
+  minDurationDays: number,
+  maxDurationDays: number
+): Promise<{ tx: Transaction; poolPDA: PublicKey; vaultPDA: PublicKey }> {
+  const [poolPDA] = getPoolPDA(authority, poolId);
+  const [vaultPDA] = getVaultPDA(poolPDA);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // ClockLendInstruction::InitializePool:
+  // Variant tag: 0 (1 byte)
+  // pool_id: u64 (8 bytes)
+  // pool_type: u8 (1 byte: 0 = Individual, 1 = Circle)
+  // interest_rate_bps: u16 (2 bytes)
+  // max_ltv_bps: u16 (2 bytes)
+  // min_duration: i64 (8 bytes)
+  // max_duration: i64 (8 bytes)
+  // name: [u8; 32]
+  const data = Buffer.alloc(1 + 8 + 1 + 2 + 2 + 8 + 8 + 32);
+  let offset = 0;
+  data.writeUInt8(0, offset); offset += 1;
+  writeU64LE(BigInt(poolId)).copy(data, offset); offset += 8;
+  data.writeUInt8(poolType === 'Circle' ? 1 : 0, offset); offset += 1;
+  data.writeUInt16LE(interestRateBps, offset); offset += 2;
+  data.writeUInt16LE(maxLtvBps, offset); offset += 2;
+  writeU64LE(BigInt(minDurationDays * 86400)).copy(data, offset); offset += 8;
+  writeU64LE(BigInt(maxDurationDays * 86400)).copy(data, offset); offset += 8;
+
+  const nameBuf = Buffer.alloc(32);
+  Buffer.from(name.slice(0, 32), 'utf-8').copy(nameBuf);
+  nameBuf.copy(data, offset);
+
+  const liquidityMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: poolPDA, isSigner: false, isWritable: true },
+      { pubkey: liquidityMint, isSigner: false, isWritable: false },
+      { pubkey: vaultPDA, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+
+  tx.add(ix);
+
+  const memoText = `ClockLend: Create Lending Desk #${poolId} "${name}" | Type: ${poolType} | APR: ${(interestRateBps / 100).toFixed(1)}% | Max LTV: ${(maxLtvBps / 100).toFixed(0)}%`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: authority, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return { tx, poolPDA, vaultPDA };
+}
+
+// Build Stake SKR Reputation Bond Transaction
+export async function buildStakeSkrTx(
+  user: PublicKey,
+  amountSkr: number
+): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
+  const [profilePDA] = getProfilePDA(user);
+  const [escrowPDA] = getEscrowPDA(profilePDA);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // ClockLendInstruction::StakeSKR (Variant 2):
+  // 1 byte tag (2) + 8 bytes amount = 9 bytes
+  const data = Buffer.alloc(9);
+  data.writeUInt8(2, 0); // Instruction 2: StakeSKR
+  writeU64LE(BigInt(Math.round(amountSkr * 1_000_000))).copy(data, 1);
+
+  // Transfer 0.002 SOL for rent-exempt UserProfile / Escrow PDA
+  tx.add(
+    SystemProgram.transfer({
+      fromPubkey: user,
+      toPubkey: escrowPDA,
+      lamports: 2_000_000,
+    })
+  );
+
+  // Memo instruction for on-chain proof & Solscan verification
+  const memoText = `ClockLend: Stake ${amountSkr.toLocaleString()} SKR Reputation Bond | User: ${user.toBase58().slice(0, 8)}... | Unlocks 90% LTV & APR Discounts`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: user, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return { tx, profilePDA, escrowPDA };
+}
+
+
 

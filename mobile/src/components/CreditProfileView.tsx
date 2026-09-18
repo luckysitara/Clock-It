@@ -126,14 +126,11 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
         </View>
 
         <View style={styles.stakeBtnRow}>
-          {[500, 1000, 2500].map((amt) => (
+          {[500, 1000, 2500, 5000].map((amt) => (
             <TouchableOpacity
               key={amt}
               style={[styles.stakePresetBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
-              onPress={() => {
-                onStakeSkr(amt);
-                Alert.alert('💎 SKR Staked', `Added ${amt} SKR to your reputation bonding account.`);
-              }}
+              onPress={() => onStakeSkr(amt)}
               activeOpacity={0.7}
             >
               <Text style={[styles.stakePresetText, { color: colors.primary }]}>+{amt} SKR</Text>
@@ -342,13 +339,13 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
         </TouchableOpacity>
       </View>
 
-      {/* Disconnect / Switch Wallet Button */}
+      {/* Logout Button */}
       <TouchableOpacity
         style={[styles.disconnectBtn, { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: colors.danger }]}
         onPress={onDisconnectWallet}
         activeOpacity={0.8}
       >
-        <Text style={[styles.disconnectBtnText, { color: colors.danger }]}>Disconnect Wallet</Text>
+        <Text style={[styles.disconnectBtnText, { color: colors.danger }]}>Logout</Text>
       </TouchableOpacity>
     </ScrollView>
   );
