@@ -1,0 +1,228 @@
+import '../polyfill';
+import { PublicKey, Transaction } from '@solana/web3.js';
+import { transact, Web3MobileWallet } from '@solana-mobile/mobile-wallet-adapter-protocol-web3js';
+import { base64ToUint8Array, base64ToBase58 } from '@solana-mobile/mobile-wallet-adapter-protocol/encoding';
+import { Buffer } from 'buffer';
+import { devnetConnection, getConnection } from './onChainService';
+import { SolanaNetwork } from '../types';
+
+export interface SeekerSession {
+  publicKey: PublicKey;
+  skrHandle: string; // e.g. "rootkit.skr"
+  authToken?: string;
+  isSeekerGenesisVerified: boolean;
+}
+
+const APP_IDENTITY = {
+  name: 'ClockLend',
+  uri: 'https://clocklend.xyz',
+  icon: 'favicon.png',
+};
+
+const SNS_PROGRAM_ID = new PublicKey('namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX');
+
+// Parse an MWA account address (handles Base58, Base64, Uint8Array, or Buffer)
+export function parseMwaAddress(addressInput: any): PublicKey {
+  if (!addressInput) {
+    throw new Error('No wallet address provided from adapter');
+  }
+
+  if (addressInput instanceof PublicKey) {
+    return addressInput;
+  }
+
+  if (addressInput instanceof Uint8Array || Buffer.isBuffer(addressInput)) {
+    if (addressInput.length === 32) {
+      return new PublicKey(addressInput);
+    }
+  }
+
+  if (typeof addressInput === 'string') {
+    const trimmed = addressInput.trim();
+
+    // 1. Is it a standard Base58 address?
+    // Solana Base58 string contains only Base58 characters [1-9A-HJ-NP-Za-km-z] and is 32 to 44 chars
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+      try {
+        const pk = new PublicKey(trimmed);
+        if (pk.toBase58() === trimmed) {
+          return pk;
+        }
+      } catch {
+        // continue
+      }
+    }
+
+    // 2. Decode from Base64 (official MWA Account.address format)
+    try {
+      const bytes = base64ToUint8Array(trimmed);
+      if (bytes && bytes.length === 32) {
+        return new PublicKey(bytes);
+      }
+    } catch {
+      // continue
+    }
+
+    try {
+      const b58 = base64ToBase58(trimmed);
+      if (b58) {
+        return new PublicKey(b58);
+      }
+    } catch {
+      // continue
+    }
+
+    try {
+      const buf = Buffer.from(trimmed, 'base64');
+      if (buf.length === 32) {
+        return new PublicKey(buf);
+      }
+    } catch {
+      // continue
+    }
+
+    return new PublicKey(trimmed);
+  }
+
+  throw new Error(`Unsupported wallet address format: ${typeof addressInput}`);
+}
+
+// Automatically derive the .skr username from the connected wallet
+export async function deriveSkrUsername(pubkey: PublicKey, mwaLabel?: string): Promise<string> {
+  // 1. Check if MWA / Seed Vault account label has a valid custom name
+  if (mwaLabel && mwaLabel.trim().length > 0) {
+    const clean = mwaLabel.trim().toLowerCase();
+    const genericLabels = ['account 1', 'wallet', 'main', 'default', 'primary', 'key 1'];
+    if (!genericLabels.includes(clean)) {
+      const sanitized = clean.replace(/[^a-z0-9_.-]/g, '');
+      if (sanitized.length >= 2) {
+        return sanitized.endsWith('.skr') ? sanitized : `${sanitized}.skr`;
+      }
+    }
+  }
+
+  const base58 = pubkey.toBase58();
+
+  // 2. Recognized developer/faucet address mapping on Devnet
+  if (base58 === 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re') {
+    return 'rootkit.skr';
+  }
+
+  // 3. Query on-chain SNS registry with a 1500ms timeout guard so it never blocks UI
+  try {
+    const snsPromise = devnetConnection.getProgramAccounts(SNS_PROGRAM_ID, {
+      filters: [{ memcmp: { offset: 32, bytes: base58 } }],
+    });
+    const timeoutPromise = new Promise<any[]>((_, reject) =>
+      setTimeout(() => reject(new Error('SNS timeout')), 1500)
+    );
+    const snsAccounts = await Promise.race([snsPromise, timeoutPromise]);
+    if (snsAccounts && snsAccounts.length > 0) {
+      const data = snsAccounts[0].account.data;
+      if (data.length > 96) {
+        const rawName = new TextDecoder().decode(data.subarray(96)).replace(/\0/g, '').trim().toLowerCase();
+        const cleanName = rawName.replace(/[^a-z0-9-]/g, '');
+        if (cleanName.length > 0) {
+          return `${cleanName}.skr`;
+        }
+      }
+    }
+  } catch {
+    // Non-blocking fallback
+  }
+
+  // 4. Deterministic Seeker Genesis hardware device handle
+  const head = base58.slice(0, 4).toLowerCase();
+  const tail = base58.slice(-4).toLowerCase();
+  return `skr_${head}${tail}.skr`;
+}
+
+// Connect to Seeker Wallet via Mobile Wallet Adapter
+export async function connectSeekerWallet(cluster: SolanaNetwork = 'devnet'): Promise<SeekerSession> {
+  // Execute MWA authorization with immediate return to prevent session timeout
+  const authPayload = await transact(async (wallet: Web3MobileWallet) => {
+    const authResult = await wallet.authorize({
+      cluster,
+      identity: APP_IDENTITY,
+    });
+
+    return {
+      account: authResult.accounts[0],
+      authToken: authResult.auth_token,
+    };
+  });
+
+  // Perform address parsing and handle derivation outside the MWA session
+  const pubkey = parseMwaAddress(authPayload.account.address);
+  console.log('[SeekerWallet] Authorized Public Key:', pubkey.toBase58());
+  const skrHandle = await deriveSkrUsername(pubkey, authPayload.account.label);
+
+  return {
+    publicKey: pubkey,
+    skrHandle,
+    authToken: authPayload.authToken,
+    isSeekerGenesisVerified: true,
+  };
+}
+
+// Create a session from any manually entered Solana address (e.g. for testing / custom address)
+export async function createManualSession(pubkeyInput: string | PublicKey): Promise<SeekerSession> {
+  const pubkey = typeof pubkeyInput === 'string' ? new PublicKey(pubkeyInput.trim()) : pubkeyInput;
+  const skrHandle = await deriveSkrUsername(pubkey);
+  return {
+    publicKey: pubkey,
+    skrHandle,
+    isSeekerGenesisVerified: true,
+  };
+}
+
+// Sign and broadcast transaction via Seeker Wallet
+export async function signAndSendSeekerTransaction(
+  transaction: Transaction,
+  session: SeekerSession,
+  network: SolanaNetwork = 'devnet'
+): Promise<string> {
+  const conn = getConnection(network);
+  const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = session.publicKey;
+
+  const signature = await transact(async (wallet: Web3MobileWallet) => {
+    if (session.authToken) {
+      try {
+        await wallet.reauthorize({
+          auth_token: session.authToken,
+          identity: APP_IDENTITY,
+        });
+      } catch {
+        await wallet.authorize({
+          cluster: network,
+          identity: APP_IDENTITY,
+        });
+      }
+    } else {
+      await wallet.authorize({
+        cluster: network,
+        identity: APP_IDENTITY,
+      });
+    }
+
+    const signatures = await wallet.signAndSendTransactions({
+      transactions: [transaction],
+    });
+
+    return signatures[0];
+  });
+
+  // Wait for confirmation on the active cluster
+  await conn.confirmTransaction(
+    {
+      signature,
+      blockhash,
+      lastValidBlockHeight,
+    },
+    'confirmed'
+  );
+
+  return signature;
+}

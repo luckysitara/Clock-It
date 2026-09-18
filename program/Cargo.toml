@@ -1,0 +1,27 @@
+[package]
+name = "clock_lend"
+version = "0.1.0"
+edition = "2021"
+description = "ClockLend: Bybit P2P Micro-Lending & Social Pawns on Solana Seeker"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+
+[lints.rust]
+unexpected_cfgs = "allow"
+
+[dependencies]
+solana-program = "2.2.1"
+borsh = { version = "1.5.7", features = ["derive"] }
+thiserror = "2.0"
+num-derive = "0.4"
+num-traits = "0.2"
+spl-token = { version = "7.0", features = ["no-entrypoint"] }
+
+[dev-dependencies]
+solana-program-test = "2.2.1"
+solana-sdk = "2.2.1"
