@@ -126,3 +126,16 @@ npm run android
 | **$10,000 SKR Track** | Deep economic utility: SKR is staked for merchant ranking, unlocks 90% LTV, slashes on default, and grants 50% APR fee discounts. |
 | **Functional Android APK** | Built with local Android SDK and Gradle into a standalone `.apk`. |
 | **Defensible Narrative** | P2P and informal credit (ROSCAs, chit funds) move hundreds of billions globally. ClockLend brings this to Web3 mobile with smart contract collateral security. |
+
+---
+
+## 🌌 TARDIS Synergy & Ecosystem Integration
+
+ClockLend is architected to seamlessly pair with **[TARDIS](https://github.com/luckysitara/Tardis)** (The Social-Financial OS for Solana Seeker, live in the Seeker dApp Store):
+- **Gated Community Circles**: Lending pools can be cryptographically restricted so circles can only be joined through the TARDIS community.
+- **In-Feed Lending via Solana Blinks**: Interactive ClockLend pawn requests and liquidity pools embed natively into TARDIS social feeds and group chats for 1-click peer funding.
+- **Cross-App Credit Badging**: On-chain SKR reputation bonding and credit scores synchronize with TARDIS user profiles.
+- **24-Hour Social Grace & Peer Rescue**: Liquidation warnings alert trusted TARDIS peer groups, allowing friends to buy out at-risk loans and protect community collateral.
+
+👉 **Read the complete architecture blueprint:** [`docs/TARDIS_SYNERGY.md`](docs/TARDIS_SYNERGY.md)
+
