@@ -182,3 +182,12 @@ fn test_institutional_pool_type_serialization() {
     assert_eq!(unpacked.total_liquidity, 500_000_000_000);
     assert_eq!(unpacked.interest_rate_bps, 350);
 }
+
+#[test]
+fn test_cancel_p2p_offer_instruction_serialization() {
+    let ix = ClockLendInstruction::CancelP2POffer;
+    let serialized = borsh::to_vec(&ix).expect("Serialization failed");
+    let deserialized =
+        ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
+    assert_eq!(ix, deserialized);
+}

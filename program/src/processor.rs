@@ -6,6 +6,7 @@ use solana_program::{
     msg,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
+    program_pack::Pack,
     pubkey::Pubkey,
     rent::Rent,
     sysvar::Sysvar,
@@ -38,6 +39,74 @@ fn assert_signer(account: &AccountInfo) -> ProgramResult {
         return Err(ClockLendError::Unauthorized.into());
     }
     Ok(())
+}
+
+// Security helper: verify SPL Token program ID
+#[inline(always)]
+fn assert_token_program(account: &AccountInfo) -> ProgramResult {
+    if account.key != &spl_token::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    Ok(())
+}
+
+// Security helper: verify System program ID
+#[inline(always)]
+fn assert_system_program(account: &AccountInfo) -> ProgramResult {
+    if account.key != &solana_program::system_program::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    Ok(())
+}
+
+// Security helper: safe PDA account creation / initialization with front-run lamport injection protection
+fn create_or_allocate_pda<'a>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'a>,
+    pda_account: &AccountInfo<'a>,
+    system_program: &AccountInfo<'a>,
+    space: usize,
+    signers_seeds: &[&[u8]],
+) -> ProgramResult {
+    if pda_account.owner == &solana_program::system_program::id() {
+        let rent = Rent::get()?;
+        let required_lamports = rent.minimum_balance(space);
+        if pda_account.lamports() == 0 {
+            invoke_signed(
+                &system_instruction::create_account(
+                    payer.key,
+                    pda_account.key,
+                    required_lamports,
+                    space as u64,
+                    program_id,
+                ),
+                &[payer.clone(), pda_account.clone(), system_program.clone()],
+                &[signers_seeds],
+            )?;
+        } else {
+            let lamports_diff = required_lamports.saturating_sub(pda_account.lamports());
+            if lamports_diff > 0 {
+                invoke(
+                    &system_instruction::transfer(payer.key, pda_account.key, lamports_diff),
+                    &[payer.clone(), pda_account.clone(), system_program.clone()],
+                )?;
+            }
+            invoke_signed(
+                &system_instruction::allocate(pda_account.key, space as u64),
+                &[pda_account.clone(), system_program.clone()],
+                &[signers_seeds],
+            )?;
+            invoke_signed(
+                &system_instruction::assign(pda_account.key, program_id),
+                &[pda_account.clone(), system_program.clone()],
+                &[signers_seeds],
+            )?;
+        }
+        Ok(())
+    } else {
+        assert_owned_by(pda_account, program_id)?;
+        Ok(())
+    }
 }
 
 pub fn process_instruction(
@@ -113,6 +182,9 @@ pub fn process_instruction(
         ClockLendInstruction::WithdrawLiquidity { amount } => {
             process_withdraw_liquidity(program_id, accounts, amount)
         }
+        ClockLendInstruction::CancelP2POffer => {
+            process_cancel_p2p_offer(program_id, accounts)
+        }
     }
 }
 
@@ -136,6 +208,7 @@ pub fn process_initialize_pool(
     let _rent_sysvar = next_account_info(account_info_iter)?;
 
     assert_signer(authority)?;
+    assert_system_program(system_program)?;
 
     if max_ltv_bps > 10000 || max_duration <= min_duration || min_duration <= 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -156,24 +229,24 @@ pub fn process_initialize_pool(
         return Err(ClockLendError::InvalidSeeds.into());
     }
 
-    // Create pool account if not already created
-    if pool_account.lamports() == 0 {
-        let rent = Rent::get()?;
-        let required_lamports = rent.minimum_balance(LendingPool::LEN);
-        invoke_signed(
-            &system_instruction::create_account(
-                authority.key,
-                pool_account.key,
-                required_lamports,
-                LendingPool::LEN as u64,
-                program_id,
-            ),
-            &[authority.clone(), pool_account.clone(), system_program.clone()],
-            &[&[POOL_SEED, authority.key.as_ref(), &pool_id_bytes, &[pool_bump]]],
-        )?;
-    } else {
-        assert_owned_by(pool_account, program_id)?;
+    // Security check: Reject re-initialization if pool already active
+    if pool_account.owner == program_id && !pool_account.data_is_empty() {
+        if let Ok(existing_pool) = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?) {
+            if existing_pool.is_initialized {
+                return Err(ClockLendError::PoolAlreadyInitialized.into());
+            }
+        }
     }
+
+    // Safe PDA creation immune to front-running lamport injection
+    create_or_allocate_pda(
+        program_id,
+        authority,
+        pool_account,
+        system_program,
+        LendingPool::LEN,
+        &[POOL_SEED, authority.key.as_ref(), &pool_id_bytes, &[pool_bump]],
+    )?;
 
     let pool = LendingPool {
         is_initialized: true,
@@ -212,6 +285,7 @@ pub fn process_deposit_liquidity(
 
     assert_signer(depositor)?;
     assert_owned_by(pool_account, program_id)?;
+    assert_token_program(token_program)?;
 
     if amount == 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -270,6 +344,8 @@ pub fn process_stake_skr(
     let token_program = next_account_info(account_info_iter)?;
 
     assert_signer(user)?;
+    assert_token_program(token_program)?;
+    assert_system_program(system_program)?;
 
     if amount == 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -281,22 +357,17 @@ pub fn process_stake_skr(
         return Err(ClockLendError::InvalidSeeds.into());
     }
 
-    // Initialize user profile if first time
-    if user_profile_account.lamports() == 0 {
-        let rent = Rent::get()?;
-        let required_lamports = rent.minimum_balance(UserProfile::LEN);
-        invoke_signed(
-            &system_instruction::create_account(
-                user.key,
-                user_profile_account.key,
-                required_lamports,
-                UserProfile::LEN as u64,
-                program_id,
-            ),
-            &[user.clone(), user_profile_account.clone(), system_program.clone()],
-            &[&[PROFILE_SEED, user.key.as_ref(), &[profile_bump]]],
-        )?;
+    let is_new_profile = user_profile_account.owner == &solana_program::system_program::id();
+    create_or_allocate_pda(
+        program_id,
+        user,
+        user_profile_account,
+        system_program,
+        UserProfile::LEN,
+        &[PROFILE_SEED, user.key.as_ref(), &[profile_bump]],
+    )?;
 
+    if is_new_profile {
         let initial_profile = UserProfile {
             is_initialized: true,
             user: *user.key,
@@ -306,8 +377,6 @@ pub fn process_stake_skr(
             reputation_score: 10000, // 100% starting reputation
         };
         initial_profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
-    } else {
-        assert_owned_by(user_profile_account, program_id)?;
     }
 
     // Transfer SKR tokens to escrow
@@ -337,15 +406,18 @@ pub fn process_stake_skr(
     profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
 
     // If pool is also provided, update pool's staked_skr (for verified merchant status)
+    // Security check: Only the pool authority can stake SKR to back their own pool
     if let Some(pool_account) = pool_account_opt {
         if pool_account.owner == program_id && !pool_account.data_is_empty() {
-            if let Ok(mut pool) = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?) {
-                pool.staked_skr_amount = pool
-                    .staked_skr_amount
-                    .checked_add(amount)
-                    .ok_or(ClockLendError::AmountOverflow)?;
-                pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
+            let mut pool = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?)?;
+            if pool.authority != *user.key {
+                return Err(ClockLendError::Unauthorized.into());
             }
+            pool.staked_skr_amount = pool
+                .staked_skr_amount
+                .checked_add(amount)
+                .ok_or(ClockLendError::AmountOverflow)?;
+            pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
         }
     }
 
@@ -375,6 +447,7 @@ pub fn process_borrow_from_pool(
 
     assert_signer(borrower)?;
     assert_owned_by(pool_account, program_id)?;
+    assert_system_program(system_program)?;
 
     if borrow_amount == 0 || collateral_amount == 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -430,33 +503,27 @@ pub fn process_borrow_from_pool(
         return Err(ClockLendError::InvalidEscrowAccount.into());
     }
 
-    // Create loan order PDA if new
-    if loan_order_account.lamports() == 0 {
-        let rent = Rent::get()?;
-        let required_lamports = rent.minimum_balance(LoanOrder::LEN);
-        invoke_signed(
-            &system_instruction::create_account(
-                borrower.key,
-                loan_order_account.key,
-                required_lamports,
-                LoanOrder::LEN as u64,
-                program_id,
-            ),
-            &[borrower.clone(), loan_order_account.clone(), system_program.clone()],
-            &[&[
-                LOAN_SEED,
-                pool_account.key.as_ref(),
-                borrower.key.as_ref(),
-                &loan_id_bytes,
-                &[loan_bump],
-            ]],
-        )?;
-    } else {
-        // If loan account already exists, ensure it is owned by program and not currently active
-        assert_owned_by(loan_order_account, program_id)?;
-        let existing = LoanOrder::unpack_from_slice(&loan_order_account.try_borrow_data()?)?;
-        if existing.is_active {
-            return Err(ClockLendError::LoanAlreadyActive.into());
+    // Create loan order PDA (safe against front-run lamport injection)
+    create_or_allocate_pda(
+        program_id,
+        borrower,
+        loan_order_account,
+        system_program,
+        LoanOrder::LEN,
+        &[
+            LOAN_SEED,
+            pool_account.key.as_ref(),
+            borrower.key.as_ref(),
+            &loan_id_bytes,
+            &[loan_bump],
+        ],
+    )?;
+
+    if !loan_order_account.data_is_empty() {
+        if let Ok(existing) = LoanOrder::unpack_from_slice(&loan_order_account.try_borrow_data()?) {
+            if existing.is_active {
+                return Err(ClockLendError::LoanAlreadyActive.into());
+            }
         }
     }
 
@@ -481,6 +548,7 @@ pub fn process_borrow_from_pool(
         )?;
     } else {
         // SPL Token (SKR): transfer tokens from borrower to collateral escrow PDA
+        assert_token_program(token_program)?;
         invoke(
             &spl_token::instruction::transfer(
                 token_program.key,
@@ -510,6 +578,8 @@ pub fn process_borrow_from_pool(
     if expected_vault_pda != *vault_account.key {
         return Err(ClockLendError::InvalidSeeds.into());
     }
+
+    assert_token_program(token_program)?;
 
     let _user_profile_opt = next_account_info(account_info_iter).ok();
     let treasury_account_opt = next_account_info(account_info_iter).ok();
@@ -658,6 +728,7 @@ pub fn process_create_p2p_offer(
     let system_program = next_account_info(account_info_iter)?;
 
     assert_signer(creator)?;
+    assert_system_program(system_program)?;
 
     if requested_amount == 0 || collateral_amount == 0 || duration_seconds <= 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -679,22 +750,22 @@ pub fn process_create_p2p_offer(
         return Err(ClockLendError::InvalidEscrowAccount.into());
     }
 
-    if p2p_offer_account.lamports() == 0 {
-        let rent = Rent::get()?;
-        let required_lamports = rent.minimum_balance(P2POffer::LEN);
-        invoke_signed(
-            &system_instruction::create_account(
-                creator.key,
-                p2p_offer_account.key,
-                required_lamports,
-                P2POffer::LEN as u64,
-                program_id,
-            ),
-            &[creator.clone(), p2p_offer_account.clone(), system_program.clone()],
-            &[&[P2P_SEED, creator.key.as_ref(), &offer_id_bytes, &[offer_bump]]],
-        )?;
-    } else {
-        assert_owned_by(p2p_offer_account, program_id)?;
+    // Create P2P offer PDA (safe against front-run lamport injection)
+    create_or_allocate_pda(
+        program_id,
+        creator,
+        p2p_offer_account,
+        system_program,
+        P2POffer::LEN,
+        &[P2P_SEED, creator.key.as_ref(), &offer_id_bytes, &[offer_bump]],
+    )?;
+
+    if !p2p_offer_account.data_is_empty() {
+        if let Ok(existing) = P2POffer::unpack_from_slice(&p2p_offer_account.try_borrow_data()?) {
+            if existing.is_initialized && existing.status == OfferStatus::Open {
+                return Err(ClockLendError::InvalidInstruction.into());
+            }
+        }
     }
 
     // Escrow collateral: Native SOL or SPL token (SKR)
@@ -716,6 +787,7 @@ pub fn process_create_p2p_offer(
             ],
         )?;
     } else {
+        assert_token_program(token_program)?;
         invoke(
             &spl_token::instruction::transfer(
                 token_program.key,
@@ -771,6 +843,7 @@ pub fn process_fund_p2p_offer(
 
     assert_signer(funder)?;
     assert_owned_by(p2p_offer_account, program_id)?;
+    assert_token_program(token_program)?;
 
     let mut offer = P2POffer::unpack_from_slice(&p2p_offer_account.try_borrow_data()?)?;
     if offer.status != OfferStatus::Open {
@@ -779,6 +852,12 @@ pub fn process_fund_p2p_offer(
 
     // Security check: Funder cannot be the creator
     if *funder.key == offer.creator {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    // Security check: Verify creator_liquidity_account is owned by offer.creator
+    let creator_token_acc = spl_token::state::Account::unpack(&creator_liquidity_account.try_borrow_data()?)?;
+    if creator_token_acc.owner != offer.creator {
         return Err(ClockLendError::Unauthorized.into());
     }
 
@@ -908,71 +987,55 @@ pub fn process_repay_loan(
         let lender_interest = loan.interest_due.saturating_sub(protocol_fee);
         let lender_repay = loan.principal_amount.saturating_add(lender_interest);
 
-        if let Some(token_program) = token_program_opt {
-            if let Some(treasury_account) = treasury_account_opt {
-                if protocol_fee > 0
-                    && treasury_account.key != repayment_destination_account.key
-                    && treasury_account.key != borrower.key
-                {
-                    // Transfer lender portion (principal + 85% interest) to Pool Vault
-                    invoke(
-                        &spl_token::instruction::transfer(
-                            token_program.key,
-                            borrower_liquidity_account.key,
-                            repayment_destination_account.key,
-                            borrower.key,
-                            &[],
-                            lender_repay,
-                        )?,
-                        &[
-                            borrower_liquidity_account.clone(),
-                            repayment_destination_account.clone(),
-                            borrower.clone(),
-                            token_program.clone(),
-                        ],
-                    )?;
+        let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
+        assert_token_program(token_program)?;
 
-                    // Transfer 15% interest take-rate directly to ClockLend Treasury
-                    invoke(
-                        &spl_token::instruction::transfer(
-                            token_program.key,
-                            borrower_liquidity_account.key,
-                            treasury_account.key,
-                            borrower.key,
-                            &[],
-                            protocol_fee,
-                        )?,
-                        &[
-                            borrower_liquidity_account.clone(),
-                            treasury_account.clone(),
-                            borrower.clone(),
-                            token_program.clone(),
-                        ],
-                    )?;
-
-                    msg!(
-                        "ClockLend: Repaid {} to Vault | 15% Take-Rate ({}) routed to Treasury",
+        if let Some(treasury_account) = treasury_account_opt {
+            if protocol_fee > 0
+                && treasury_account.key != repayment_destination_account.key
+                && treasury_account.key != borrower.key
+            {
+                // Transfer lender portion (principal + 85% interest) to Pool Vault
+                invoke(
+                    &spl_token::instruction::transfer(
+                        token_program.key,
+                        borrower_liquidity_account.key,
+                        repayment_destination_account.key,
+                        borrower.key,
+                        &[],
                         lender_repay,
-                        protocol_fee
-                    );
-                } else {
-                    invoke(
-                        &spl_token::instruction::transfer(
-                            token_program.key,
-                            borrower_liquidity_account.key,
-                            repayment_destination_account.key,
-                            borrower.key,
-                            &[],
-                            repay_amount,
-                        )?,
-                        &[
-                            borrower_liquidity_account.clone(),
-                            repayment_destination_account.clone(),
-                            borrower.clone(),
-                            token_program.clone(),
-                        ],
-                    )?;
-                }
+                    )?,
+                    &[
+                        borrower_liquidity_account.clone(),
+                        repayment_destination_account.clone(),
+                        borrower.clone(),
+                        token_program.clone(),
+                    ],
+                )?;
+
+                // Transfer 15% interest take-rate directly to ClockLend Treasury
+                invoke(
+                    &spl_token::instruction::transfer(
+                        token_program.key,
+                        borrower_liquidity_account.key,
+                        treasury_account.key,
+                        borrower.key,
+                        &[],
+                        protocol_fee,
+                    )?,
+                    &[
+                        borrower_liquidity_account.clone(),
+                        treasury_account.clone(),
+                        borrower.clone(),
+                        token_program.clone(),
+                    ],
+                )?;
+
+                msg!(
+                    "ClockLend: Repaid {} to Vault | 15% Take-Rate ({}) routed to Treasury",
+                    lender_repay,
+                    protocol_fee
+                );
             } else {
                 invoke(
                     &spl_token::instruction::transfer(
@@ -991,45 +1054,68 @@ pub fn process_repay_loan(
                     ],
                 )?;
             }
+        } else {
+            invoke(
+                &spl_token::instruction::transfer(
+                    token_program.key,
+                    borrower_liquidity_account.key,
+                    repayment_destination_account.key,
+                    borrower.key,
+                    &[],
+                    repay_amount,
+                )?,
+                &[
+                    borrower_liquidity_account.clone(),
+                    repayment_destination_account.clone(),
+                    borrower.clone(),
+                    token_program.clone(),
+                ],
+            )?;
+        }
 
-            // Dual Collateral Return: Native SOL vs SPL Token (SKR)
-            let is_native_sol = loan.collateral_mint == Pubkey::default()
-                || loan.collateral_mint == solana_program::system_program::ID
-                || loan.collateral_mint == spl_token::native_mint::id();
+        // Dual Collateral Return: Native SOL vs SPL Token (SKR)
+        let is_native_sol = loan.collateral_mint == Pubkey::default()
+            || loan.collateral_mint == solana_program::system_program::ID
+            || loan.collateral_mint == spl_token::native_mint::id();
 
-            if is_native_sol {
-                let escrow_lamports = collateral_escrow_account.lamports();
-                let refund_lamports = loan.collateral_amount.min(escrow_lamports);
-                **collateral_escrow_account.try_borrow_mut_lamports()? =
-                    escrow_lamports.saturating_sub(refund_lamports);
-                **borrower_collateral_account.try_borrow_mut_lamports()? =
-                    borrower_collateral_account.lamports().saturating_add(refund_lamports);
-                msg!(
-                    "ClockLend: Released {} lamports native SOL collateral to borrower",
-                    refund_lamports
-                );
-            } else {
-                invoke_signed(
-                    &spl_token::instruction::transfer(
-                        token_program.key,
-                        collateral_escrow_account.key,
-                        borrower_collateral_account.key,
-                        collateral_escrow_account.key,
-                        &[],
-                        loan.collateral_amount,
-                    )?,
-                    &[
-                        collateral_escrow_account.clone(),
-                        borrower_collateral_account.clone(),
-                        token_program.clone(),
-                    ],
-                    &[&[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]]],
-                )?;
-                msg!(
-                    "ClockLend: Released {} SKR tokens to borrower",
-                    loan.collateral_amount
-                );
+        if is_native_sol {
+            let escrow_lamports = collateral_escrow_account.lamports();
+            let refund_lamports = loan.collateral_amount.min(escrow_lamports);
+            **collateral_escrow_account.try_borrow_mut_lamports()? =
+                escrow_lamports.saturating_sub(refund_lamports);
+            **borrower_collateral_account.try_borrow_mut_lamports()? =
+                borrower_collateral_account.lamports().saturating_add(refund_lamports);
+            msg!(
+                "ClockLend: Released {} lamports native SOL collateral to borrower",
+                refund_lamports
+            );
+        } else {
+            // Security check: Verify borrower collateral token account is owned by borrower
+            let borrower_token_acc = spl_token::state::Account::unpack(&borrower_collateral_account.try_borrow_data()?)?;
+            if borrower_token_acc.owner != loan.borrower {
+                return Err(ClockLendError::Unauthorized.into());
             }
+
+            invoke_signed(
+                &spl_token::instruction::transfer(
+                    token_program.key,
+                    collateral_escrow_account.key,
+                    borrower_collateral_account.key,
+                    collateral_escrow_account.key,
+                    &[],
+                    loan.collateral_amount,
+                )?,
+                &[
+                    collateral_escrow_account.clone(),
+                    borrower_collateral_account.clone(),
+                    token_program.clone(),
+                ],
+                &[&[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]]],
+            )?;
+            msg!(
+                "ClockLend: Released {} SKR tokens to borrower",
+                loan.collateral_amount
+            );
         }
 
         // Boost user credit profile if passed
@@ -1090,67 +1176,80 @@ pub fn process_repay_loan(
             return Err(ClockLendError::InvalidEscrowAccount.into());
         }
 
+        let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
+        assert_token_program(token_program)?;
+
+        // Security check: Verify repayment destination is an SPL token account owned by offer.funder
+        let funder_token_acc = spl_token::state::Account::unpack(&repayment_destination_account.try_borrow_data()?)?;
+        if funder_token_acc.owner != offer.funder {
+            return Err(ClockLendError::InvalidRepaymentDestination.into());
+        }
+
         // Checks-Effects-Interactions: Update state BEFORE transfers
         offer.status = OfferStatus::Repaid;
         offer.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
-        if let Some(token_program) = token_program_opt {
-            // Pay back funder directly
-            invoke(
+        // Pay back funder directly
+        invoke(
+            &spl_token::instruction::transfer(
+                token_program.key,
+                borrower_liquidity_account.key,
+                repayment_destination_account.key,
+                borrower.key,
+                &[],
+                repay_amount,
+            )?,
+            &[
+                borrower_liquidity_account.clone(),
+                repayment_destination_account.clone(),
+                borrower.clone(),
+                token_program.clone(),
+            ],
+        )?;
+
+        // Return collateral: Native SOL vs SPL Token (SKR)
+        let is_native_sol = offer.collateral_mint == Pubkey::default()
+            || offer.collateral_mint == solana_program::system_program::ID
+            || offer.collateral_mint == spl_token::native_mint::id();
+
+        if is_native_sol {
+            let escrow_lamports = collateral_escrow_account.lamports();
+            let refund_lamports = offer.collateral_amount.min(escrow_lamports);
+            **collateral_escrow_account.try_borrow_mut_lamports()? =
+                escrow_lamports.saturating_sub(refund_lamports);
+            **borrower_collateral_account.try_borrow_mut_lamports()? =
+                borrower_collateral_account.lamports().saturating_add(refund_lamports);
+            msg!(
+                "ClockLend: P2P released {} lamports native SOL collateral to creator",
+                refund_lamports
+            );
+        } else {
+            // Security check: Verify borrower collateral token account is owned by offer.creator
+            let creator_token_acc = spl_token::state::Account::unpack(&borrower_collateral_account.try_borrow_data()?)?;
+            if creator_token_acc.owner != offer.creator {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+
+            invoke_signed(
                 &spl_token::instruction::transfer(
                     token_program.key,
-                    borrower_liquidity_account.key,
-                    repayment_destination_account.key,
-                    borrower.key,
+                    collateral_escrow_account.key,
+                    borrower_collateral_account.key,
+                    collateral_escrow_account.key,
                     &[],
-                    repay_amount,
+                    offer.collateral_amount,
                 )?,
                 &[
-                    borrower_liquidity_account.clone(),
-                    repayment_destination_account.clone(),
-                    borrower.clone(),
+                    collateral_escrow_account.clone(),
+                    borrower_collateral_account.clone(),
                     token_program.clone(),
                 ],
+                &[&[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]]],
             )?;
-
-            // Return collateral: Native SOL vs SPL Token (SKR)
-            let is_native_sol = offer.collateral_mint == Pubkey::default()
-                || offer.collateral_mint == solana_program::system_program::ID
-                || offer.collateral_mint == spl_token::native_mint::id();
-
-            if is_native_sol {
-                let escrow_lamports = collateral_escrow_account.lamports();
-                let refund_lamports = offer.collateral_amount.min(escrow_lamports);
-                **collateral_escrow_account.try_borrow_mut_lamports()? =
-                    escrow_lamports.saturating_sub(refund_lamports);
-                **borrower_collateral_account.try_borrow_mut_lamports()? =
-                    borrower_collateral_account.lamports().saturating_add(refund_lamports);
-                msg!(
-                    "ClockLend: P2P released {} lamports native SOL collateral to creator",
-                    refund_lamports
-                );
-            } else {
-                invoke_signed(
-                    &spl_token::instruction::transfer(
-                        token_program.key,
-                        collateral_escrow_account.key,
-                        borrower_collateral_account.key,
-                        collateral_escrow_account.key,
-                        &[],
-                        offer.collateral_amount,
-                    )?,
-                    &[
-                        collateral_escrow_account.clone(),
-                        borrower_collateral_account.clone(),
-                        token_program.clone(),
-                    ],
-                    &[&[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]]],
-                )?;
-                msg!(
-                    "ClockLend: P2P released {} SKR tokens to creator",
-                    offer.collateral_amount
-                );
-            }
+            msg!(
+                "ClockLend: P2P released {} SKR tokens to creator",
+                offer.collateral_amount
+            );
         }
 
         // Refund rent deposit to creator upon repayment
@@ -1448,13 +1547,26 @@ pub fn process_claim_default(
             || offer.collateral_mint == spl_token::native_mint::id();
 
         if is_native_sol {
+            // Security check: Verify destination is funder
+            if *destination_collateral_account.key != offer.funder {
+                return Err(ClockLendError::Unauthorized.into());
+            }
             let escrow_lamports = collateral_escrow_account.lamports();
             let transfer_amt = offer.collateral_amount.min(escrow_lamports);
             **collateral_escrow_account.try_borrow_mut_lamports()? =
                 escrow_lamports.saturating_sub(transfer_amt);
             **destination_collateral_account.try_borrow_mut_lamports()? =
                 destination_collateral_account.lamports().saturating_add(transfer_amt);
-        } else if let Some(token_program) = token_program_opt {
+        } else {
+            let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
+            assert_token_program(token_program)?;
+
+            // Security check: Verify destination token account is owned by funder
+            let funder_token_acc = spl_token::state::Account::unpack(&destination_collateral_account.try_borrow_data()?)?;
+            if funder_token_acc.owner != offer.funder {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+
             // Transfer collateral to funder
             invoke_signed(
                 &spl_token::instruction::transfer(
@@ -1495,6 +1607,7 @@ pub fn process_withdraw_liquidity(
 
     assert_signer(authority)?;
     assert_owned_by(pool_account, program_id)?;
+    assert_token_program(token_program)?;
 
     if amount == 0 {
         return Err(ClockLendError::InvalidInstruction.into());
@@ -1547,5 +1660,101 @@ pub fn process_withdraw_liquidity(
     )?;
 
     msg!("ClockLend: Authority withdrew {} liquidity from pool", amount);
+    Ok(())
+}
+
+pub fn process_cancel_p2p_offer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let creator = next_account_info(account_info_iter)?;
+    let p2p_offer_account = next_account_info(account_info_iter)?;
+    let collateral_escrow_account = next_account_info(account_info_iter)?;
+    let creator_collateral_account = next_account_info(account_info_iter)?;
+    let token_program_opt = next_account_info(account_info_iter).ok();
+
+    assert_signer(creator)?;
+    assert_owned_by(p2p_offer_account, program_id)?;
+
+    let offer = P2POffer::unpack_from_slice(&p2p_offer_account.try_borrow_data()?)?;
+    if offer.creator != *creator.key {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    if offer.status != OfferStatus::Open {
+        return Err(ClockLendError::OfferNotOpen.into());
+    }
+
+    // Security check: verify escrow PDA
+    let (expected_escrow_pda, escrow_bump) =
+        Pubkey::find_program_address(&[ESCROW_SEED, p2p_offer_account.key.as_ref()], program_id);
+    if expected_escrow_pda != *collateral_escrow_account.key {
+        return Err(ClockLendError::InvalidEscrowAccount.into());
+    }
+
+    let is_native_sol = offer.collateral_mint == Pubkey::default()
+        || offer.collateral_mint == solana_program::system_program::ID
+        || offer.collateral_mint == spl_token::native_mint::id();
+
+    if is_native_sol {
+        let escrow_lamports = collateral_escrow_account.lamports();
+        **collateral_escrow_account.try_borrow_mut_lamports()? = 0;
+        **creator_collateral_account.try_borrow_mut_lamports()? =
+            creator_collateral_account.lamports().saturating_add(escrow_lamports);
+        msg!(
+            "ClockLend: P2P Offer #{} cancelled, refunded {} lamports to creator",
+            offer.offer_id,
+            escrow_lamports
+        );
+    } else {
+        let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
+        assert_token_program(token_program)?;
+
+        let creator_token = spl_token::state::Account::unpack(&creator_collateral_account.try_borrow_data()?)?;
+        if creator_token.owner != *creator.key {
+            return Err(ClockLendError::Unauthorized.into());
+        }
+
+        invoke_signed(
+            &spl_token::instruction::transfer(
+                token_program.key,
+                collateral_escrow_account.key,
+                creator_collateral_account.key,
+                collateral_escrow_account.key,
+                &[],
+                offer.collateral_amount,
+            )?,
+            &[
+                collateral_escrow_account.clone(),
+                creator_collateral_account.clone(),
+                token_program.clone(),
+            ],
+            &[&[ESCROW_SEED, p2p_offer_account.key.as_ref(), &[escrow_bump]]],
+        )?;
+
+        let escrow_lamports = collateral_escrow_account.lamports();
+        if escrow_lamports > 0 {
+            **collateral_escrow_account.try_borrow_mut_lamports()? = 0;
+            **creator.try_borrow_mut_lamports()? =
+                creator.lamports().saturating_add(escrow_lamports);
+        }
+        msg!(
+            "ClockLend: P2P Offer #{} cancelled, refunded {} SKR tokens to creator",
+            offer.offer_id,
+            offer.collateral_amount
+        );
+    }
+
+    // Close offer PDA and refund rent lamports to creator
+    let offer_lamports = p2p_offer_account.lamports();
+    if offer_lamports > 0 {
+        **creator.try_borrow_mut_lamports()? =
+            creator.lamports().saturating_add(offer_lamports);
+        **p2p_offer_account.try_borrow_mut_lamports()? = 0;
+        p2p_offer_account.try_borrow_mut_data()?.fill(0);
+    }
+
+    msg!("ClockLend: P2P Offer #{} account closed & rent refunded to creator", offer.offer_id);
     Ok(())
 }

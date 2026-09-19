@@ -139,4 +139,14 @@ pub enum ClockLendInstruction {
     WithdrawLiquidity {
         amount: u64,
     },
+
+    /// 10. Cancel an unfunded P2P Pawn Offer & reclaim locked collateral + rent
+    /// Accounts:
+    /// 0. `[signer]` Creator
+    /// 1. `[writable]` P2POffer PDA
+    /// 2. `[writable]` Collateral Escrow PDA
+    /// 3. `[writable]` Creator Collateral Destination Account (receives collateral)
+    /// 4. `[optional]` Token Program (if SPL token collateral)
+    /// 5. `[]` System Program
+    CancelP2POffer,
 }

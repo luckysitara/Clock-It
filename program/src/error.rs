@@ -54,6 +54,8 @@ pub enum ClockLendError {
     UnauthorizedCaller,
     #[error("Invalid Treasury Account")]
     InvalidTreasuryAccount,
+    #[error("Pool Already Initialized")]
+    PoolAlreadyInitialized,
 }
 
 impl From<ClockLendError> for ProgramError {

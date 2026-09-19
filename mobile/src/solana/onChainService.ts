@@ -56,6 +56,18 @@ export const connection = devnetConnection;
 export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+export const USDC_DEVNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+export const SKR_DEVNET_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
+
+export function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): PublicKey {
+  const [address] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  return address;
+}
 
 // Seeded verified Devnet pool addresses for instantaneous retrieval
 const SEEDED_POOLS = [
@@ -770,6 +782,14 @@ export async function buildBorrowTx(
     writeU64LE(BigInt(collateralAmountLamports)).copy(data, 17);
     writeU64LE(BigInt(durationDays * 86400)).copy(data, 25);
 
+    const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+    const borrowerCollateralAccount = collateralName === 'SOL'
+      ? borrower
+      : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+    const collateralMint = collateralName === 'SOL'
+      ? SystemProgram.programId
+      : SKR_DEVNET_MINT;
+
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
@@ -777,10 +797,10 @@ export async function buildBorrowTx(
         { pubkey: poolPDA, isSigner: false, isWritable: true },
         { pubkey: loanPDA, isSigner: false, isWritable: true },
         { pubkey: vaultPDA, isSigner: false, isWritable: true },
-        { pubkey: borrower, isSigner: false, isWritable: true },
-        { pubkey: borrower, isSigner: false, isWritable: true },
+        { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+        { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
         { pubkey: escrowPDA, isSigner: false, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: collateralMint, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
@@ -845,6 +865,7 @@ export async function buildRepayTx(
     const [vaultPDA] = getVaultPDA(poolPDA);
     const [loanPDA] = getLoanPDA(poolPDA, borrower, orderId);
     const [escrowPDA] = getEscrowPDA(loanPDA);
+    const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
 
     // Layout: 1 byte tag (6) + 8 bytes repay_amount = 9 bytes
     const data = Buffer.alloc(9);
@@ -856,7 +877,7 @@ export async function buildRepayTx(
       keys: [
         { pubkey: borrower, isSigner: true, isWritable: true },
         { pubkey: loanPDA, isSigner: false, isWritable: true },
-        { pubkey: borrower, isSigner: false, isWritable: true },
+        { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
         { pubkey: vaultPDA, isSigner: false, isWritable: true },
         { pubkey: escrowPDA, isSigner: false, isWritable: true },
         { pubkey: borrower, isSigner: false, isWritable: true },
@@ -1024,11 +1045,40 @@ export async function buildCancelPawnOfferTx(
   creator: PublicKey,
   offer: P2POffer
 ): Promise<Transaction> {
+  const [offerPDA] = getP2POfferPDA(creator, offer.id);
+  const [escrowPDA] = getEscrowPDA(offerPDA);
+
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  const memoText = `ClockLend: Cancel P2P Pawn #${offer.id} | Collateral ${offer.collateralName} Withdrawn`;
+  // Instruction 10: CancelP2POffer (1 byte tag)
+  const data = Buffer.alloc(1);
+  data.writeUInt8(10, 0);
+
+  const isNativeSol = offer.collateralName.toUpperCase().includes('SOL');
+  const creatorCollateralAccount = isNativeSol ? creator : getAssociatedTokenAddress(SKR_DEVNET_MINT, creator);
+
+  const keys = [
+    { pubkey: creator, isSigner: true, isWritable: true },
+    { pubkey: offerPDA, isSigner: false, isWritable: true },
+    { pubkey: escrowPDA, isSigner: false, isWritable: true },
+    { pubkey: creatorCollateralAccount, isSigner: false, isWritable: true },
+  ];
+
+  if (!isNativeSol) {
+    keys.push({ pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false });
+  }
+
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys,
+      data,
+    })
+  );
+
+  const memoText = `ClockLend: Cancel P2P Pawn #${offer.id} | Collateral ${offer.collateralName} Withdrawn & Rent Refunded`;
   tx.add(
     new TransactionInstruction({
       programId: MEMO_PROGRAM_ID,
@@ -1117,6 +1167,7 @@ export async function buildStakeSkrTx(
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
   const [escrowPDA] = getEscrowPDA(profilePDA);
+  const userSkrAccount = getAssociatedTokenAddress(SKR_DEVNET_MINT, user);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
@@ -1134,6 +1185,22 @@ export async function buildStakeSkrTx(
       fromPubkey: user,
       toPubkey: escrowPDA,
       lamports: 2_000_000,
+    })
+  );
+
+  // Execute on-chain StakeSKR instruction
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: profilePDA, isSigner: false, isWritable: true },
+        { pubkey: userSkrAccount, isSigner: false, isWritable: true },
+        { pubkey: escrowPDA, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
     })
   );
 
