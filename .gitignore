@@ -52,3 +52,5 @@ build/
 *.log
 .system_generated/
 Tardis/
+.superstack/
+
