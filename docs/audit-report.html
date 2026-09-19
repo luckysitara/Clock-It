@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClockLend — Full-Stack Security &amp; Quality Audit (2026-09-19)</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#c9d1d9; --dim:#8b949e;
+          --crit:#ff4d4d; --high:#ff9f43; --med:#f5d76e; --low:#57c8ff; --ok:#3fb950; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;
+         margin:0; padding:32px 16px; }
+  .wrap { max-width:980px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:19px; margin:34px 0 10px; border-bottom:1px solid var(--border); padding-bottom:6px; }
+  .sub { color:var(--dim); margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:18px 0; }
+  .score { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px; text-align:center; }
+  .score b { display:block; font-size:28px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:10px 0; }
+  .sev { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.6px; padding:2px 8px;
+         border-radius:10px; margin-right:8px; vertical-align:2px; }
+  .crit { background:#3d0f0f; color:var(--crit); border:1px solid #7a1f1f; }
+  .high { background:#3a2a0f; color:var(--high); border:1px solid #7a5a1f; }
+  .med  { background:#33300f; color:var(--med); border:1px solid #6b651f; }
+  .low  { background:#0f2c3a; color:var(--low); border:1px solid #1f5a7a; }
+  .file { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:var(--dim); }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; background:#1f2530;
+         padding:1px 5px; border-radius:4px; }
+  pre { background:#10151d; border:1px solid var(--border); border-radius:8px; padding:12px;
+        overflow-x:auto; font-size:13px; }
+  .fix { border-left:3px solid var(--ok); padding-left:10px; margin:8px 0 0; }
+  .fix b { color:var(--ok); }
+  .good li { margin:4px 0; }
+  .scenario { color:var(--dim); font-style:italic; margin:6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>🔒 ClockLend — Full-Stack Security &amp; Quality Audit</h1>
+<div class="sub">Native Rust Solana program + React Native (Seeker) mobile app · 2026-09-19 · Devnet program <code>HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3</code></div>
+
+<div class="grid">
+  <div class="score"><b style="color:var(--crit)">D−</b>Program security</div>
+  <div class="score"><b style="color:var(--med)">C</b>Program quality</div>
+  <div class="score"><b style="color:var(--crit)">D</b>Mobile security</div>
+  <div class="score"><b style="color:var(--crit)">D</b>Mobile quality</div>
+</div>
+
+<div class="card">
+  <b>Verdict: NOT ready for mainnet.</b> The program has a live collateral-theft vector, permanently
+  frozen funds on every native-SOL exit path, and a release-profile arithmetic-wrap exploit. The mobile
+  app's money layer is largely simulation: the default borrow/repay/P2P/staking flows write Memo
+  instructions (or fail account validation) while the UI reports success and credits balances the chain
+  never verified. 24/24 tests pass, but only <code>InitializePool</code> is exercised through a real
+  runtime — the 13 "security" tests are pure-math unit tests.
+</div>
+
+<h2>1 · Smart Contract — Critical</h2>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>C-1 · Anyone can steal defaulted pool collateral</b>
+  <div class="file">program/src/processor.rs:1364–1516 (process_claim_default, LoanOrder branch)</div>
+  <p>The pool-loan liquidation path performs <b>no caller authorization</b> and <b>no destination
+  validation</b>. Any signer can claim a defaulted loan (after grace expiry) and route 100% of the
+  collateral to <i>any</i> account they pass — including their own. The docs claim "Caller (Pool
+  Authority, LP, or P2P Funder)"; the code checks <code>caller == offer.funder</code> only in the P2P
+  branch. For native SOL it even credits the attacker's lamports directly
+  (<code>destination_collateral_account.try_borrow_mut_lamports()</code>).</p>
+  <div class="scenario">Scenario: borrower misses a repayment → anyone triggers grace (no auth there
+  either) → 24 h later the first caller routes the collateral to their own wallet. The lender (pool)
+  loses the collateral; the protocol earns nothing.</div>
+  <div class="fix"><b>Fix:</b> require <code>*caller.key == pool.authority</code>, require
+  <code>*destination_collateral_account.key == pool.vault_pda</code> (or a caller-owned account with an
+  owner check), and slash/penalize only after validation.</div>
+</div>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>C-2 · Direct lamport debits on non-owned accounts — SOL collateral permanently frozen</b>
+  <div class="file">program/src/processor.rs:1084–1087, 1218–1221, 1400–1405, 1556–1559, 1702–1704, 1736–1741</div>
+  <p>The Solana runtime only allows an account's <b>owner</b> program to debit its lamports
+  (<code>InstructionError::ExternalAccountLamportSpend</code>). Escrow accounts here are never owned by
+  ClockLend: native-SOL escrows are created by <code>SystemProgram.transfer</code> (owner = system
+  program), and SPL escrows are token accounts (owner = token program). Every exit path that does
+  <code>**escrow.try_borrow_mut_lamports() = …</code> therefore <b>reverts at runtime</b>:</p>
+  <ul>
+    <li>Repay of native-SOL-collateral pool loans — fails → borrower cannot repay, ever.</li>
+    <li>Claim default (native SOL, both loan and P2P) — fails → no liquidation possible.</li>
+    <li>P2P repay / cancel (native SOL) — fails.</li>
+    <li>Cancel P2P offer (SPL, lines 1736–1741 drains token-account rent) — fails → <b>unfunded SPL
+    offers can never be cancelled; collateral locked forever</b>.</li>
+  </ul>
+  <div class="scenario">Scenario: a user borrows against 0.5 SOL → tries to repay → tx reverts →
+  collateral stuck in escrow for everyone, including the liquidator.</div>
+  <div class="fix"><b>Fix:</b> for native SOL, CPI <code>system_instruction::transfer(escrow,
+  dest, amt)</code> with <code>invoke_signed</code> using the escrow PDA seeds; for SPL, CPI
+  <code>spl_token::instruction::close_account</code> for rent. Never mutate lamports of foreign-owned
+  accounts directly.</div>
+</div>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>C-3 · Release arithmetic wraps — P2P collateral seizure exploit</b>
+  <div class="file">program/Cargo.toml (no [profile.release]) · processor.rs:673, 886, 1298, 1319</div>
+  <p>Cargo.toml has no <code>[profile.release] overflow-checks = true</code>, so release/SBF builds use
+  <b>wrapping</b> arithmetic. <code>now + duration_seconds</code> can wrap negative. In
+  <code>process_fund_p2p_offer</code> the creator sets <code>duration_seconds</code> (only
+  <code>&lt;= 0</code> is rejected — no upper bound), so a malicious <b>creator or funder</b> picks a
+  huge duration: <code>due_time</code> wraps into the past → grace can be triggered immediately →
+  funder claims the creator's collateral 24 h later while the creator keeps the principal. In pools, a
+  hostile pool authority can set <code>max_duration</code> similarly and trap borrowers.</p>
+  <div class="fix"><b>Fix:</b> add <code>[profile.release] overflow-checks = true</code>; use
+  <code>checked_add</code> for all clock math; cap <code>duration_seconds</code> (e.g. ≤ 365 days).</div>
+</div>
+
+<h2>2 · Smart Contract — High</h2>
+
+<div class="card">
+  <span class="sev high">HIGH</span><b>H-1 · Treasury accounts never validated — all fees caller-routable</b>
+  <div class="file">processor.rs:587–651, 993–1055, 1397–1497 · TREASURY_SEED (state.rs:13) is dead code</div>
+  <p>The 0.25–0.50% origination fee, the 15% interest take-rate, and the 5% liquidation margin are
+  routed to whatever account the caller passes as "treasury". The only checks are
+  <code>treasury.key != borrower.key</code>-style key comparisons. A borrower passes their own second
+  token account → pays zero fees. A liquidator passes their own account → pockets the margin too.
+  The program has no canonical treasury PDA.</p>
+  <div class="fix"><b>Fix:</b> derive and enforce a canonical treasury PDA
+  (<code>[TREASURY_SEED]</code>), validate it in every fee route, and reject any other account.</div>
+</div>
+
+<div class="card">
+  <span class="sev high">HIGH</span><b>H-2 · SKR "reputation bonding" is theater</b>
+  <div class="file">processor.rs:332–426 (process_stake_skr)</div>
+  <p><code>skr_escrow_account</code> is <b>never validated</b> — not against a PDA, owner, or mint — so
+  a user can pass their own second wallet as "escrow" and keep full control of the tokens. No mint
+  check on <code>user_skr_account</code>: <b>any</b> SPL token (e.g. fake airdrops) can be staked to
+  inflate <code>staked_skr</code> and the "verified merchant" status. There is <b>no
+  <code>UnstakeSKR</code> instruction at all</b> — legitimately staked SKR is locked forever. The
+  "slashable default guarantee" only decrements a counter; it never touches tokens.</p>
+  <div class="fix"><b>Fix:</b> validate escrow = program PDA, validate SKR mint from a program config
+  account, add <code>UnstakeSKR</code> (and only then implement slashing against the escrow).</div>
+</div>
+
+<div class="card">
+  <span class="sev high">HIGH</span><b>H-3 · No oracle — the "strict LTV enforcement" compares raw units 1:1</b>
+  <div class="file">processor.rs:474–482</div>
+  <p><code>max_borrow = collateral_amount × max_ltv_bps / 10000</code> compares lamports (1e9/SOL)
+  against USDC micro-units (1e6/USDC) with no price feed and no decimal normalization. 1 SOL
+  (≈$150) of lamports "supports" ≈500 USDC at 50% LTV — an effective LTV of ~330%. The README's
+  headline security claim is meaningless as implemented.</p>
+  <div class="fix"><b>Fix:</b> per-mint decimal/price normalization (oracle, or at minimum a
+  program-owned price table with authority-gated updates).</div>
+</div>
+
+<h2>2b · Smart Contract — Medium / Low</h2>
+<div class="card">
+  <ul>
+    <li><b>M-1</b> Borrow records <code>collateral_mint</code> from the untrusted parameter without
+    cross-checking the escrow token account's actual mint; the escrow token account itself is never
+    validated (owner/authority/mint). A malicious client can record a mint that doesn't match the
+    escrowed asset, breaking repay/liquidation (processor.rs:444, 531–567).</li>
+    <li><b>M-2</b> <code>TriggerGracePeriod</code> requires only any signer (docs say "Borrower or
+    Circle Member") — griefing/early-grace spam (processor.rs:1274–1330).</li>
+    <li><b>M-3</b> <code>FundP2POffer</code> / repay / grace / claim never check
+    <code>is_initialized</code>; a zeroed PDA deserializes as <code>status = Open</code> and is
+    fundable (processor.rs:848).</li>
+    <li><b>M-4</b> Instruction docs for <code>BorrowFromPool</code> don't match the implementation's
+    account order (docs: profile@8; impl: token@8, system@9, profile@10, treasury@11) and the profile
+    account is read but never used (<code>_user_profile_opt</code>) — the "SKR discount" feature is
+    dead code (processor.rs:584).</li>
+    <li><b>L-1</b> <code>interest_due as u64</code> truncation for absurd pool configs
+    (<code>max_duration</code> / <code>interest_rate_bps</code> unbounded at init). Use
+    <code>try_into()</code>.</li>
+    <li><b>L-2</b> Repay accepts <code>repay_amount &gt; total_due</code>; overpayments inflate
+    <code>total_liquidity</code> accounting beyond the vault balance (withdraw self-DoS later).</li>
+    <li><b>L-3</b> <code>#[allow(deprecated)] system_instruction</code> module used (works, but the
+    deprecated API should be migrated).</li>
+  </ul>
+</div>
+
+<h2>3 · Mobile App — Critical</h2>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>MC-1 · Borrow, repay, fund, and stake never touch the real program</b>
+  <div class="file">src/solana/onChainService.ts:790–850, 890–930, 999–1041 · App.tsx:380–455, 486–501</div>
+  <p><code>isPoolLiquid</code> is always false (no pool has liquidity — <code>DepositLiquidity</code>
+  is never built), so <code>buildBorrowTx</code> takes the "Devnet Protocol Liquidity Mode" branch:
+  a <code>SystemProgram.transfer</code> of 100% of the user's SOL collateral to an escrow PDA derived
+  from a <b>random, never-created</b> <code>loanId</code>, plus a Memo. Nothing can ever spend those
+  lamports (no LoanOrder PDA exists for <code>RepayLoan</code>; cancel requires a program-owned offer
+  account). The UI then credits the borrowed USDC, shows "Loan Disbursed on Solana!" and "Received
+  $X USDC" — the USDC is fabricated.</p>
+  <p><code>buildRepayTx</code> with <code>isPoolLiquid=false</code> emits <b>only a Memo</b>; the app
+  deletes the order, returns the displayed collateral, boosts reputation and asserts
+  "Successfully repaid … collateral unlocked from escrow." On-chain, the loan is still Active, interest
+  accrues, and the collateral is liquidated at grace expiry. Same pattern for P2P funding (memo only)
+  and P2P repayment (memo only) — while <code>buildCreateP2POfferTx</code> transfers real SOL to an
+  escrow whose offer PDA was never created, and cancel can never succeed.</p>
+  <div class="fix"><b>Fix:</b> delete the memo branches entirely. Build the real instructions
+  (<code>BorrowFromPool</code>, <code>RepayLoan</code>, <code>FundP2POffer</code>,
+  <code>CreateP2POffer</code>), require a funded pool (or fail loudly), and only update local state
+  after the program account confirms the new state.</div>
+</div>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>MC-2 · LoanOrder parser shifted 32 bytes — garbage shown to users</b>
+  <div class="file">src/solana/onChainService.ts:224–264</div>
+  <p>The Rust <code>LoanOrder</code> is 154 bytes including a <code>pool</code> pubkey at offset 41
+  that the parser skips. Every field after offset 41 is read 32 bytes too early:
+  <code>principalAmount</code> becomes the first 8 bytes of the pool pubkey (≈1e13 "USDC" displayed as
+  "Total to Repay"), and <code>status</code> is read from an interest byte — so loans whose interest
+  LSB happens to equal 2 are silently <b>hidden</b> from the Active Orders list, and others are
+  mislabeled.</p>
+  <div class="fix"><b>Fix:</b> correct offsets — principal@73, mint@81, collateral@113, interest@121,
+  origination@129, due@137, grace@145, status@153.</div>
+</div>
+
+<div class="card">
+  <span class="sev crit">CRITICAL</span><b>MC-3 · Math.random() CSPRNG fallback</b>
+  <div class="file">src/polyfill.ts:35–64</div>
+  <p>If native <code>getRandomValues</code> throws, the polyfill silently falls back to
+  <code>Math.random()</code> (Hermes xorshift128+ — predictable from a few outputs) for
+  <code>tweetnacl.randomBytes</code>, <code>Keypair.generate()</code>, and every web3.js RPC id.
+  Today no keypairs are generated (MWA signs), which is the only thing keeping this from being an
+  immediate key-compromise; the moment a seed/dApp-keypair flow is added it becomes catastrophic.</p>
+  <div class="fix"><b>Fix:</b> never fall back — use <code>expo-crypto</code> and
+  <code>throw new Error('CSPRNG unavailable')</code>.</div>
+</div>
+
+<h2>4 · Mobile App — High</h2>
+<div class="card">
+  <ul>
+    <li><b>H-1</b> <code>UserProfile</code> length check 75 vs actual 51 → never matches → every user
+    is a hardcoded fake "Diamond" whale (stakedSkr 500, 12 loans, 9,850 rep, 50% APR discount) and the
+    borrow screen advertises <b>half the real loan cost</b> (onChainService.ts:496–548,
+    P2PExpressView.tsx:56).</li>
+    <li><b>H-2</b> <code>StakeSKR</code> account list is missing the optional pool slot →
+    every account shifts by one → <code>assert_system_program</code> fails → the signature
+    reputation-bond feature has <b>never worked on-chain</b> (onChainService.ts:1192–1205 vs
+    processor.rs:333–346).</li>
+    <li><b>H-3</b> Preview Mode builds a session for the developer's hardcoded devnet address
+    <code>BEmX1nfe…c3re</code> with "✓ SEED VAULT / Seeker Genesis Verified" shown to the user
+    (ConnectWalletView.tsx:39–49). <code>hasSeekerGenesisToken: … || true</code> makes the hardware
+    attestation claim unconditionally true for every wallet (onChainService.ts:749,
+    WalletAssetsModal.tsx:388–403, seekerWallet.ts:164–175).</li>
+    <li><b>H-4</b> Lock screen: PIN stored in plaintext, no hashing, no attempt counter/backoff, and
+    <b>fail-open</b> — a SecureStore read error switches the lock to setup mode where any new PIN is
+    accepted (securityService.ts:26–41, SecurityLockScreen.tsx:60–64, 128–138). Brute-force a 4-digit
+    PIN in minutes with the device in hand.</li>
+    <li><b>H-5</b> TARDIS deep link: unvalidated on-chain pool <code>name</code> bytes interpolated
+    into <code>Linking.openURL('tardisapp://community/' + pool.name)</code> — deep-link parameter
+    injection into a third-party app (MerchantDesksView.tsx:293, tardisIntegration.ts:114–121).</li>
+    <li><b>H-6</b> Fake P2P offers shipped as production initial state with working "Fund &amp; Earn"
+    buttons that "succeed" via memo (App.tsx:55–95).</li>
+  </ul>
+</div>
+
+<h2>5 · Mobile App — Medium / Low (selected)</h2>
+<div class="card">
+  <ul>
+    <li>Reputation math breaks the score scale: <code>Math.min(100, …)</code> on a 0–10000 field → a
+    9,850 score becomes 100 (displays "1.0%") after one repay (App.tsx:524, 714, 788, 1017).</li>
+    <li>The user's selected loan term (3/7/14/30 days) is silently discarded; borrow always creates a
+    7-day loan while the UI shows the chosen term's interest (App.tsx:382–391,
+    P2PExpressView.tsx:83–88).</li>
+    <li>"24h grace started on-chain" — <code>TriggerGracePeriod</code> is never built; only local
+    state flips (App.tsx:1191–1205).</li>
+    <li>Pool <code>id</code> is a list index, not the on-chain <code>pool_id</code>; PDA derivation
+    breaks for any pool beyond the two seeded ones (onChainService.ts:180–195).</li>
+    <li>No in-flight/double-tap guards on repay, fund, stake, cancel — staking fires a wallet flow
+    with no confirmation and no balance check (CreditProfileView.tsx:129–138).</li>
+    <li>Android: no <code>clocklend://</code> scheme intent-filter in the manifest — the deep-link
+    handler in App.tsx can never fire as committed. (Note: the Android hardening claims in the README
+    <i>are</i> substantiated — <code>allowBackup="false"</code>, <code>usesCleartextTraffic="false"</code>,
+    <code>FLAG_SECURE</code> in MainActivity, and a real <code>SecurityIntegrity.kt</code> module
+    exist.)</li>
+    <li><code>MAINNET_RPCS[0]</code> is the wrong hostname; every mainnet read burns a failed request
+    first.</li>
+    <li>Loan/offer ids from <code>Math.floor(1000 + Math.random()*9000)</code> — collisions hit
+    <code>LoanAlreadyActive</code> with no retry.</li>
+    <li>Theme always starts light despite <code>userInterfaceStyle: "dark"</code>
+    (ThemeContext.tsx:86).</li>
+  </ul>
+</div>
+
+<h2>6 · What's done right</h2>
+<div class="card good">
+  <ul>
+    <li><b>Key hygiene (mobile):</b> no seed/mnemonic/key material anywhere in <code>src/</code>
+    (grep-verified), no AsyncStorage, nothing sensitive logged; all signing goes through MWA/Seed
+    Vault with proper <code>APP_IDENTITY</code> and a reauthorize fallback.</li>
+    <li><b>PDA seed derivations match the program exactly</b> (all 7 seeds, u64 LE encoding, bump
+    handling), and the P2POffer/LendingPool parsers match the Rust layouts byte-for-byte.</li>
+    <li><b>Lamport math is done properly</b> where it's done: <code>Math.round(x*1e6)</code> +
+    explicit <code>writeU64LE</code> — no float truncation.</li>
+    <li><b>Program foundations:</b> consistent PDA validation via <code>find_program_address</code>,
+    owner checks on state accounts, token/system program ID checks, checked math in most accounting
+    paths, checks-effects-interactions ordering, and a solid <code>create_or_allocate_pda</code>
+    front-run-injection defense.</li>
+    <li><b>P2P claim default is properly authorized</b> (funder-only + destination owner check) —
+    the pattern the pool-loan path should copy.</li>
+    <li><b>Defensive mobile patterns:</b> try/catch on every RPC/sign path, cancellation mapped to
+    friendly copy, chain-first/cache-fallback data loading, SNS lookup timeouts,
+    <code>Promise.allSettled</code> parallel loads, devnet-only guard for mainnet.</li>
+  </ul>
+</div>
+
+<h2>7 · Recommended fix order</h2>
+<div class="card">
+  <ol>
+    <li>C-1 + C-2 + C-3 (program): authorization, lamport CPIs, overflow checks — the three live
+    exploits/fund-freezes.</li>
+    <li>H-1 (program): canonical treasury PDA + validated fee routing.</li>
+    <li>MC-1 (mobile): delete memo paths; wire real instructions end-to-end; chain-verified state
+    only.</li>
+    <li>MC-2 + H-2 (mobile): fix LoanOrder offsets, UserProfile length, StakeSKR account order.</li>
+    <li>H-2 (program): SKR mint validation + UnstakeSKR.</li>
+    <li>H-3 (program): per-mint price/decimal normalization for LTV.</li>
+    <li>Mobile: CSPRNG fallback, lock-screen hardening, Preview Mode removal, deep-link encoding,
+    double-tap guards.</li>
+    <li>ProgramTest integration coverage for borrow/repay/claim/cancel/stake/grace.</li>
+  </ol>
+</div>
+
+<div class="sub" style="margin-top:26px">ClockLend audit · smart contract (1,760-line processor, 6 modules, 24 tests) + mobile (App.tsx 1,436 lines, 17 src files) · every finding verified against source · report artifact of the review-and-iterate skill run</div>
+</div>
+</body>
+</html>
