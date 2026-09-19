@@ -1,3 +1,4 @@
+import { NativeModules, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 
@@ -86,3 +87,64 @@ export async function authenticateWithBiometrics(
     return false;
   }
 }
+
+const { ClockLendSecurity } = NativeModules;
+
+export interface DeviceIntegrityResult {
+  isEmulator: boolean;
+  isRooted: boolean;
+  isHooking: boolean;
+  isDebugger: boolean;
+  isSecure: boolean;
+  violationReason?: string;
+}
+
+export async function checkDeviceIntegrity(): Promise<DeviceIntegrityResult> {
+  if (Platform.OS !== 'android' || !ClockLendSecurity) {
+    return {
+      isEmulator: false,
+      isRooted: false,
+      isHooking: false,
+      isDebugger: false,
+      isSecure: true,
+    };
+  }
+
+  try {
+    const status = await ClockLendSecurity.getIntegrityStatus();
+    let violationReason: string | undefined;
+    if (status.isEmulator) {
+      violationReason = 'Virtualized Environment (Simulator / Emulator) Detected';
+    } else if (status.isRooted) {
+      violationReason = 'Compromised Operating System (Root / Jailbreak) Detected';
+    } else if (status.isHooking) {
+      violationReason = 'Dynamic Instrumentation (Frida / Hooking) Detected';
+    } else if (status.isDebugger) {
+      violationReason = 'Unauthorized Debugger Attached';
+    }
+
+    return {
+      isEmulator: !!status.isEmulator,
+      isRooted: !!status.isRooted,
+      isHooking: !!status.isHooking,
+      isDebugger: !!status.isDebugger,
+      isSecure: !status.isEmulator && !status.isRooted && !status.isHooking && !status.isDebugger,
+      violationReason,
+    };
+  } catch (err) {
+    return {
+      isEmulator: false,
+      isRooted: false,
+      isHooking: false,
+      isDebugger: false,
+      isSecure: true,
+    };
+  }
+}
+
+export function terminateApplication(): void {
+  if (Platform.OS === 'android' && ClockLendSecurity?.terminateApp) {
+    ClockLendSecurity.terminateApp();
+  }
+}
+

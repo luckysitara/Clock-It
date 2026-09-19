@@ -24,7 +24,8 @@ import { WalletAssetsModal } from './src/components/WalletAssetsModal';
 import { TransactionNoticeModal, TransactionNoticeData } from './src/components/TransactionNoticeModal';
 import { SplashScreenView } from './src/components/SplashScreenView';
 import { SecurityLockScreen, LockScreenMode } from './src/components/SecurityLockScreen';
-import { isLockEnabled } from './src/services/securityService';
+import { SecurityLockdownView } from './src/components/SecurityLockdownView';
+import { isLockEnabled, checkDeviceIntegrity, DeviceIntegrityResult } from './src/services/securityService';
 import {
   fetchLivePools,
   fetchLiveUserOrders,
@@ -105,13 +106,17 @@ function MainApp() {
   const [selectedNetwork, setSelectedNetwork] = useState<SolanaNetwork>('devnet');
   const [activeTab, setActiveTab] = useState<Tab>('BORROW');
   const [transactionNotice, setTransactionNotice] = useState<TransactionNoticeData | null>(null);
+  const [integrity, setIntegrity] = useState<DeviceIntegrityResult | null>(null);
 
-  // Auto-lock on app launch and background resume
+  // Auto-lock and hardware integrity check on app launch and background resume
   useEffect(() => {
     checkInitialLock();
+    checkDeviceIntegrity().then((res) => setIntegrity(res));
+
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
         checkAppResumeLock();
+        checkDeviceIntegrity().then((res) => setIntegrity(res));
       }
     });
     return () => sub.remove();
@@ -1071,6 +1076,11 @@ function MainApp() {
       });
     }
   };
+
+  // 0. Hardware & Environment Integrity Lockdown (Anti-Emulator, Anti-Root, Anti-Frida)
+  if (integrity && !integrity.isSecure) {
+    return <SecurityLockdownView integrity={integrity} />;
+  }
 
   // 1. Splash Screen
   if (showSplash) {
