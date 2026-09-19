@@ -137,3 +137,48 @@ fn test_instruction_serialization() {
         ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
     assert_eq!(ix, deserialized);
 }
+
+#[test]
+fn test_withdraw_liquidity_instruction_serialization() {
+    let ix = ClockLendInstruction::WithdrawLiquidity {
+        amount: 50_000_000_000,
+    };
+
+    let serialized = borsh::to_vec(&ix).expect("Serialization failed");
+    let deserialized =
+        ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
+    assert_eq!(ix, deserialized);
+}
+
+#[test]
+fn test_institutional_pool_type_serialization() {
+    let mut name = [0u8; 32];
+    let name_bytes = b"Tokyo Whale Institutional Desk";
+    name[..name_bytes.len()].copy_from_slice(name_bytes);
+
+    let pool = LendingPool {
+        is_initialized: true,
+        pool_type: PoolType::Institutional,
+        authority: Pubkey::new_unique(),
+        liquidity_mint: Pubkey::new_unique(),
+        vault_pda: Pubkey::new_unique(),
+        total_liquidity: 500_000_000_000, // 500k USDC
+        total_borrowed: 120_000_000_000,
+        staked_skr_amount: 50_000_000_000,
+        interest_rate_bps: 350, // 3.5% institutional APR
+        max_ltv_bps: 8500,
+        min_duration: 86400 * 7,
+        max_duration: 86400 * 90,
+        loans_originated: 45,
+        loans_repaid: 45,
+        name,
+    };
+
+    let mut buffer = [0u8; LendingPool::LEN];
+    pool.pack_into_slice(&mut buffer).expect("Pack failed");
+
+    let unpacked = LendingPool::unpack_from_slice(&buffer).expect("Unpack failed");
+    assert_eq!(unpacked.pool_type, PoolType::Institutional);
+    assert_eq!(unpacked.total_liquidity, 500_000_000_000);
+    assert_eq!(unpacked.interest_rate_bps, 350);
+}

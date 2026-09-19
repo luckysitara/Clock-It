@@ -52,6 +52,8 @@ pub enum ClockLendError {
     LoanAlreadyActive,
     #[error("Unauthorized Caller (Must be Pool Authority, Funder, or Borrower)")]
     UnauthorizedCaller,
+    #[error("Invalid Treasury Account")]
+    InvalidTreasuryAccount,
 }
 
 impl From<ClockLendError> for ProgramError {

@@ -10,11 +10,13 @@ pub const LOAN_SEED: &[u8] = b"loan";
 pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const P2P_SEED: &[u8] = b"p2p_offer";
 pub const PROFILE_SEED: &[u8] = b"profile";
+pub const TREASURY_SEED: &[u8] = b"treasury";
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]
 pub enum PoolType {
     Individual,
     Circle,
+    Institutional,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]

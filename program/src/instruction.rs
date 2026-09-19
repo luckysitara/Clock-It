@@ -128,4 +128,15 @@ pub enum ClockLendInstruction {
     /// 5. `[]` Token Program
     /// 6. `[]` Clock Sysvar
     ClaimDefault,
+
+    /// 9. Withdraw liquidity from pool vault (Pool Authority only)
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` LendingPool PDA
+    /// 2. `[writable]` Vault PDA
+    /// 3. `[writable]` Authority Token Account
+    /// 4. `[]` Token Program
+    WithdrawLiquidity {
+        amount: u64,
+    },
 }

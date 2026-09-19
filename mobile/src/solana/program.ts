@@ -10,6 +10,7 @@ export const LOAN_SEED = Buffer.from('loan');
 export const ESCROW_SEED = Buffer.from('escrow');
 export const P2P_SEED = Buffer.from('p2p_offer');
 export const PROFILE_SEED = Buffer.from('profile');
+export const TREASURY_SEED = Buffer.from('treasury');
 
 export function writeU64LE(val: number | bigint): Buffer {
   const buf = Buffer.alloc(8);
@@ -44,6 +45,10 @@ export function getProfilePDA(user: PublicKey): [PublicKey, number] {
 export function getP2POfferPDA(creator: PublicKey, offerId: number): [PublicKey, number] {
   const buf = writeU64LE(offerId);
   return PublicKey.findProgramAddressSync([P2P_SEED, creator.toBuffer(), buf], PROGRAM_ID);
+}
+
+export function getTreasuryPDA(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([TREASURY_SEED], PROGRAM_ID);
 }
 
 export const connection = new Connection(DEVNET_RPC, 'confirmed');

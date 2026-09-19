@@ -1,4 +1,4 @@
-export type PoolType = 'Individual' | 'Circle';
+export type PoolType = 'Individual' | 'Circle' | 'Institutional';
 
 export type LoanStatus = 'Active' | 'InGracePeriod' | 'Repaid' | 'Defaulted';
 

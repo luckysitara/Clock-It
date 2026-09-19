@@ -22,6 +22,7 @@ import {
   getP2POfferPDA,
 } from './program';
 import {
+  PoolType,
   LendingPool,
   LoanOrder,
   P2POffer,
@@ -118,7 +119,8 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
   const isInitialized = data.readUInt8(0) === 1;
   if (!isInitialized) return null;
 
-  const poolType = data.readUInt8(1) === 1 ? 'Circle' : 'Individual';
+  const poolTypeByte = data.readUInt8(1);
+  const poolType: PoolType = poolTypeByte === 2 ? 'Institutional' : poolTypeByte === 1 ? 'Circle' : 'Individual';
   const authority = new PublicKey(data.subarray(2, 34)).toBase58();
   const liquidityMint = new PublicKey(data.subarray(34, 66)).toBase58();
   const totalLiquidity = Number(data.readBigUInt64LE(98));
@@ -150,7 +152,7 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
     loansOriginated,
     loansRepaid,
     successRate: parseFloat(successRate.toFixed(1)),
-    isVerifiedMerchant: stakedSkrAmount > 0 || poolType === 'Circle',
+    isVerifiedMerchant: stakedSkrAmount > 0 || poolType === 'Circle' || poolType === 'Institutional',
   };
 }
 
@@ -874,6 +876,41 @@ export async function buildRepayTx(
       })
     );
   }
+
+  return tx;
+}
+
+// Build Withdraw Liquidity Transaction instruction (Pool Authority only)
+export async function buildWithdrawLiquidityTx(
+  authority: PublicKey,
+  poolId: number,
+  amountUsdc: number,
+  authorityTokenAccount: PublicKey
+): Promise<Transaction> {
+  const [poolPDA] = getPoolPDA(authority, poolId);
+  const [vaultPDA] = getVaultPDA(poolPDA);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // Layout: 1 byte tag (9) + 8 bytes amount = 9 bytes
+  const data = Buffer.alloc(9);
+  data.writeUInt8(9, 0); // Instruction 9: WithdrawLiquidity
+  writeU64LE(BigInt(Math.round(amountUsdc * 1_000_000))).copy(data, 1);
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: poolPDA, isSigner: false, isWritable: true },
+      { pubkey: vaultPDA, isSigner: false, isWritable: true },
+      { pubkey: authorityTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
 
   return tx;
 }
