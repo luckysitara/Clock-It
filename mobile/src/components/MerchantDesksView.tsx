@@ -98,9 +98,9 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
 
   // New pawn modal
   const [pawnModal, setPawnModal] = useState<boolean>(false);
-  const [assetName, setAssetName] = useState<string>('0.5 SOL');
-  const [reqAmount, setReqAmount] = useState<string>('50');
-  const [profitAmount, setProfitAmount] = useState<string>('5');
+  const [assetName, setAssetName] = useState<string>('1,000 SKR');
+  const [reqAmount, setReqAmount] = useState<string>('20');
+  const [profitAmount, setProfitAmount] = useState<string>('2');
   const [duration, setDuration] = useState<string>('7');
 
   // Pawn filtering: All, My Pawns, Funded by Me, Completed
@@ -903,11 +903,11 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                 style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
                 value={assetName}
                 onChangeText={setAssetName}
-                placeholder="e.g. 0.5 SOL or 500 SKR"
+                placeholder="e.g. 1,000 SKR or 0.5 SOL"
                 placeholderTextColor={colors.textMuted}
               />
               <View style={styles.quickChipsRow}>
-                {['0.5 SOL', '1.0 SOL', '500 SKR', 'Saga Monke NFT'].map((preset) => (
+                {['1,000 SKR', '2,500 SKR', '500 SKR', '0.5 SOL'].map((preset) => (
                   <TouchableOpacity
                     key={preset}
                     style={[
@@ -917,18 +917,18 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                     ]}
                     onPress={() => {
                       setAssetName(preset);
-                      if (preset === '0.5 SOL') {
+                      if (preset === '1,000 SKR') {
+                        setReqAmount('20');
+                        setProfitAmount('2');
+                      } else if (preset === '2,500 SKR') {
                         setReqAmount('50');
                         setProfitAmount('5');
-                      } else if (preset === '1.0 SOL') {
-                        setReqAmount('100');
-                        setProfitAmount('9');
                       } else if (preset === '500 SKR') {
                         setReqAmount('10');
-                        setProfitAmount('1.5');
-                      } else {
-                        setReqAmount('150');
-                        setProfitAmount('12');
+                        setProfitAmount('1');
+                      } else if (preset === '0.5 SOL') {
+                        setReqAmount('50');
+                        setProfitAmount('5');
                       }
                     }}
                   >

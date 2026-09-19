@@ -40,6 +40,8 @@ import {
   buildCancelPawnOfferTx,
   buildCreatePoolTx,
   buildStakeSkrTx,
+  getCachedOrders,
+  setCachedOrders,
 } from './src/solana/onChainService';
 import {
   signAndSendSeekerTransaction,
@@ -270,11 +272,11 @@ function MainApp() {
       if (liveOrders.status === 'fulfilled') {
         if (net === 'devnet') {
           const onChainOrders = liveOrders.value;
-          const onChainIds = new Set(onChainOrders.map((o) => o.id));
-          const sessionActive = devnetOrdersRef.current.filter((o) => !onChainIds.has(o.id));
-          const combined = [...onChainOrders, ...sessionActive];
-          devnetOrdersRef.current = combined;
-          setOrders(combined);
+          devnetOrdersRef.current = onChainOrders;
+          setOrders(onChainOrders);
+          await setCachedOrders(userPubkey.toBase58(), onChainOrders);
+          // Recalculate assets with final verified on-chain orders
+          await refreshWalletAssets(userPubkey, net);
         } else {
           setOrders([]);
         }
@@ -286,11 +288,24 @@ function MainApp() {
     }
   };
 
-  // When wallet connects or network changes, trigger instant asset query and parallel protocol fetch
+  // When wallet connects or network changes, trigger instant cache hydration, asset query, and parallel protocol fetch
   useEffect(() => {
     if (session?.publicKey) {
-      refreshWalletAssets(session.publicKey, selectedNetwork);
-      loadProtocolData(session.publicKey, session.skrHandle, selectedNetwork);
+      const pubkey = session.publicKey;
+      const pubkeyStr = pubkey.toBase58();
+
+      // 1. Fast 0ms local hybrid cache hydration
+      getCachedOrders(pubkeyStr).then((cached) => {
+        if (cached && cached.length > 0) {
+          devnetOrdersRef.current = cached;
+          setOrders(cached);
+        }
+        // 2. Query wallet assets (incorporating activeBorrowAmount immediately)
+        refreshWalletAssets(pubkey, selectedNetwork);
+      });
+
+      // 3. Concurrently pull ground-truth blockchain state from Solana Devnet
+      loadProtocolData(pubkey, session.skrHandle, selectedNetwork);
     }
   }, [session?.publicKey, selectedNetwork]);
 
@@ -405,6 +420,7 @@ function MainApp() {
 
       devnetOrdersRef.current = [newOrder, ...devnetOrdersRef.current.filter((o) => o.id !== loanId)];
       setOrders(devnetOrdersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
 
       // 3. Update wallet assets (credit borrowed USDC, deduct locked collateral)
       setWalletAssets((prev) => {
@@ -482,6 +498,7 @@ function MainApp() {
       // Remove / mark order as repaid
       devnetOrdersRef.current = devnetOrdersRef.current.filter((o) => o.id !== order.id);
       setOrders(devnetOrdersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
 
       // Return collateral to wallet and deduct repaid USDC
       setWalletAssets((prev) => {
@@ -1176,6 +1193,9 @@ function MainApp() {
                 o.id === orderId ? { ...o, status: 'InGracePeriod' } : o
               );
               setOrders(devnetOrdersRef.current);
+              if (session?.publicKey) {
+                setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+              }
               setTransactionNotice({
                 type: 'grace',
                 title: 'Social Grace Activated',

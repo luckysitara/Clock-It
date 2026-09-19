@@ -136,8 +136,8 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
           <Text style={[styles.sectionHeading, { color: colors.textMuted }]}>SUPPORTED ASSETS</Text>
           <View style={styles.collateralPillsRow}>
             {[
+              { symbol: 'SKR', name: 'Seeker (Primary)' },
               { symbol: 'SOL', name: 'Solana' },
-              { symbol: 'SKR', name: 'Seeker Bond' },
               { symbol: 'cNFT', name: 'Compressed' },
               { symbol: 'USDC', name: 'Liquidity' },
             ].map((token) => (

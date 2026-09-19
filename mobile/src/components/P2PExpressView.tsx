@@ -25,7 +25,7 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
 }) => {
   const { colors, mode } = useTheme();
   const [amountStr, setAmountStr] = useState<string>('50');
-  const [collateralType, setCollateralType] = useState<'SOL' | 'SKR'>('SOL');
+  const [collateralType, setCollateralType] = useState<'SOL' | 'SKR'>('SKR');
   const [durationDays, setDurationDays] = useState<number>(7);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -44,7 +44,10 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
   const skrPrice = skrHolding && skrHolding.amount > 0 ? skrHolding.usdValue / skrHolding.amount : 0.0192;
   const collateralPrice = collateralType === 'SOL' ? solPrice : skrPrice;
   const ltv = (bestPool ? bestPool.maxLtvBps : 8500) / 10000;
-  const requiredCollateralUnits = numAmount > 0 ? (numAmount / ltv) / collateralPrice : 0;
+  const rawCollateral = numAmount > 0 ? (numAmount / ltv) / collateralPrice : 0;
+  const requiredCollateralUnits = collateralType === 'SOL'
+    ? rawCollateral
+    : Math.ceil(rawCollateral);
 
   const userBalance = collateralType === 'SOL' ? solBalance : skrBalance;
   const isInsufficientCollateral = requiredCollateralUnits > userBalance;
@@ -74,9 +77,12 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
 
     setIsSubmitting(true);
     try {
+      const collUnits = collateralType === 'SOL'
+        ? parseFloat(requiredCollateralUnits.toFixed(3))
+        : Math.ceil(requiredCollateralUnits);
       await onBorrow(
         numAmount,
-        parseFloat(requiredCollateralUnits.toFixed(collateralType === 'SOL' ? 3 : 0)),
+        collUnits,
         collateralType,
         bestPool
       );
@@ -164,16 +170,16 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
         <View style={styles.collateralTabs}>
           {[
             {
+              id: 'SKR' as const,
+              label: 'SKR (Default)',
+              logo: SKR_LOGO,
+              sub: `${skrBalance > 1000 ? (skrBalance / 1000).toFixed(1) + 'k' : skrBalance.toFixed(0)} avail`,
+            },
+            {
               id: 'SOL' as const,
               label: 'SOL',
               logo: SOL_LOGO,
               sub: `${solBalance.toFixed(2)} avail`,
-            },
-            {
-              id: 'SKR' as const,
-              label: 'SKR Token',
-              logo: SKR_LOGO,
-              sub: `${skrBalance > 1000 ? (skrBalance / 1000).toFixed(1) + 'k' : skrBalance.toFixed(0)} avail`,
             },
           ].map((item) => (
             <TouchableOpacity
@@ -235,7 +241,7 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
           </View>
         </View>
 
-        {/* Insufficient balance warning + quick airdrop button */}
+        {/* Insufficient balance warning + quick airdrop/fallback button */}
         {isInsufficientCollateral && (
           <View
             style={[
@@ -248,6 +254,15 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
                 Need {requiredCollateralUnits.toFixed(collateralType === 'SOL' ? 2 : 0)} {collateralType}, you hold {userBalance.toFixed(collateralType === 'SOL' ? 2 : 0)} {collateralType}
               </Text>
             </View>
+            {collateralType === 'SKR' && (
+              <TouchableOpacity
+                style={[styles.airdropBtn, { backgroundColor: colors.primary }]}
+                onPress={() => setCollateralType('SOL')}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.airdropBtnText, { color: colors.primaryText }]}>Use SOL Instead</Text>
+              </TouchableOpacity>
+            )}
             {collateralType === 'SOL' && onRequestAirdrop && (
               <TouchableOpacity
                 style={[styles.airdropBtn, { backgroundColor: colors.primary }]}
@@ -333,7 +348,7 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
         ) : (
           <Text style={[styles.borrowButtonText, { color: colors.primaryText }]}>
             {isInsufficientCollateral
-              ? 'Insufficient SOL Collateral'
+              ? `Insufficient ${collateralType} Collateral`
               : `⚡ Instant Borrow $${numAmount > 0 ? numAmount : 0} USDC`}
           </Text>
         )}

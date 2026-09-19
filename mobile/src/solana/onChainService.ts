@@ -9,6 +9,7 @@ import {
   ComputeBudgetProgram,
 } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import * as SecureStore from 'expo-secure-store';
 import {
   PROGRAM_ID,
   DEVNET_RPC,
@@ -80,6 +81,28 @@ export async function queryRpcWithFallback<T>(
   }
 
   throw lastError || new Error(`All RPC endpoints failed for ${network}`);
+}
+
+// Local hybrid cache for persistent loan orders
+export async function getCachedOrders(borrowerPubkey: string): Promise<LoanOrder[]> {
+  try {
+    const raw = await SecureStore.getItemAsync(`clocklend_orders_${borrowerPubkey}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn('Error reading cached orders:', err);
+  }
+  return [];
+}
+
+export async function setCachedOrders(borrowerPubkey: string, orders: LoanOrder[]): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(`clocklend_orders_${borrowerPubkey}`, JSON.stringify(orders));
+  } catch (err) {
+    console.warn('Error saving cached orders:', err);
+  }
 }
 
 // Helper to decode null-terminated on-chain string from 32-byte array
@@ -167,12 +190,22 @@ export async function fetchLivePools(): Promise<LendingPool[]> {
   return Array.from(poolsMap.values());
 }
 
-// Fetch live user loan orders directly from Devnet contract
+// Fetch live user loan orders directly from Solana Devnet contract & on-chain state
 export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrder[]> {
+  const borrowerPubkey = borrower.toBase58();
+  const cachedOrders = await getCachedOrders(borrowerPubkey);
+  const cachedBySig = new Map<string, LoanOrder>();
+  const cachedById = new Map<number, LoanOrder>();
+  for (const co of cachedOrders) {
+    if (co.txSignature) cachedBySig.set(co.txSignature, co);
+    cachedById.set(co.id, co);
+  }
+
+  const ordersMap = new Map<number, LoanOrder>();
+
+  // 1. Scan on-chain PDA accounts first (for liquid pool PDA loans)
   try {
     const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
-    const orders: LoanOrder[] = [];
-
     for (const acc of accounts) {
       if (acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
@@ -197,11 +230,14 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
         else if (statusByte === 2) status = 'Repaid';
         else if (statusByte === 3) status = 'Defaulted';
 
-        orders.push({
-          id: orders.length + 1,
+        if (status === 'Repaid') continue;
+
+        const id = ordersMap.size + 1000;
+        ordersMap.set(id, {
+          id,
           poolId,
           poolName: poolId === 1 ? 'Seeker Genesis Circle' : 'Tokyo Whale Desk',
-          borrower: borrower.toBase58(),
+          borrower: borrowerPubkey,
           principalAmount,
           collateralName: `${collateralAmount.toFixed(2)} SOL`,
           collateralMint,
@@ -214,12 +250,169 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
         });
       }
     }
-
-    return orders;
   } catch (err) {
-    console.warn('Error querying user orders:', err);
-    return [];
+    console.warn('Program account query notice:', err);
   }
+
+  // 2. Scan Solana Devnet blockchain transactions & memos for ground-truth borrow/repay history
+  try {
+    const signatures = await devnetConnection.getSignaturesForAddress(borrower, { limit: 60 });
+    const memos = signatures
+      .filter((s) => Boolean(s.memo))
+      .map((s) => ({
+        time: s.blockTime || Math.floor(Date.now() / 1000),
+        memo: s.memo!.replace(/^\[\d+\]\s*/, '').trim(),
+        sig: s.signature,
+      }));
+
+    // Sort chronologically from oldest to newest to pair repayments with borrows accurately
+    memos.sort((a, b) => a.time - b.time);
+
+    interface OpenBorrowCandidate {
+      id: number;
+      principal: number;
+      collateral: string;
+      poolId: number;
+      time: number;
+      sig: string;
+    }
+    const openCandidates: OpenBorrowCandidate[] = [];
+
+    for (const m of memos) {
+      // Check for borrow memo with explicit Order/Loan ID
+      const borrowWithId = m.memo.match(
+        /ClockLend:\s*Borrow\s*#?(\d+)\s*\$?([\d.]+)\s*USDC.*?Collateral:\s*([^\s|]+(?:\s+[^\s|]+)?)\s*(?:locked)?.*?Pool\s*#(\d+)/i
+      );
+      // Check for borrow memo without explicit ID (legacy format)
+      const borrowLegacy = !borrowWithId
+        ? m.memo.match(
+            /ClockLend:\s*Borrow\s*\$?([\d.]+)\s*USDC.*?Collateral:\s*([^\s|]+(?:\s+[^\s|]+)?)\s*(?:locked)?.*?Pool\s*#(\d+)/i
+          )
+        : null;
+
+      if (borrowWithId || borrowLegacy) {
+        let orderId = 0;
+        let principal = 0;
+        let collateral = '';
+        let poolId = 1;
+
+        if (borrowWithId) {
+          orderId = parseInt(borrowWithId[1]);
+          principal = parseFloat(borrowWithId[2]);
+          collateral = borrowWithId[3].trim();
+          poolId = parseInt(borrowWithId[4]);
+        } else if (borrowLegacy) {
+          principal = parseFloat(borrowLegacy[1]);
+          collateral = borrowLegacy[2].trim();
+          poolId = parseInt(borrowLegacy[3]);
+
+          // Check if already in cache for this signature
+          const cached = cachedBySig.get(m.sig);
+          if (cached) {
+            orderId = cached.id;
+          } else {
+            const digits = m.sig.replace(/\D/g, '');
+            orderId = parseInt(digits.slice(-4)) || Math.floor(1000 + Math.random() * 9000);
+          }
+        }
+
+        openCandidates.push({
+          id: orderId,
+          principal,
+          collateral,
+          poolId,
+          time: m.time,
+          sig: m.sig,
+        });
+        continue;
+      }
+
+      // Check for repay memo
+      const repayMatch = m.memo.match(/ClockLend:\s*Repay.*?Order\s*#?(\d+)\s*Closed/i);
+      if (repayMatch) {
+        const closedId = parseInt(repayMatch[1]);
+        const exactIdx = openCandidates.findIndex((b) => b.id === closedId);
+        if (exactIdx !== -1) {
+          openCandidates.splice(exactIdx, 1);
+        } else {
+          // Pair with the most recent open candidate prior to this repay
+          const priorCandidates = openCandidates.filter((b) => b.time <= m.time);
+          if (priorCandidates.length > 0) {
+            const lastCandidate = priorCandidates[priorCandidates.length - 1];
+            const idx = openCandidates.indexOf(lastCandidate);
+            if (idx !== -1) openCandidates.splice(idx, 1);
+          }
+        }
+      }
+    }
+
+    // Convert open candidates into LoanOrder records
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const cand of openCandidates) {
+      // If locally marked repaid, skip
+      const cached = cachedById.get(cand.id) || cachedBySig.get(cand.sig);
+      if (cached && cached.status === 'Repaid') continue;
+
+      const dueTime = cand.time + 7 * 86400;
+      let status: LoanStatus = 'Active';
+      let gracePeriodExpires = 0;
+      if (nowSec > dueTime) {
+        status = 'InGracePeriod';
+        gracePeriodExpires = dueTime + 86400;
+      } else if (cached?.status === 'InGracePeriod') {
+        status = 'InGracePeriod';
+        gracePeriodExpires = cached.gracePeriodExpires || (dueTime + 86400);
+      }
+
+      const isSol = cand.collateral.toUpperCase().includes('SOL');
+      const collUnits = parseFloat(cand.collateral) || 0;
+      const collateralMint = isSol
+        ? 'So11111111111111111111111111111111111111112'
+        : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3';
+
+      const interestDue = parseFloat((cand.principal * 0.035 * (7 / 365)).toFixed(2));
+      const poolAuth = cand.poolId === 1 ? 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re' : '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1';
+      const [poolPDA] = getPoolPDA(new PublicKey(poolAuth), cand.poolId);
+      const [loanPDA] = getLoanPDA(poolPDA, borrower, cand.id);
+      const [escrowPDA] = getEscrowPDA(loanPDA);
+
+      ordersMap.set(cand.id, {
+        id: cand.id,
+        poolId: cand.poolId,
+        poolName: cand.poolId === 1 ? 'Seeker Genesis Circle' : 'Tokyo Whale Desk',
+        borrower: borrowerPubkey,
+        principalAmount: cand.principal,
+        collateralName: cand.collateral.includes(' ') ? cand.collateral : `${cand.collateral} ${isSol ? 'SOL' : 'SKR'}`,
+        collateralMint,
+        collateralAmount: collUnits,
+        interestDue,
+        originationTime: cand.time,
+        dueTime,
+        gracePeriodExpires,
+        status,
+        txSignature: cand.sig,
+        escrowAddress: escrowPDA.toBase58(),
+        solscanUrl: `https://solscan.io/tx/${cand.sig}?cluster=devnet`,
+      });
+    }
+  } catch (sigErr) {
+    console.warn('Devnet signature scan notice:', sigErr);
+  }
+
+  // 3. Fallback: if blockchain was temporarily unreachable or slow, keep active cached orders
+  if (ordersMap.size === 0 && cachedOrders.length > 0) {
+    for (const co of cachedOrders) {
+      if (co.status === 'Active' || co.status === 'InGracePeriod') {
+        ordersMap.set(co.id, co);
+      }
+    }
+  }
+
+  const finalOrders = Array.from(ordersMap.values());
+  // Save verified active orders back to SecureStore hybrid cache
+  await setCachedOrders(borrowerPubkey, finalOrders);
+
+  return finalOrders;
 }
 
 // Fetch live P2P pawn offers directly from Devnet contract
@@ -619,7 +812,7 @@ export async function buildBorrowTx(
     const collateralLabel = collateralName === 'SOL'
       ? `${(collateralAmountLamports / 1e9).toFixed(3)} SOL`
       : `${collateralAmountLamports} SKR`;
-    const memoText = `ClockLend: Borrow $${borrowAmountUsdc} USDC | Collateral: ${collateralLabel} locked in Escrow | Pool #${poolId}`;
+    const memoText = `ClockLend: Borrow #${loanId} $${borrowAmountUsdc} USDC | Collateral: ${collateralLabel} locked in Escrow | Pool #${poolId}`;
     tx.add(
       new TransactionInstruction({
         programId: MEMO_PROGRAM_ID,
