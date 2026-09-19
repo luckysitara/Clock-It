@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { LendingPool, P2POffer } from '../types';
+import { sharePawnToTardis, openTardisCommunity } from '../services/tardisIntegration';
 
 interface MerchantDesksViewProps {
   pools: LendingPool[];
@@ -286,6 +287,15 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                                 {pool.poolType.toUpperCase()}
                               </Text>
                             </View>
+                            {pool.poolType === 'Circle' && (
+                              <TouchableOpacity
+                                style={[styles.tardisCircleBadge, { backgroundColor: 'rgba(50, 212, 222, 0.12)' }]}
+                                onPress={() => openTardisCommunity(pool.name)}
+                                activeOpacity={0.7}
+                              >
+                                <Text style={styles.tardisCircleBadgeText}>🌌 Open in TARDIS ↗</Text>
+                              </TouchableOpacity>
+                            )}
                           </View>
                           <Text style={[styles.deskAuthority, { color: colors.textMuted }]} numberOfLines={1}>
                             {pool.authority.slice(0, 4)}...{pool.authority.slice(-4)} • {pool.minDurationDays}-{pool.maxDurationDays}d term
@@ -505,32 +515,50 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                     {/* CONTEXT-AWARE ACTION SECTION */}
                     {offer.status === 'Open' ? (
                       isCreator ? (
-                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                          <View style={[styles.fundedNote, { flex: 1, backgroundColor: colors.cardAlt }]}>
-                            <Text style={[styles.fundedNoteText, { color: colors.textSecondary }]}>
-                              ⏳ Awaiting Peer Funder
-                            </Text>
+                        <View style={{ gap: 8 }}>
+                          <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                            <View style={[styles.fundedNote, { flex: 1, backgroundColor: colors.cardAlt }]}>
+                              <Text style={[styles.fundedNoteText, { color: colors.textSecondary }]}>
+                                ⏳ Awaiting Peer Funder
+                              </Text>
+                            </View>
+                            {onCancelPawnOffer && (
+                              <TouchableOpacity
+                                style={[styles.cancelBtn, { borderColor: colors.cardBorder }]}
+                                onPress={() => onCancelPawnOffer(offer)}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={[styles.cancelBtnText, { color: colors.textMuted }]}>Cancel & Withdraw</Text>
+                              </TouchableOpacity>
+                            )}
                           </View>
-                          {onCancelPawnOffer && (
-                            <TouchableOpacity
-                              style={[styles.cancelBtn, { borderColor: colors.cardBorder }]}
-                              onPress={() => onCancelPawnOffer(offer)}
-                              activeOpacity={0.8}
-                            >
-                              <Text style={[styles.cancelBtnText, { color: colors.textMuted }]}>Cancel & Withdraw</Text>
-                            </TouchableOpacity>
-                          )}
+                          <TouchableOpacity
+                            style={[styles.tardisShareBtn, { backgroundColor: 'rgba(50, 212, 222, 0.12)', borderColor: '#32D4DE' }]}
+                            onPress={() => sharePawnToTardis(offer)}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.tardisShareBtnText}>🌌 Share to TARDIS Feed (Blink)</Text>
+                          </TouchableOpacity>
                         </View>
                       ) : (
-                        <TouchableOpacity
-                          style={[styles.fundBtn, { backgroundColor: colors.primary }]}
-                          onPress={() => onFundPawnOffer(offer.id)}
-                          activeOpacity={0.85}
-                        >
-                          <Text style={[styles.fundBtnText, { color: colors.primaryText }]}>
-                            ⚡ Fund & Earn +${offer.interestOffered} USDC
-                          </Text>
-                        </TouchableOpacity>
+                        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                          <TouchableOpacity
+                            style={[styles.fundBtn, { flex: 1, backgroundColor: colors.primary }]}
+                            onPress={() => onFundPawnOffer(offer.id)}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={[styles.fundBtnText, { color: colors.primaryText }]}>
+                              ⚡ Fund & Earn +${offer.interestOffered} USDC
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.tardisIconBtn, { backgroundColor: 'rgba(50, 212, 222, 0.12)', borderColor: 'rgba(50, 212, 222, 0.3)' }]}
+                            onPress={() => sharePawnToTardis(offer)}
+                            activeOpacity={0.8}
+                          >
+                            <Text style={styles.tardisIconBtnText}>🌌 Blink</Text>
+                          </TouchableOpacity>
+                        </View>
                       )
                     ) : offer.status === 'Funded' ? (
                       isCreator ? (
@@ -1374,5 +1402,43 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     textAlign: 'center',
+  },
+  tardisShareBtn: {
+    height: 40,
+    borderRadius: 12,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  tardisShareBtnText: {
+    color: '#32D4DE',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  tardisIconBtn: {
+    height: 48,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  tardisIconBtnText: {
+    color: '#32D4DE',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  tardisCircleBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(50, 212, 222, 0.3)',
+  },
+  tardisCircleBadgeText: {
+    color: '#32D4DE',
+    fontSize: 10,
+    fontWeight: '800',
   },
 });

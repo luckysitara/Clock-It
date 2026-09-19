@@ -131,6 +131,48 @@ function MainApp() {
     }
   };
 
+  // Handle incoming deep links (clocklend://circle/{id}, clocklend://pawn/{id}, clocklend://borrow)
+  useEffect(() => {
+    Linking.getInitialURL().then((url) => {
+      if (url) processDeepLink(url);
+    });
+
+    const sub = Linking.addEventListener('url', (event) => {
+      if (event?.url) processDeepLink(event.url);
+    });
+
+    return () => sub.remove();
+  }, []);
+
+  const processDeepLink = (rawUrl: string) => {
+    console.log('[DeepLink] Received URL:', rawUrl);
+    try {
+      const clean = rawUrl.replace(/^clocklend:\/\//i, '');
+      const [pathAndQuery] = clean.split('?');
+      const segments = pathAndQuery.split('/').filter(Boolean);
+      const action = segments[0]?.toLowerCase();
+      const targetId = segments[1];
+
+      if (action === 'circle' || action === 'pool') {
+        setActiveTab('MARKET');
+        showToast(targetId ? `Opened Community Circle #${targetId}` : 'Opened Community Desks');
+      } else if (action === 'pawn' || action === 'pawns') {
+        setActiveTab('MARKET');
+        showToast(targetId ? `Viewing P2P Pawn #${targetId}` : 'Viewing Pawn Deck');
+      } else if (action === 'borrow') {
+        setActiveTab('BORROW');
+        showToast('Instant Express Borrow Desk');
+      } else if (action === 'loans' || action === 'orders') {
+        setActiveTab('LOANS');
+        showToast('Viewing Active Loan Orders');
+      } else if (action === 'profile' || action === 'account') {
+        setActiveTab('PROFILE');
+      }
+    } catch (e) {
+      console.warn('[DeepLink] Parse error:', e);
+    }
+  };
+
   const [pools, setPools] = useState<LendingPool[]>([]);
   const [orders, setOrders] = useState<LoanOrder[]>([]);
   const devnetOrdersRef = useRef<LoanOrder[]>([]);

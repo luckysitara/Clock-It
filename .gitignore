@@ -51,3 +51,4 @@ build/
 # Logs & Temporary Files
 *.log
 .system_generated/
+Tardis/

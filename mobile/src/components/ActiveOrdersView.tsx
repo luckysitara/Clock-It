@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Linking } 
 import { useTheme } from '../theme/ThemeContext';
 import { LoanOrder } from '../types';
 import { CountdownTimer } from './CountdownTimer';
+import { requestTardisGraceRescue } from '../services/tardisIntegration';
 
 interface ActiveOrdersViewProps {
   orders: LoanOrder[];
@@ -188,7 +189,7 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                   </Text>
                 </TouchableOpacity>
 
-                {!inGrace && (
+                {!inGrace ? (
                   <TouchableOpacity
                     style={[styles.graceBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
                     onPress={() => {
@@ -197,6 +198,14 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                     activeOpacity={0.7}
                   >
                     <Text style={[styles.graceBtnText, { color: colors.textSecondary }]}>24h Grace</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.rescueBtn, { backgroundColor: '#ef4444' }]}
+                    onPress={() => requestTardisGraceRescue(order)}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.rescueBtnText}>🚨 TARDIS Rescue</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -338,6 +347,23 @@ const styles = StyleSheet.create({
   graceBtnText: {
     fontSize: 12,
     fontWeight: '700',
+  },
+  rescueBtn: {
+    paddingHorizontal: 16,
+    height: 48,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  rescueBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
   },
   evidenceBox: {
     padding: 12,
