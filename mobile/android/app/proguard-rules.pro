@@ -39,8 +39,9 @@
 # Reanimated
 -keep class com.swmansion.reanimated.** { *; }
 
-# ClockLend Security Integrity & Native Bridge
--keep class com.clocklend.app.security.** { *; }
--keepclassmembers class com.clocklend.app.security.** {
-    public *;
+# ClockLend Security Native Bridge (keep React Native module entry points, allow full obfuscation of SecurityIntegrity)
+-keep class com.clocklend.app.security.SecurityPackage { *; }
+-keep class com.clocklend.app.security.SecurityModule {
+    public <init>(...);
+    @com.facebook.react.bridge.ReactMethod *;
 }

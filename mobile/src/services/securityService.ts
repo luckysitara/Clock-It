@@ -1,3 +1,4 @@
+import '../polyfill';
 import { NativeModules, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -111,15 +112,35 @@ export async function getUserPin(): Promise<string | null> {
   }
 }
 
+function generateSecureSalt(): string {
+  const bytes = new Uint8Array(32);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else if (typeof (globalThis as any).crypto !== 'undefined' && typeof (globalThis as any).crypto?.getRandomValues === 'function') {
+    (globalThis as any).crypto.getRandomValues(bytes);
+  } else {
+    throw new Error('CSPRNG unavailable: Cryptographic random values cannot be generated securely on this device');
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const PIN_PBKDF2_ROUNDS = 10000;
+
+function hashPinWithSalt(pin: string, salt: string, rounds: number = PIN_PBKDF2_ROUNDS): string {
+  let digest = `${salt}:${pin}`;
+  for (let i = 0; i < rounds; i++) {
+    digest = sha256(`${digest}:${salt}:${i}`);
+  }
+  return `pbkdf2_sha256$${rounds}$${digest}`;
+}
+
 export async function setUserPin(pin: string): Promise<void> {
   try {
-    // Generate or fetch salt
-    let salt = await SecureStore.getItemAsync(KEY_PIN_SALT);
-    if (!salt) {
-      salt = Math.floor(Date.now() * Math.random()).toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
-      await SecureStore.setItemAsync(KEY_PIN_SALT, salt);
-    }
-    const hash = sha256(`${salt}:${pin}`);
+    // Generate secure CSPRNG 256-bit salt
+    const salt = generateSecureSalt();
+    await SecureStore.setItemAsync(KEY_PIN_SALT, salt);
+
+    const hash = hashPinWithSalt(pin, salt);
     await SecureStore.setItemAsync(KEY_PIN_HASH, hash);
     await SecureStore.setItemAsync(KEY_PIN_CONFIGURED, 'true');
     await resetFailedAttempts();
@@ -136,8 +157,29 @@ export async function verifyUserPin(inputPin: string): Promise<boolean> {
     const salt = await SecureStore.getItemAsync(KEY_PIN_SALT);
     if (!salt) return false;
 
-    const computedHash = sha256(`${salt}:${inputPin}`);
-    return computedHash === storedHash;
+    if (storedHash.startsWith('pbkdf2_sha256$')) {
+      const parts = storedHash.split('$');
+      const rounds = parseInt(parts[1], 10) || PIN_PBKDF2_ROUNDS;
+      const computedHash = hashPinWithSalt(inputPin, salt, rounds);
+      return computedHash === storedHash;
+    }
+
+    // Legacy migration fallback: raw sha256(`${salt}:${pin}`)
+    const legacyHash = sha256(`${salt}:${inputPin}`);
+    if (legacyHash === storedHash) {
+      // Opportunistically upgrade legacy hash to hardened PBKDF2
+      try {
+        const upgradedSalt = generateSecureSalt();
+        const upgradedHash = hashPinWithSalt(inputPin, upgradedSalt);
+        await SecureStore.setItemAsync(KEY_PIN_SALT, upgradedSalt);
+        await SecureStore.setItemAsync(KEY_PIN_HASH, upgradedHash);
+      } catch (upgradeErr) {
+        console.warn('Failed to opportunistically upgrade PIN hash:', upgradeErr);
+      }
+      return true;
+    }
+
+    return false;
   } catch (err) {
     console.warn('Error verifying user PIN:', err);
     return false;
@@ -285,12 +327,14 @@ export async function checkDeviceIntegrity(): Promise<DeviceIntegrityResult> {
       violationReason,
     };
   } catch (err) {
+    console.error('Device integrity check failed with exception:', err);
     return {
       isEmulator: false,
       isRooted: false,
       isHooking: false,
       isDebugger: false,
-      isSecure: true,
+      isSecure: false,
+      violationReason: 'Device integrity check failed unexpectedly (Fail closed)',
     };
   }
 }

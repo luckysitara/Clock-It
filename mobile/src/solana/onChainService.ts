@@ -21,6 +21,7 @@ import {
   getProfilePDA,
   getP2POfferPDA,
   getSkrEscrowPDA,
+  getTreasuryPDA,
 } from './program';
 import {
   PoolType,
@@ -58,8 +59,22 @@ export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-export const USDC_DEVNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+// M-04: Canonical Solana Devnet USDC Mint
+export const USDC_DEVNET_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 export const SKR_DEVNET_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
+
+// M-03: Integer Interest Calculation Helper matching Smart Contract exactly
+export function calculateExactInterestDue(
+  borrowAmountMicro: bigint,
+  rateBps: number,
+  durationSeconds: number,
+  hasSkrDiscount: boolean = false
+): bigint {
+  const effectiveBps = hasSkrDiscount ? Math.floor((rateBps * 50) / 100) : rateBps;
+  const numerator = borrowAmountMicro * BigInt(effectiveBps) * BigInt(durationSeconds);
+  const denominator = BigInt(10000) * BigInt(31536000);
+  return numerator / denominator;
+}
 
 export function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): PublicKey {
   const [address] = PublicKey.findProgramAddressSync(
@@ -385,7 +400,10 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
         ? 'So11111111111111111111111111111111111111112'
         : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3';
 
-      const interestDue = parseFloat((cand.principal * 0.035 * (7 / 365)).toFixed(2));
+      // M-03: Align interest math to smart contract exact integer formula
+      const principalMicro = BigInt(Math.round(cand.principal * 1_000_000));
+      const exactInterestMicro = calculateExactInterestDue(principalMicro, 800, 7 * 86400, false);
+      const interestDue = Number(exactInterestMicro) / 1_000_000;
       const poolAuth = cand.poolId === 1 ? 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re' : '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1';
       const [poolPDA] = getPoolPDA(new PublicKey(poolAuth), cand.poolId);
       const [loanPDA] = getLoanPDA(poolPDA, borrower, cand.id);
@@ -792,6 +810,9 @@ export async function buildBorrowTx(
     ? SystemProgram.programId
     : SKR_DEVNET_MINT;
 
+  const [treasuryPDA] = getTreasuryPDA();
+  const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
+
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
@@ -806,6 +827,7 @@ export async function buildBorrowTx(
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: profilePDA, isSigner: false, isWritable: true },
+      { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
     ],
     data,
   });
@@ -842,6 +864,8 @@ export async function buildRepayTx(
   const [escrowPDA] = getEscrowPDA(loanPDA);
   const [profilePDA] = getProfilePDA(borrower);
   const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  const [treasuryPDA] = getTreasuryPDA();
+  const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
 
   const isNativeSol = collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
@@ -870,6 +894,7 @@ export async function buildRepayTx(
       { pubkey: profilePDA, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
     ],
     data,
   });
@@ -1199,7 +1224,7 @@ export async function buildCreatePoolTx(
   Buffer.from(name.slice(0, 32), 'utf-8').copy(nameBuf);
   nameBuf.copy(data, offset);
 
-  const liquidityMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
+  const liquidityMint = USDC_DEVNET_MINT;
 
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -1210,6 +1235,7 @@ export async function buildCreatePoolTx(
       { pubkey: vaultPDA, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     data,
   });
@@ -1267,6 +1293,7 @@ export async function buildStakeSkrTx(
         { pubkey: escrowPDA, isSigner: false, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SKR_DEVNET_MINT, isSigner: false, isWritable: false },
       ],
       data,
     })

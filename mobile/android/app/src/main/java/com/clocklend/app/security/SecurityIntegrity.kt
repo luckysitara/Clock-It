@@ -54,12 +54,17 @@ object SecurityIntegrity {
             } catch (_: Throwable) {}
         }
 
-        // 3. Check QEMU System Properties
+        // 3. Check QEMU and Virtual System Properties
         try {
             val systemProperties = Class.forName("android.os.SystemProperties")
             val getMethod = systemProperties.getMethod("get", String::class.java)
             val qemuProp = getMethod.invoke(null, "ro.kernel.qemu") as? String
             if (qemuProp == "1") return true
+
+            val virtualProp = getMethod.invoke(null, "ro.hardware.virtual") as? String
+            if (virtualProp != null && (virtualProp == "1" || virtualProp.equals("true", ignoreCase = true))) {
+                return true
+            }
         } catch (_: Throwable) {}
 
         return false

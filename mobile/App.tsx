@@ -930,7 +930,7 @@ function MainApp() {
         poolType,
         authority: session.publicKey.toBase58(),
         name,
-        liquidityMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        liquidityMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
         totalLiquidity: initialLiquidity,
         totalBorrowed: 0,
         stakedSkrAmount: poolType === 'Individual' ? 500 : 2500,

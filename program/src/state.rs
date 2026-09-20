@@ -11,6 +11,8 @@ pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const P2P_SEED: &[u8] = b"p2p_offer";
 pub const PROFILE_SEED: &[u8] = b"profile";
 pub const TREASURY_SEED: &[u8] = b"treasury";
+pub const SKR_MINT: Pubkey = solana_program::pubkey!("SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3");
+pub const USDC_DEVNET_MINT: Pubkey = solana_program::pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]
 pub enum PoolType {

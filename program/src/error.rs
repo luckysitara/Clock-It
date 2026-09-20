@@ -56,6 +56,10 @@ pub enum ClockLendError {
     InvalidTreasuryAccount,
     #[error("Pool Already Initialized")]
     PoolAlreadyInitialized,
+    #[error("Insufficient Collateral Balance")]
+    InsufficientCollateral,
+    #[error("Unsupported Collateral Mint")]
+    UnsupportedCollateralMint,
 }
 
 impl From<ClockLendError> for ProgramError {

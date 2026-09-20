@@ -3,7 +3,15 @@ import { PublicKey, Transaction } from '@solana/web3.js';
 import { transact, Web3MobileWallet } from '@solana-mobile/mobile-wallet-adapter-protocol-web3js';
 import { base64ToUint8Array, base64ToBase58 } from '@solana-mobile/mobile-wallet-adapter-protocol/encoding';
 import { Buffer } from 'buffer';
-import { devnetConnection, getConnection } from './onChainService';
+import {
+  devnetConnection,
+  getConnection,
+  PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  MEMO_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+} from './onChainService';
 import { SolanaNetwork } from '../types';
 
 export interface SeekerSession {
@@ -176,12 +184,45 @@ export async function createManualSession(pubkeyInput: string | PublicKey): Prom
   };
 }
 
+export const ALLOWED_PROGRAM_IDS = new Set<string>([
+  PROGRAM_ID.toBase58(),
+  '11111111111111111111111111111111', // System Program
+  TOKEN_PROGRAM_ID.toBase58(),
+  TOKEN_2022_PROGRAM_ID.toBase58(),
+  ASSOCIATED_TOKEN_PROGRAM_ID.toBase58(),
+  MEMO_PROGRAM_ID.toBase58(),
+  'ComputeBudget111111111111111111111111111111', // Compute Budget Program
+]);
+
+/**
+ * Security Guard (M-08): Validates that every instruction in the transaction
+ * targets an allowlisted program ID before presenting to the user or MWA for signing.
+ */
+export function validateTransactionInstructions(transaction: Transaction): void {
+  if (!transaction.instructions || transaction.instructions.length === 0) {
+    throw new Error('[Security Exception] Attempted to sign empty transaction');
+  }
+
+  for (let i = 0; i < transaction.instructions.length; i++) {
+    const ix = transaction.instructions[i];
+    const pid = ix.programId.toBase58();
+    if (!ALLOWED_PROGRAM_IDS.has(pid)) {
+      throw new Error(
+        `[Security Exception] Transaction contains unauthorized program ID: ${pid} (Instruction #${i}). Signing rejected to prevent blind wallet drain.`
+      );
+    }
+  }
+}
+
 // Sign and broadcast transaction via Seeker Wallet
 export async function signAndSendSeekerTransaction(
   transaction: Transaction,
   session: SeekerSession,
   network: SolanaNetwork = 'devnet'
 ): Promise<string> {
+  // Validate instructions against program ID allowlist before signing
+  validateTransactionInstructions(transaction);
+
   const conn = getConnection(network);
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
   transaction.recentBlockhash = blockhash;
