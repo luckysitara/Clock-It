@@ -88,8 +88,8 @@ export async function requestTardisGraceRescue(
  * Open a direct encrypted DM with a counterparty inside TARDIS
  */
 export async function openTardisDm(skrHandle: string): Promise<boolean> {
-  const clean = skrHandle.replace('@', '').trim();
-  const deepLink = `tardisapp://dm/${clean}`;
+  const clean = skrHandle.replace('@', '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim();
+  const deepLink = `tardisapp://dm/${encodeURIComponent(clean)}`;
 
   try {
     const canOpen = await Linking.canOpenURL('tardisapp://');
@@ -112,7 +112,8 @@ export async function openTardisDm(skrHandle: string): Promise<boolean> {
  * Open a Gated Community Circle inside TARDIS
  */
 export async function openTardisCommunity(communityId: string): Promise<boolean> {
-  const deepLink = `tardisapp://community/${communityId}`;
+  const clean = communityId.replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim();
+  const deepLink = `tardisapp://community/${encodeURIComponent(clean)}`;
 
   try {
     const canOpen = await Linking.canOpenURL('tardisapp://');
@@ -126,7 +127,7 @@ export async function openTardisCommunity(communityId: string): Promise<boolean>
 
   Alert.alert(
     'TARDIS Circle',
-    `Community Circle: ${communityId}\n\nJoin this group inside TARDIS to unlock community member rates.`
+    `Community Circle: ${clean}\n\nJoin this group inside TARDIS to unlock community member rates.`
   );
   return false;
 }

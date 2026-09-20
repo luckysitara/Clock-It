@@ -36,22 +36,11 @@ function setupCryptoPolyfill() {
       if (!array) return array;
 
       if (typeof existingFn === 'function') {
-        try {
-          return existingFn.call(g.crypto, array);
-        } catch {
-          // Native TurboModule or expo-crypto unavailable, fall back below
-        }
+        return existingFn.call(g.crypto, array);
       }
 
-      // Fast, dependable fallback conforming to ArrayBufferView
-      const uint8 = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
-      for (let i = 0, r = 0; i < uint8.length; i++) {
-        if ((i & 0x03) === 0) {
-          r = (Math.random() * 0x100000000) >>> 0;
-        }
-        uint8[i] = (r >>> ((i & 0x03) << 3)) & 0xff;
-      }
-      return array;
+      // Security requirement: Never fall back to predictable Math.random() for cryptographic operations
+      throw new Error('CSPRNG unavailable: Cryptographic random values cannot be generated securely on this device');
     };
 
     try {

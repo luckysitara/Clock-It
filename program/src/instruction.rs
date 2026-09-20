@@ -56,10 +56,11 @@ pub enum ClockLendInstruction {
     /// 5. `[writable]` Borrower Collateral Token Account
     /// 6. `[writable]` Collateral Escrow PDA `[b"escrow", loan_order_pda]`
     /// 7. `[]` Collateral Mint
-    /// 8. `[writable, optional]` UserProfile PDA (for SKR discount check)
-    /// 9. `[]` Token Program
-    /// 10. `[]` System Program
-    /// 11. `[]` Clock Sysvar
+    /// 8. `[]` Token Program
+    /// 9. `[]` System Program
+    /// 10. `[writable, optional]` UserProfile PDA (for SKR discount check)
+    /// 11. `[writable, optional]` Treasury Account
+    /// 12. `[]` Clock Sysvar
     BorrowFromPool {
         loan_id: u64,
         borrow_amount: u64,
@@ -149,4 +150,14 @@ pub enum ClockLendInstruction {
     /// 4. `[optional]` Token Program (if SPL token collateral)
     /// 5. `[]` System Program
     CancelP2POffer,
+    /// 11. Unstake SKR tokens and return to user wallet
+    /// Accounts:
+    /// 0. `[signer]` User
+    /// 1. `[writable]` UserProfile PDA `[b"profile", user]`
+    /// 2. `[writable]` User SKR Token Account
+    /// 3. `[writable]` SKR Escrow Account PDA `[b"skr_escrow", user]`
+    /// 4. `[]` Token Program
+    UnstakeSKR {
+        amount: u64,
+    },
 }

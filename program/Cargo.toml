@@ -25,3 +25,11 @@ spl-token = { version = "7.0", features = ["no-entrypoint"] }
 [dev-dependencies]
 solana-program-test = "2.2.1"
 solana-sdk = "2.2.1"
+
+[profile.release]
+overflow-checks = true
+opt-level = 3
+
+[profile.dev]
+overflow-checks = true
+

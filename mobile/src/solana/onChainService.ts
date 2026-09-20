@@ -20,6 +20,7 @@ import {
   getEscrowPDA,
   getProfilePDA,
   getP2POfferPDA,
+  getSkrEscrowPDA,
 } from './program';
 import {
   PoolType,
@@ -39,7 +40,6 @@ export const DEVNET_RPCS = [
 ];
 
 export const MAINNET_RPCS = [
-  'https://api.mainnet.solana.com',
   'https://api.mainnet-beta.solana.com',
 ];
 
@@ -229,15 +229,16 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
         const borrowerOnChain = new PublicKey(data.subarray(9, 41));
         if (!borrowerOnChain.equals(borrower)) continue;
 
-        const poolId = Number(data.readBigUInt64LE(1));
-        const principalAmount = Number(data.readBigUInt64LE(41)) / 1_000_000;
-        const collateralMint = new PublicKey(data.subarray(49, 81)).toBase58();
-        const collateralAmount = Number(data.readBigUInt64LE(81)) / 1_000_000_000;
-        const interestDue = Number(data.readBigUInt64LE(89)) / 1_000_000;
-        const originationTime = Number(data.readBigInt64LE(97));
-        const dueTime = Number(data.readBigInt64LE(105));
-        const gracePeriodExpires = Number(data.readBigInt64LE(113));
-        const statusByte = data.readUInt8(121);
+        const loanId = Number(data.readBigUInt64LE(1));
+        const poolPubkey = new PublicKey(data.subarray(41, 73));
+        const principalAmount = Number(data.readBigUInt64LE(73)) / 1_000_000;
+        const collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
+        const collateralAmount = Number(data.readBigUInt64LE(113)) / 1_000_000_000;
+        const interestDue = Number(data.readBigUInt64LE(121)) / 1_000_000;
+        const originationTime = Number(data.readBigInt64LE(129));
+        const dueTime = Number(data.readBigInt64LE(137));
+        const gracePeriodExpires = Number(data.readBigInt64LE(145));
+        const statusByte = data.readUInt8(153);
 
         let status: LoanStatus = 'Active';
         if (statusByte === 1) status = 'InGracePeriod';
@@ -246,11 +247,11 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
 
         if (status === 'Repaid') continue;
 
-        const id = ordersMap.size + 1000;
+        const id = loanId;
         ordersMap.set(id, {
           id,
-          poolId,
-          poolName: poolId === 1 ? 'Seeker Genesis Circle' : 'Tokyo Whale Desk',
+          poolId: 1,
+          poolName: 'Seeker Genesis Circle',
           borrower: borrowerPubkey,
           principalAmount,
           collateralName: `${collateralAmount.toFixed(2)} SOL`,
@@ -498,7 +499,7 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
     const [profilePDA] = getProfilePDA(userPubkey);
     const accountInfo = await devnetConnection.getAccountInfo(profilePDA);
 
-    if (accountInfo && accountInfo.data.length === 75) {
+    if (accountInfo && accountInfo.data.length >= 51) {
       const data = Buffer.from(accountInfo.data);
       const isInitialized = data.readUInt8(0) === 1;
 
@@ -508,7 +509,7 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
         const totalLoansDefaulted = data.readUInt32LE(45);
         const reputationScore = data.readUInt16LE(49);
 
-        let tier: 'Diamond' | 'Gold' | 'Silver' | 'Standard' = 'Silver';
+        let tier: 'Diamond' | 'Gold' | 'Silver' | 'Standard' = 'Standard';
         let aprDiscount = 0;
 
         if (stakedSkr >= 5000 || reputationScore >= 9000) {
@@ -539,12 +540,12 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
 
   return {
     pubkey: userPubkey.toBase58(),
-    stakedSkr: 500,
-    totalLoansCompleted: 12,
+    stakedSkr: 0,
+    totalLoansCompleted: 0,
     totalLoansDefaulted: 0,
-    reputationScore: 9850,
-    tier: 'Diamond',
-    aprDiscount: 50,
+    reputationScore: 10000,
+    tier: 'Standard',
+    aprDiscount: 0,
   };
 }
 
@@ -761,88 +762,66 @@ export async function buildBorrowTx(
   collateralAmountLamports: number,
   durationDays: number,
   collateralName: string = 'SOL',
-  isPoolLiquid: boolean = false
+  isPoolLiquid: boolean = true
 ): Promise<{ tx: Transaction; escrowPDA: PublicKey; loanId: number }> {
   const [poolPDA] = getPoolPDA(poolAuthority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
-  const loanId = Math.floor(1000 + Math.random() * 9000);
+  const loanId = Math.floor(1000 + Math.random() * 900000);
   const [loanPDA] = getLoanPDA(poolPDA, borrower, loanId);
   const [escrowPDA] = getEscrowPDA(loanPDA);
+  const [profilePDA] = getProfilePDA(borrower);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  if (isPoolLiquid) {
-    // Layout: 1 byte tag (3) + 8 bytes loan_id + 8 bytes borrow_amount + 8 bytes collateral_amount + 8 bytes duration_seconds = 33 bytes
-    const data = Buffer.alloc(33);
-    data.writeUInt8(3, 0); // Instruction 3: BorrowFromPool
-    writeU64LE(BigInt(loanId)).copy(data, 1);
-    writeU64LE(BigInt(Math.round(borrowAmountUsdc * 1_000_000))).copy(data, 9);
-    writeU64LE(BigInt(collateralAmountLamports)).copy(data, 17);
-    writeU64LE(BigInt(durationDays * 86400)).copy(data, 25);
+  // Layout: 1 byte tag (3) + 8 bytes loan_id + 8 bytes borrow_amount + 8 bytes collateral_amount + 8 bytes duration_seconds = 33 bytes
+  const data = Buffer.alloc(33);
+  data.writeUInt8(3, 0); // Instruction 3: BorrowFromPool
+  writeU64LE(BigInt(loanId)).copy(data, 1);
+  writeU64LE(BigInt(Math.round(borrowAmountUsdc * 1_000_000))).copy(data, 9);
+  writeU64LE(BigInt(collateralAmountLamports)).copy(data, 17);
+  writeU64LE(BigInt(durationDays * 86400)).copy(data, 25);
 
-    const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
-    const borrowerCollateralAccount = collateralName === 'SOL'
-      ? borrower
-      : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
-    const collateralMint = collateralName === 'SOL'
-      ? SystemProgram.programId
-      : SKR_DEVNET_MINT;
+  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  const isNativeSol = collateralName.toUpperCase().includes('SOL');
+  const borrowerCollateralAccount = isNativeSol
+    ? borrower
+    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+  const collateralMint = isNativeSol
+    ? SystemProgram.programId
+    : SKR_DEVNET_MINT;
 
-    const ix = new TransactionInstruction({
-      programId: PROGRAM_ID,
-      keys: [
-        { pubkey: borrower, isSigner: true, isWritable: true },
-        { pubkey: poolPDA, isSigner: false, isWritable: true },
-        { pubkey: loanPDA, isSigner: false, isWritable: true },
-        { pubkey: vaultPDA, isSigner: false, isWritable: true },
-        { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
-        { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
-        { pubkey: escrowPDA, isSigner: false, isWritable: true },
-        { pubkey: collateralMint, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      data,
-    });
-    tx.add(ix);
-  } else {
-    // Devnet Protocol Liquidity Mode:
-    // 1. Lock 100% full collateral in Escrow PDA if SOL
-    if (collateralName === 'SOL') {
-      const lockLamports = Math.round(collateralAmountLamports); // 100% full collateral lock
-      tx.add(
-        SystemProgram.transfer({
-          fromPubkey: borrower,
-          toPubkey: escrowPDA,
-          lamports: lockLamports,
-        })
-      );
-    } else {
-      // SKR Collateral lock into Escrow PDA (funds rent exemption for SKR escrow vault)
-      tx.add(
-        SystemProgram.transfer({
-          fromPubkey: borrower,
-          toPubkey: escrowPDA,
-          lamports: 2_000_000, // 0.002 SOL rent exemption
-        })
-      );
-    }
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: borrower, isSigner: true, isWritable: true },
+      { pubkey: poolPDA, isSigner: false, isWritable: true },
+      { pubkey: loanPDA, isSigner: false, isWritable: true },
+      { pubkey: vaultPDA, isSigner: false, isWritable: true },
+      { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
+      { pubkey: escrowPDA, isSigner: false, isWritable: true },
+      { pubkey: collateralMint, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: profilePDA, isSigner: false, isWritable: true },
+    ],
+    data,
+  });
+  tx.add(ix);
 
-    // 2. Add ClockLend Protocol Loan Record via Solana Memo Program
-    const collateralLabel = collateralName === 'SOL'
-      ? `${(collateralAmountLamports / 1e9).toFixed(3)} SOL`
-      : `${collateralAmountLamports} SKR`;
-    const memoText = `ClockLend: Borrow #${loanId} $${borrowAmountUsdc} USDC | Collateral: ${collateralLabel} locked in Escrow | Pool #${poolId}`;
-    tx.add(
-      new TransactionInstruction({
-        programId: MEMO_PROGRAM_ID,
-        keys: [{ pubkey: borrower, isSigner: true, isWritable: false }],
-        data: Buffer.from(memoText, 'utf-8'),
-      })
-    );
-  }
+  const collateralLabel = isNativeSol
+    ? `${(collateralAmountLamports / 1e9).toFixed(3)} SOL`
+    : `${collateralAmountLamports} SKR`;
+  const memoText = `ClockLend: Borrow #${loanId} $${borrowAmountUsdc} USDC | Collateral: ${collateralLabel} | Pool #${poolId}`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: borrower, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
 
   return { tx, escrowPDA, loanId };
 }
@@ -854,49 +833,56 @@ export async function buildRepayTx(
   poolId: number,
   orderId: number,
   repayAmountUsdc: number,
-  isPoolLiquid: boolean = false
+  isPoolLiquid: boolean = true,
+  collateralName: string = 'SOL'
 ): Promise<Transaction> {
+  const [poolPDA] = getPoolPDA(poolAuthority, poolId);
+  const [vaultPDA] = getVaultPDA(poolPDA);
+  const [loanPDA] = getLoanPDA(poolPDA, borrower, orderId);
+  const [escrowPDA] = getEscrowPDA(loanPDA);
+  const [profilePDA] = getProfilePDA(borrower);
+  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+
+  const isNativeSol = collateralName.toUpperCase().includes('SOL');
+  const borrowerCollateralAccount = isNativeSol
+    ? borrower
+    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  if (isPoolLiquid) {
-    const [poolPDA] = getPoolPDA(poolAuthority, poolId);
-    const [vaultPDA] = getVaultPDA(poolPDA);
-    const [loanPDA] = getLoanPDA(poolPDA, borrower, orderId);
-    const [escrowPDA] = getEscrowPDA(loanPDA);
-    const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  // Layout: 1 byte tag (6) + 8 bytes repay_amount = 9 bytes
+  const data = Buffer.alloc(9);
+  data.writeUInt8(6, 0); // Instruction 6: RepayLoan
+  writeU64LE(BigInt(Math.round(repayAmountUsdc * 1_000_000))).copy(data, 1);
 
-    // Layout: 1 byte tag (6) + 8 bytes repay_amount = 9 bytes
-    const data = Buffer.alloc(9);
-    data.writeUInt8(6, 0); // Instruction 6: RepayLoan
-    writeU64LE(BigInt(Math.round(repayAmountUsdc * 1_000_000))).copy(data, 1);
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: borrower, isSigner: true, isWritable: true },
+      { pubkey: loanPDA, isSigner: false, isWritable: true },
+      { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: vaultPDA, isSigner: false, isWritable: true },
+      { pubkey: escrowPDA, isSigner: false, isWritable: true },
+      { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
+      { pubkey: poolPDA, isSigner: false, isWritable: true },
+      { pubkey: profilePDA, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
 
-    const ix = new TransactionInstruction({
-      programId: PROGRAM_ID,
-      keys: [
-        { pubkey: borrower, isSigner: true, isWritable: true },
-        { pubkey: loanPDA, isSigner: false, isWritable: true },
-        { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
-        { pubkey: vaultPDA, isSigner: false, isWritable: true },
-        { pubkey: escrowPDA, isSigner: false, isWritable: true },
-        { pubkey: borrower, isSigner: false, isWritable: true },
-        { pubkey: poolPDA, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      ],
-      data,
-    });
-    tx.add(ix);
-  } else {
-    const memoText = `ClockLend: Repay $${repayAmountUsdc} USDC | Order #${orderId} Closed | Collateral Released`;
-    tx.add(
-      new TransactionInstruction({
-        programId: MEMO_PROGRAM_ID,
-        keys: [{ pubkey: borrower, isSigner: true, isWritable: false }],
-        data: Buffer.from(memoText, 'utf-8'),
-      })
-    );
-  }
+  const memoText = `ClockLend: Repay $${repayAmountUsdc} USDC | Order #${orderId} Closed | Collateral Released`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: borrower, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
 
   return tx;
 }
@@ -964,26 +950,51 @@ export async function buildCreateP2POfferTx(
   const [escrowPDA] = getEscrowPDA(offerPDA);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  // Check if asset specifies SOL collateral amount (e.g. "0.5 SOL", "1 SOL")
+  // Check if asset specifies SOL collateral amount (e.g. "0.5 SOL", "1 SOL") or SKR
   const solMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
-  let lockLamports = 5_000_000; // 0.005 SOL protocol escrow anchor / security deposit
+  const skrMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
+  const isNativeSol = solMatch !== null || !assetName.toUpperCase().includes('SKR');
+
+  let collateralAmount = 1_000_000_000; // default 1 SOL
   if (solMatch && solMatch[1]) {
-    lockLamports = Math.round(parseFloat(solMatch[1]) * 1_000_000_000);
+    collateralAmount = Math.round(parseFloat(solMatch[1]) * 1_000_000_000);
+  } else if (skrMatch && skrMatch[1]) {
+    collateralAmount = Math.round(parseFloat(skrMatch[1]) * 1_000_000);
   }
 
-  // 1. Escrow lock transfer directly to the derived Escrow PDA
-  tx.add(
-    SystemProgram.transfer({
-      fromPubkey: creator,
-      toPubkey: escrowPDA,
-      lamports: lockLamports,
-    })
-  );
+  const collateralMint = isNativeSol ? SystemProgram.programId : SKR_DEVNET_MINT;
+  const creatorCollateralAccount = isNativeSol
+    ? creator
+    : getAssociatedTokenAddress(SKR_DEVNET_MINT, creator);
 
-  // 2. Protocol On-Chain Memo for immutable Solscan verification
+  // ClockLendInstruction::CreateP2POffer (Variant 4):
+  // 1 byte tag (4) + 8 bytes offer_id + 8 bytes requested_amount + 8 bytes collateral_amount + 8 bytes interest_offered + 8 bytes duration_seconds = 41 bytes
+  const data = Buffer.alloc(41);
+  data.writeUInt8(4, 0);
+  writeU64LE(BigInt(offerId)).copy(data, 1);
+  writeU64LE(BigInt(Math.round(requestedAmountUsdc * 1_000_000))).copy(data, 9);
+  writeU64LE(BigInt(collateralAmount)).copy(data, 17);
+  writeU64LE(BigInt(Math.round(profitAmountUsdc * 1_000_000))).copy(data, 25);
+  writeU64LE(BigInt(durationDays * 86400)).copy(data, 33);
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: creator, isSigner: true, isWritable: true },
+      { pubkey: offerPDA, isSigner: false, isWritable: true },
+      { pubkey: creatorCollateralAccount, isSigner: false, isWritable: true },
+      { pubkey: escrowPDA, isSigner: false, isWritable: true },
+      { pubkey: collateralMint, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
+
   const memoText = `ClockLend: Create P2P Pawn Offer #${offerId} | Asset: ${assetName} | Request: $${requestedAmountUsdc} USDC | Profit: $${profitAmountUsdc} | Duration: ${durationDays}d | Escrow: ${escrowPDA.toBase58().slice(0, 8)}...`;
   tx.add(
     new TransactionInstruction({
@@ -1001,11 +1012,32 @@ export async function buildFundP2POfferTx(
   funder: PublicKey,
   offer: P2POffer
 ): Promise<Transaction> {
+  const creator = new PublicKey(offer.creator);
+  const [offerPDA] = getP2POfferPDA(creator, offer.id);
+  const funderUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, funder);
+  const creatorUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, creator);
+
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  // Protocol On-Chain Memo for immutable Solscan verification
+  // ClockLendInstruction::FundP2POffer (Variant 5)
+  const data = Buffer.alloc(1);
+  data.writeUInt8(5, 0);
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: funder, isSigner: true, isWritable: true },
+      { pubkey: offerPDA, isSigner: false, isWritable: true },
+      { pubkey: funderUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: creatorUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
+
   const memoText = `ClockLend: Fund P2P Pawn #${offer.id} | Principal: $${offer.requestedAmount} USDC | Expected Yield: +$${offer.interestOffered} USDC | Funder: ${funder.toBase58().slice(0, 8)}...`;
   tx.add(
     new TransactionInstruction({
@@ -1023,11 +1055,46 @@ export async function buildRepayPawnOfferTx(
   borrower: PublicKey,
   offer: P2POffer
 ): Promise<Transaction> {
+  if (!offer.funder) {
+    throw new Error('Offer has not been funded yet');
+  }
+  const [offerPDA] = getP2POfferPDA(borrower, offer.id);
+  const [escrowPDA] = getEscrowPDA(offerPDA);
+  const funder = new PublicKey(offer.funder);
+  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  const funderUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, funder);
+
+  const isNativeSol = offer.collateralName.toUpperCase().includes('SOL');
+  const borrowerCollateralAccount = isNativeSol
+    ? borrower
+    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   const totalDue = parseFloat((offer.requestedAmount + offer.interestOffered).toFixed(2));
+  // ClockLendInstruction::RepayLoan (Variant 6)
+  const data = Buffer.alloc(9);
+  data.writeUInt8(6, 0);
+  writeU64LE(BigInt(Math.round(totalDue * 1_000_000))).copy(data, 1);
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: borrower, isSigner: true, isWritable: true },
+      { pubkey: offerPDA, isSigner: false, isWritable: true },
+      { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: funderUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: escrowPDA, isSigner: false, isWritable: true },
+      { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
+
   const memoText = `ClockLend: Repay P2P Pawn #${offer.id} | Repaid: $${totalDue} USDC | Collateral ${offer.collateralName} Released from Escrow`;
   tx.add(
     new TransactionInstruction({
@@ -1069,6 +1136,7 @@ export async function buildCancelPawnOfferTx(
   if (!isNativeSol) {
     keys.push({ pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false });
   }
+  keys.push({ pubkey: SystemProgram.programId, isSigner: false, isWritable: false });
 
   tx.add(
     new TransactionInstruction({
@@ -1166,7 +1234,7 @@ export async function buildStakeSkrTx(
   amountSkr: number
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
-  const [escrowPDA] = getEscrowPDA(profilePDA);
+  const [escrowPDA] = getSkrEscrowPDA(user);
   const userSkrAccount = getAssociatedTokenAddress(SKR_DEVNET_MINT, user);
 
   const tx = new Transaction();
@@ -1206,6 +1274,52 @@ export async function buildStakeSkrTx(
 
   // Memo instruction for on-chain proof & Solscan verification
   const memoText = `ClockLend: Stake ${amountSkr.toLocaleString()} SKR Reputation Bond | User: ${user.toBase58().slice(0, 8)}... | Unlocks 90% LTV & APR Discounts`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: user, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return { tx, profilePDA, escrowPDA };
+}
+
+// Build Unstake SKR Reputation Bond Transaction
+export async function buildUnstakeSkrTx(
+  user: PublicKey,
+  amountSkr: number
+): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
+  const [profilePDA] = getProfilePDA(user);
+  const [escrowPDA] = getSkrEscrowPDA(user);
+  const userSkrAccount = getAssociatedTokenAddress(SKR_DEVNET_MINT, user);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // ClockLendInstruction::UnstakeSKR (Variant 11):
+  // 1 byte tag (11) + 8 bytes amount = 9 bytes
+  const data = Buffer.alloc(9);
+  data.writeUInt8(11, 0); // Instruction 11: UnstakeSKR
+  writeU64LE(BigInt(Math.round(amountSkr * 1_000_000))).copy(data, 1);
+
+  // Execute on-chain UnstakeSKR instruction
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: profilePDA, isSigner: false, isWritable: true },
+        { pubkey: userSkrAccount, isSigner: false, isWritable: true },
+        { pubkey: escrowPDA, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    })
+  );
+
+  const memoText = `ClockLend: Unstake ${amountSkr.toLocaleString()} SKR | User: ${user.toBase58().slice(0, 8)}...`;
   tx.add(
     new TransactionInstruction({
       programId: MEMO_PROGRAM_ID,

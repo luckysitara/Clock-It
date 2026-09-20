@@ -11,6 +11,7 @@ export const ESCROW_SEED = Buffer.from('escrow');
 export const P2P_SEED = Buffer.from('p2p_offer');
 export const PROFILE_SEED = Buffer.from('profile');
 export const TREASURY_SEED = Buffer.from('treasury');
+export const SKR_ESCROW_SEED = Buffer.from('skr_escrow');
 
 export function writeU64LE(val: number | bigint): Buffer {
   const buf = Buffer.alloc(8);
@@ -49,6 +50,10 @@ export function getP2POfferPDA(creator: PublicKey, offerId: number): [PublicKey,
 
 export function getTreasuryPDA(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([TREASURY_SEED], PROGRAM_ID);
+}
+
+export function getSkrEscrowPDA(user: PublicKey): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([SKR_ESCROW_SEED, user.toBuffer()], PROGRAM_ID);
 }
 
 export const connection = new Connection(DEVNET_RPC, 'confirmed');

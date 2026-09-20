@@ -11,7 +11,6 @@ use solana_program::{
 use solana_program_test::*;
 use solana_sdk::{
     signature::{Keypair, Signer},
-    system_program,
     transaction::Transaction,
 };
 
@@ -58,7 +57,7 @@ async fn test_bank_initialize_pool_success() {
         AccountMeta::new(pool_pda, false),
         AccountMeta::new_readonly(liquidity_mint, false),
         AccountMeta::new(vault_pda, false),
-        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(solana_program::system_program::id(), false),
         AccountMeta::new_readonly(sysvar::rent::id(), false),
     ];
 
@@ -132,7 +131,7 @@ async fn test_bank_initialize_pool_rejects_unauthorized_signer() {
         AccountMeta::new(pool_pda, false),
         AccountMeta::new_readonly(liquidity_mint, false),
         AccountMeta::new(vault_pda, false),
-        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(solana_program::system_program::id(), false),
         AccountMeta::new_readonly(sysvar::rent::id(), false),
     ];
 

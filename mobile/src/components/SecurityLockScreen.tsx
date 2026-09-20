@@ -13,6 +13,11 @@ import { useTheme } from '../theme/ThemeContext';
 import {
   getUserPin,
   setUserPin,
+  verifyUserPin,
+  getLockoutRemaining,
+  recordFailedAttempt,
+  resetFailedAttempts,
+  isPinConfigured,
   setLockEnabled,
   isBiometricsEnabled,
   checkBiometricHardware,
@@ -40,24 +45,46 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
   const [currentMode, setCurrentMode] = useState<LockScreenMode>(mode);
   const [step, setStep] = useState<'enter_current' | 'enter_new' | 'confirm_new' | 'unlock'>('unlock');
   const [pin, setPin] = useState<string>('');
-  const [storedPin, setStoredPin] = useState<string | null>(null);
+  const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
   const [firstEnteredPin, setFirstEnteredPin] = useState<string>('');
   const [hasBiometrics, setHasBiometrics] = useState<boolean>(false);
   const [biometricsActive, setBiometricsActive] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [attempts, setAttempts] = useState<number>(0);
 
+  // Animations
   const shakeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     initSecurity();
   }, [mode]);
 
-  const initSecurity = async () => {
-    const savedPin = await getUserPin();
-    setStoredPin(savedPin);
+  useEffect(() => {
+    if (lockoutSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setLockoutSeconds((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setErrorMsg('');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockoutSeconds]);
 
-    // If in unlock mode but no PIN exists yet, switch to setup mode
-    if (mode === 'unlock' && !savedPin) {
+  const initSecurity = async () => {
+    const remaining = await getLockoutRemaining();
+    if (remaining > 0) {
+      setLockoutSeconds(remaining);
+      setErrorMsg(`Device temporarily locked. Retry in ${remaining}s.`);
+    }
+
+    const pinConfigured = await isPinConfigured();
+
+    // If in unlock mode but no PIN has EVER been configured, switch to setup mode
+    if (mode === 'unlock' && !pinConfigured) {
       setCurrentMode('setup');
       setStep('enter_new');
       return;
@@ -75,7 +102,7 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
       return;
     }
 
-    // Default unlock mode
+    // Default unlock mode (FAIL CLOSED: stays in unlock mode even if read has a transient error)
     setCurrentMode('unlock');
     setStep('unlock');
 
@@ -86,8 +113,7 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
     setHasBiometrics(hasHardware && isEnrolled);
     setBiometricsActive(canUseBio);
 
-    if (canUseBio) {
-      // Short delay for UI mount before prompt
+    if (canUseBio && remaining === 0) {
       setTimeout(() => {
         triggerBiometric();
       }, 350);
@@ -95,8 +121,10 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
   };
 
   const triggerBiometric = async () => {
+    if (lockoutSeconds > 0) return;
     const success = await authenticateWithBiometrics('Unlock ClockLend with Biometrics');
     if (success) {
+      await resetFailedAttempts();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       onUnlock();
     }
@@ -114,6 +142,7 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
   };
 
   const handleKeyPress = async (digit: string) => {
+    if (lockoutSeconds > 0) return;
     if (pin.length >= 4) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     const newPin = pin + digit;
@@ -126,14 +155,28 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
   };
 
   const processCompletedPin = async (inputPin: string) => {
+    if (lockoutSeconds > 0) {
+      setErrorMsg(`Device temporarily locked. Retry in ${lockoutSeconds}s.`);
+      setPin('');
+      return;
+    }
+
     if (currentMode === 'unlock') {
-      // Validate with stored PIN
-      if (inputPin === storedPin) {
+      // Validate with hashed PIN & salt
+      const isValid = await verifyUserPin(inputPin);
+      if (isValid) {
+        await resetFailedAttempts();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
         setTimeout(() => onUnlock(), 100);
       } else {
+        const { locked, remainingSeconds } = await recordFailedAttempt();
         shake();
-        setErrorMsg('Incorrect PIN. Please try again.');
+        if (locked) {
+          setLockoutSeconds(remainingSeconds);
+          setErrorMsg(`Too many incorrect attempts. Locked for ${remainingSeconds}s.`);
+        } else {
+          setErrorMsg('Incorrect PIN. Please try again.');
+        }
         setTimeout(() => setPin(''), 450);
       }
     } else if (currentMode === 'setup') {
@@ -160,7 +203,8 @@ export const SecurityLockScreen: React.FC<SecurityLockScreenProps> = ({
       }
     } else if (currentMode === 'change_pin') {
       if (step === 'enter_current') {
-        if (inputPin === storedPin) {
+        const isValid = await verifyUserPin(inputPin);
+        if (isValid) {
           setPin('');
           setStep('enter_new');
         } else {

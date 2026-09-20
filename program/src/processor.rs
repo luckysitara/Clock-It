@@ -19,7 +19,7 @@ use crate::{
     instruction::ClockLendInstruction,
     state::{
         LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, UserProfile,
-        ESCROW_SEED, LOAN_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, VAULT_SEED,
+        ESCROW_SEED, LOAN_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
     },
 };
 
@@ -109,6 +109,36 @@ fn create_or_allocate_pda<'a>(
     }
 }
 
+// Security helper: safely transfer native SOL from an escrow PDA to a destination account
+fn transfer_native_sol_from_escrow<'a>(
+    escrow: &AccountInfo<'a>,
+    dest: &AccountInfo<'a>,
+    system_program_opt: Option<&AccountInfo<'a>>,
+    amount: u64,
+    signers_seeds: &[&[u8]],
+) -> ProgramResult {
+    let escrow_lamports = escrow.lamports();
+    let transfer_amt = amount.min(escrow_lamports);
+    if transfer_amt == 0 {
+        return Ok(());
+    }
+
+    if escrow.owner == &solana_program::system_program::id() {
+        if let Some(sys_prog) = system_program_opt {
+            invoke_signed(
+                &system_instruction::transfer(escrow.key, dest.key, transfer_amt),
+                &[escrow.clone(), dest.clone(), sys_prog.clone()],
+                &[signers_seeds],
+            )?;
+            return Ok(());
+        }
+    }
+
+    **escrow.try_borrow_mut_lamports()? = escrow_lamports.saturating_sub(transfer_amt);
+    **dest.try_borrow_mut_lamports()? = dest.lamports().saturating_add(transfer_amt);
+    Ok(())
+}
+
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -185,6 +215,9 @@ pub fn process_instruction(
         ClockLendInstruction::CancelP2POffer => {
             process_cancel_p2p_offer(program_id, accounts)
         }
+        ClockLendInstruction::UnstakeSKR { amount } => {
+            process_unstake_skr(program_id, accounts, amount)
+        }
     }
 }
 
@@ -210,7 +243,12 @@ pub fn process_initialize_pool(
     assert_signer(authority)?;
     assert_system_program(system_program)?;
 
-    if max_ltv_bps > 10000 || max_duration <= min_duration || min_duration <= 0 {
+    if max_ltv_bps > 10000
+        || interest_rate_bps > 10000
+        || max_duration < min_duration
+        || min_duration <= 0
+        || max_duration > 365 * 86400
+    {
         return Err(ClockLendError::InvalidInstruction.into());
     }
 
@@ -337,8 +375,14 @@ pub fn process_stake_skr(
     let account_info_iter = &mut accounts.iter();
     let user = next_account_info(account_info_iter)?;
     let user_profile_account = next_account_info(account_info_iter)?;
-    let pool_account_opt = next_account_info(account_info_iter).ok();
-    let user_skr_account = next_account_info(account_info_iter)?;
+
+    // Dynamically distinguish if optional pool account is present
+    let next_acc = next_account_info(account_info_iter)?;
+    let (pool_account_opt, user_skr_account) = if next_acc.owner == program_id && next_acc.data_len() == LendingPool::LEN {
+        (Some(next_acc), next_account_info(account_info_iter)?)
+    } else {
+        (None, next_acc)
+    };
     let skr_escrow_account = next_account_info(account_info_iter)?;
     let system_program = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
@@ -355,6 +399,19 @@ pub fn process_stake_skr(
         Pubkey::find_program_address(&[PROFILE_SEED, user.key.as_ref()], program_id);
     if expected_profile_pda != *user_profile_account.key {
         return Err(ClockLendError::InvalidSeeds.into());
+    }
+
+    // Security check: validate skr_escrow_account is the canonical escrow PDA
+    let (expected_skr_escrow_pda, _escrow_bump) =
+        Pubkey::find_program_address(&[b"skr_escrow", user.key.as_ref()], program_id);
+    if expected_skr_escrow_pda != *skr_escrow_account.key {
+        return Err(ClockLendError::InvalidEscrowAccount.into());
+    }
+
+    // Security check: validate user_skr_account is owned by caller
+    let user_token = spl_token::state::Account::unpack(&user_skr_account.try_borrow_data()?)?;
+    if user_token.owner != *user.key {
+        return Err(ClockLendError::Unauthorized.into());
     }
 
     let is_new_profile = user_profile_account.owner == &solana_program::system_program::id();
@@ -425,6 +482,80 @@ pub fn process_stake_skr(
     Ok(())
 }
 
+pub fn process_unstake_skr(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    amount: u64,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let user = next_account_info(account_info_iter)?;
+    let user_profile_account = next_account_info(account_info_iter)?;
+    let user_skr_account = next_account_info(account_info_iter)?;
+    let skr_escrow_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    assert_signer(user)?;
+    assert_token_program(token_program)?;
+    assert_owned_by(user_profile_account, program_id)?;
+
+    if amount == 0 {
+        return Err(ClockLendError::InvalidInstruction.into());
+    }
+
+    let (expected_profile_pda, _) =
+        Pubkey::find_program_address(&[PROFILE_SEED, user.key.as_ref()], program_id);
+    if expected_profile_pda != *user_profile_account.key {
+        return Err(ClockLendError::InvalidSeeds.into());
+    }
+
+    let mut profile = UserProfile::unpack_from_slice(&user_profile_account.try_borrow_data()?)?;
+    if profile.user != *user.key {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    if profile.staked_skr < amount {
+        return Err(ClockLendError::ExpectedAmountMismatch.into());
+    }
+
+    let (expected_skr_escrow_pda, escrow_bump) =
+        Pubkey::find_program_address(&[b"skr_escrow", user.key.as_ref()], program_id);
+    if expected_skr_escrow_pda != *skr_escrow_account.key {
+        return Err(ClockLendError::InvalidEscrowAccount.into());
+    }
+
+    let user_skr_token = spl_token::state::Account::unpack(&user_skr_account.try_borrow_data()?)?;
+    if user_skr_token.owner != *user.key {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    // Transfer SKR tokens from escrow PDA back to user wallet
+    invoke_signed(
+        &spl_token::instruction::transfer(
+            token_program.key,
+            skr_escrow_account.key,
+            user_skr_account.key,
+            skr_escrow_account.key,
+            &[],
+            amount,
+        )?,
+        &[
+            skr_escrow_account.clone(),
+            user_skr_account.clone(),
+            token_program.clone(),
+        ],
+        &[&[b"skr_escrow", user.key.as_ref(), &[escrow_bump]]],
+    )?;
+
+    profile.staked_skr = profile
+        .staked_skr
+        .checked_sub(amount)
+        .ok_or(ClockLendError::AmountOverflow)?;
+    profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
+
+    msg!("ClockLend: Unstaked {} SKR tokens successfully", amount);
+    Ok(())
+}
+
 pub fn process_borrow_from_pool(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -467,13 +598,30 @@ pub fn process_borrow_from_pool(
         return Err(ClockLendError::InsufficientLiquidity.into());
     }
 
-    if duration_seconds < pool.min_duration || duration_seconds > pool.max_duration {
+    if duration_seconds < pool.min_duration || duration_seconds > pool.max_duration || duration_seconds > 365 * 86400 {
         return Err(ClockLendError::InvalidInstruction.into());
     }
 
-    // Security check: Collateral ratio check
-    // Max borrow allowed = (collateral_amount * max_ltv_bps) / 10000
-    let max_borrow_allowed = (collateral_amount as u128)
+    // Dual Collateral Branching: Native SOL vs SPL Token (SKR)
+    let is_native_sol = *collateral_mint.key == Pubkey::default()
+        || collateral_mint.key == &solana_program::system_program::ID
+        || collateral_mint.key == &spl_token::native_mint::id();
+    let is_pool_native_sol = pool.liquidity_mint == Pubkey::default()
+        || pool.liquidity_mint == solana_program::system_program::ID
+        || pool.liquidity_mint == spl_token::native_mint::id();
+
+    // Security check: Collateral ratio check with decimal/asset normalization
+    let collateral_value = if is_native_sol && !is_pool_native_sol {
+        // SOL collateral (9 decimals) against USDC pool (6 decimals), base rate $150/SOL
+        (collateral_amount as u128 * 150_000_000u128) / 1_000_000_000u128
+    } else if !is_native_sol && is_pool_native_sol {
+        // USDC collateral (6 decimals) against SOL pool (9 decimals)
+        (collateral_amount as u128 * 1_000_000_000u128) / 150_000_000u128
+    } else {
+        collateral_amount as u128
+    };
+
+    let max_borrow_allowed = collateral_value
         .checked_mul(pool.max_ltv_bps as u128)
         .ok_or(ClockLendError::AmountOverflow)?
         / 10000u128;
@@ -497,7 +645,7 @@ pub fn process_borrow_from_pool(
     }
 
     // Security check: verify collateral escrow PDA
-    let (expected_escrow_pda, _escrow_bump) =
+    let (expected_escrow_pda, escrow_bump) =
         Pubkey::find_program_address(&[ESCROW_SEED, loan_order_account.key.as_ref()], program_id);
     if expected_escrow_pda != *collateral_escrow_account.key {
         return Err(ClockLendError::InvalidEscrowAccount.into());
@@ -527,11 +675,6 @@ pub fn process_borrow_from_pool(
         }
     }
 
-    // Dual Collateral Branching: Native SOL vs SPL Token (SKR)
-    let is_native_sol = *collateral_mint.key == Pubkey::default()
-        || collateral_mint.key == &solana_program::system_program::ID
-        || collateral_mint.key == &spl_token::native_mint::id();
-
     if is_native_sol {
         // Native SOL: transfer lamports directly from borrower to collateral escrow PDA
         invoke(
@@ -546,9 +689,21 @@ pub fn process_borrow_from_pool(
                 system_program.clone(),
             ],
         )?;
+        // Assign escrow to program_id so ClockLend owns the escrow PDA
+        if collateral_escrow_account.owner == &solana_program::system_program::id() {
+            invoke_signed(
+                &system_instruction::assign(collateral_escrow_account.key, program_id),
+                &[collateral_escrow_account.clone(), system_program.clone()],
+                &[&[ESCROW_SEED, loan_order_account.key.as_ref(), &[escrow_bump]]],
+            )?;
+        }
     } else {
-        // SPL Token (SKR): transfer tokens from borrower to collateral escrow PDA
+        // SPL Token: verify mint matches escrow and transfer tokens to collateral escrow PDA
         assert_token_program(token_program)?;
+        let escrow_token_acc = spl_token::state::Account::unpack(&collateral_escrow_account.try_borrow_data()?)?;
+        if escrow_token_acc.mint != *collateral_mint.key {
+            return Err(ClockLendError::InvalidMint.into());
+        }
         invoke(
             &spl_token::instruction::transfer(
                 token_program.key,
@@ -581,10 +736,26 @@ pub fn process_borrow_from_pool(
 
     assert_token_program(token_program)?;
 
-    let _user_profile_opt = next_account_info(account_info_iter).ok();
-    let treasury_account_opt = next_account_info(account_info_iter).ok();
+    let mut user_profile_opt: Option<&AccountInfo> = None;
+    let mut treasury_account_opt: Option<&AccountInfo> = None;
+
+    while let Ok(acc) = next_account_info(account_info_iter) {
+        if acc.owner == program_id && acc.data_len() == UserProfile::LEN {
+            user_profile_opt = Some(acc);
+        } else {
+            treasury_account_opt = Some(acc);
+        }
+    }
+
+    let (expected_treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], program_id);
 
     if let Some(treasury_account) = treasury_account_opt {
+        // Validate treasury account owner is canonical Treasury PDA
+        let treasury_token_acc = spl_token::state::Account::unpack(&treasury_account.try_borrow_data()?)?;
+        if treasury_token_acc.owner != expected_treasury_pda {
+            return Err(ClockLendError::InvalidTreasuryAccount.into());
+        }
+
         if origination_fee > 0
             && treasury_account.key != borrower.key
             && treasury_account.key != borrower_liquidity_account.key
@@ -670,13 +841,34 @@ pub fn process_borrow_from_pool(
 
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;
-    let due_time = now + duration_seconds;
+    let due_time = now.checked_add(duration_seconds).ok_or(ClockLendError::AmountOverflow)?;
 
-    // Calculate interest: (borrow_amount * interest_rate_bps * duration) / (10000 * 31536000)
-    let interest_due = ((borrow_amount as u128)
-        * (pool.interest_rate_bps as u128)
-        * (duration_seconds as u128)
-        / (10000u128 * 31536000u128)) as u64;
+    let mut effective_interest_rate_bps = pool.interest_rate_bps;
+    if let Some(profile_acc) = user_profile_opt {
+        if profile_acc.owner == program_id && profile_acc.data_len() == UserProfile::LEN {
+            if let Ok(profile) = UserProfile::unpack_from_slice(&profile_acc.try_borrow_data()?) {
+                if profile.user == *borrower.key && profile.staked_skr > 0 {
+                    let discount = if profile.staked_skr >= 1_000_000_000 {
+                        effective_interest_rate_bps / 2
+                    } else {
+                        (effective_interest_rate_bps as u32 * 2500 / 10000) as u16
+                    };
+                    effective_interest_rate_bps = effective_interest_rate_bps.saturating_sub(discount);
+                }
+            }
+        }
+    }
+
+    // Calculate interest: (borrow_amount * effective_interest_rate_bps * duration) / (10000 * 31536000)
+    let interest_due_u128 = (borrow_amount as u128)
+        .checked_mul(effective_interest_rate_bps as u128)
+        .ok_or(ClockLendError::AmountOverflow)?
+        .checked_mul(duration_seconds as u128)
+        .ok_or(ClockLendError::AmountOverflow)?
+        / (10000u128 * 31536000u128);
+    let interest_due: u64 = interest_due_u128
+        .try_into()
+        .map_err(|_| ClockLendError::AmountOverflow)?;
 
     let loan_order = LoanOrder {
         is_active: true,
@@ -730,7 +922,7 @@ pub fn process_create_p2p_offer(
     assert_signer(creator)?;
     assert_system_program(system_program)?;
 
-    if requested_amount == 0 || collateral_amount == 0 || duration_seconds <= 0 {
+    if requested_amount == 0 || collateral_amount == 0 || duration_seconds <= 0 || duration_seconds > 365 * 86400 {
         return Err(ClockLendError::InvalidInstruction.into());
     }
 
@@ -744,7 +936,7 @@ pub fn process_create_p2p_offer(
     }
 
     // Security check: verify escrow PDA
-    let (expected_escrow_pda, _escrow_bump) =
+    let (expected_escrow_pda, escrow_bump) =
         Pubkey::find_program_address(&[ESCROW_SEED, p2p_offer_account.key.as_ref()], program_id);
     if expected_escrow_pda != *collateral_escrow_account.key {
         return Err(ClockLendError::InvalidEscrowAccount.into());
@@ -786,8 +978,19 @@ pub fn process_create_p2p_offer(
                 system_program.clone(),
             ],
         )?;
+        if collateral_escrow_account.owner == &solana_program::system_program::id() {
+            invoke_signed(
+                &system_instruction::assign(collateral_escrow_account.key, program_id),
+                &[collateral_escrow_account.clone(), system_program.clone()],
+                &[&[ESCROW_SEED, p2p_offer_account.key.as_ref(), &[escrow_bump]]],
+            )?;
+        }
     } else {
         assert_token_program(token_program)?;
+        let escrow_token_acc = spl_token::state::Account::unpack(&collateral_escrow_account.try_borrow_data()?)?;
+        if escrow_token_acc.mint != *collateral_mint.key {
+            return Err(ClockLendError::InvalidMint.into());
+        }
         invoke(
             &spl_token::instruction::transfer(
                 token_program.key,
@@ -846,7 +1049,7 @@ pub fn process_fund_p2p_offer(
     assert_token_program(token_program)?;
 
     let mut offer = P2POffer::unpack_from_slice(&p2p_offer_account.try_borrow_data()?)?;
-    if offer.status != OfferStatus::Open {
+    if !offer.is_initialized || offer.status != OfferStatus::Open {
         return Err(ClockLendError::OfferNotOpen.into());
     }
 
@@ -883,7 +1086,7 @@ pub fn process_fund_p2p_offer(
     let now = clock.unix_timestamp;
 
     offer.funder = *funder.key;
-    offer.due_time = now + offer.duration_seconds;
+    offer.due_time = now.checked_add(offer.duration_seconds).ok_or(ClockLendError::AmountOverflow)?;
     offer.status = OfferStatus::Funded;
     offer.pack_into_slice(&mut p2p_offer_account.try_borrow_mut_data()?)?;
 
@@ -916,10 +1119,13 @@ pub fn process_repay_loan(
     let mut user_profile_opt: Option<&AccountInfo> = None;
     let mut treasury_account_opt: Option<&AccountInfo> = None;
     let mut token_program_opt: Option<&AccountInfo> = None;
+    let mut system_program_opt: Option<&AccountInfo> = None;
 
     while let Ok(acc) = next_account_info(account_info_iter) {
         if *acc.key == spl_token::id() {
             token_program_opt = Some(acc);
+        } else if *acc.key == solana_program::system_program::id() {
+            system_program_opt = Some(acc);
         } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
             pool_account_opt = Some(acc);
         } else if acc.owner == program_id && acc.data_len() == UserProfile::LEN {
@@ -947,7 +1153,8 @@ pub fn process_repay_loan(
             .checked_add(loan.interest_due)
             .ok_or(ClockLendError::AmountOverflow)?;
 
-        if repay_amount < total_due {
+        // L-2 check: must match total_due exactly to prevent liquidity inflation
+        if repay_amount != total_due {
             return Err(ClockLendError::ExpectedAmountMismatch.into());
         }
 
@@ -990,7 +1197,14 @@ pub fn process_repay_loan(
         let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
         assert_token_program(token_program)?;
 
+        let (expected_treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], program_id);
+
         if let Some(treasury_account) = treasury_account_opt {
+            let treasury_token_acc = spl_token::state::Account::unpack(&treasury_account.try_borrow_data()?)?;
+            if treasury_token_acc.owner != expected_treasury_pda {
+                return Err(ClockLendError::InvalidTreasuryAccount.into());
+            }
+
             if protocol_fee > 0
                 && treasury_account.key != repayment_destination_account.key
                 && treasury_account.key != borrower.key
@@ -1079,15 +1293,16 @@ pub fn process_repay_loan(
             || loan.collateral_mint == spl_token::native_mint::id();
 
         if is_native_sol {
-            let escrow_lamports = collateral_escrow_account.lamports();
-            let refund_lamports = loan.collateral_amount.min(escrow_lamports);
-            **collateral_escrow_account.try_borrow_mut_lamports()? =
-                escrow_lamports.saturating_sub(refund_lamports);
-            **borrower_collateral_account.try_borrow_mut_lamports()? =
-                borrower_collateral_account.lamports().saturating_add(refund_lamports);
+            transfer_native_sol_from_escrow(
+                collateral_escrow_account,
+                borrower_collateral_account,
+                system_program_opt,
+                loan.collateral_amount,
+                &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+            )?;
             msg!(
                 "ClockLend: Released {} lamports native SOL collateral to borrower",
-                refund_lamports
+                loan.collateral_amount
             );
         } else {
             // Security check: Verify borrower collateral token account is owned by borrower
@@ -1154,7 +1369,7 @@ pub fn process_repay_loan(
             return Err(ClockLendError::Unauthorized.into());
         }
 
-        if offer.status != OfferStatus::Funded {
+        if !offer.is_initialized || offer.status != OfferStatus::Funded {
             return Err(ClockLendError::InvalidInstruction.into());
         }
 
@@ -1163,7 +1378,7 @@ pub fn process_repay_loan(
             .checked_add(offer.interest_offered)
             .ok_or(ClockLendError::AmountOverflow)?;
 
-        if repay_amount < total_due {
+        if repay_amount != total_due {
             return Err(ClockLendError::ExpectedAmountMismatch.into());
         }
 
@@ -1213,15 +1428,16 @@ pub fn process_repay_loan(
             || offer.collateral_mint == spl_token::native_mint::id();
 
         if is_native_sol {
-            let escrow_lamports = collateral_escrow_account.lamports();
-            let refund_lamports = offer.collateral_amount.min(escrow_lamports);
-            **collateral_escrow_account.try_borrow_mut_lamports()? =
-                escrow_lamports.saturating_sub(refund_lamports);
-            **borrower_collateral_account.try_borrow_mut_lamports()? =
-                borrower_collateral_account.lamports().saturating_add(refund_lamports);
+            transfer_native_sol_from_escrow(
+                collateral_escrow_account,
+                borrower_collateral_account,
+                system_program_opt,
+                offer.collateral_amount,
+                &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+            )?;
             msg!(
                 "ClockLend: P2P released {} lamports native SOL collateral to creator",
-                refund_lamports
+                offer.collateral_amount
             );
         } else {
             // Security check: Verify borrower collateral token account is owned by offer.creator
@@ -1279,6 +1495,8 @@ pub fn process_trigger_grace_period(
     let caller = next_account_info(account_info_iter)?;
     let loan_account = next_account_info(account_info_iter)?;
 
+    let pool_account_opt = next_account_info(account_info_iter).ok();
+
     assert_signer(caller)?;
     assert_owned_by(loan_account, program_id)?;
 
@@ -1287,7 +1505,26 @@ pub fn process_trigger_grace_period(
 
     // Check LoanOrder
     if let Ok(mut loan) = LoanOrder::unpack_from_slice(&loan_account.try_borrow_data()?) {
-        if loan.status != LoanStatus::Active {
+        let is_authorized = if *caller.key == loan.borrower {
+            true
+        } else if let Some(pool_acc) = pool_account_opt {
+            if pool_acc.owner == program_id && *pool_acc.key == loan.pool {
+                if let Ok(pool) = LendingPool::unpack_from_slice(&pool_acc.try_borrow_data()?) {
+                    pool.authority == *caller.key
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_authorized {
+            return Err(ClockLendError::UnauthorizedCaller.into());
+        }
+
+        if !loan.is_active || loan.status != LoanStatus::Active {
             return Err(ClockLendError::InvalidInstruction.into());
         }
         if now < loan.due_time {
@@ -1295,7 +1532,7 @@ pub fn process_trigger_grace_period(
         }
 
         loan.status = LoanStatus::InGracePeriod;
-        loan.grace_period_expires = now + 86400; // 24-hour social grace period
+        loan.grace_period_expires = now.checked_add(86400).ok_or(ClockLendError::AmountOverflow)?;
         loan.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
         msg!(
@@ -1308,15 +1545,21 @@ pub fn process_trigger_grace_period(
 
     // Check P2POffer
     if let Ok(mut offer) = P2POffer::unpack_from_slice(&loan_account.try_borrow_data()?) {
-        if offer.status != OfferStatus::Funded {
+        if !offer.is_initialized || offer.status != OfferStatus::Funded {
             return Err(ClockLendError::InvalidInstruction.into());
         }
+
+        // Security check: Only creator or funder can trigger grace period
+        if *caller.key != offer.creator && *caller.key != offer.funder {
+            return Err(ClockLendError::UnauthorizedCaller.into());
+        }
+
         if now < offer.due_time {
             return Err(ClockLendError::LoanNotDue.into());
         }
 
         offer.status = OfferStatus::InGracePeriod;
-        offer.grace_period_expires = now + 86400;
+        offer.grace_period_expires = now.checked_add(86400).ok_or(ClockLendError::AmountOverflow)?;
         offer.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
         msg!(
@@ -1343,13 +1586,19 @@ pub fn process_claim_default(
     assert_owned_by(loan_account, program_id)?;
 
     // Dynamically collect optional accounts
+    let mut pool_account_opt: Option<&AccountInfo> = None;
     let mut user_profile_opt: Option<&AccountInfo> = None;
     let mut treasury_collateral_opt: Option<&AccountInfo> = None;
     let mut token_program_opt: Option<&AccountInfo> = None;
+    let mut system_program_opt: Option<&AccountInfo> = None;
 
     while let Ok(acc) = next_account_info(account_info_iter) {
         if *acc.key == spl_token::id() {
             token_program_opt = Some(acc);
+        } else if *acc.key == solana_program::system_program::id() {
+            system_program_opt = Some(acc);
+        } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
+            pool_account_opt = Some(acc);
         } else if acc.owner == program_id && acc.data_len() == UserProfile::LEN {
             user_profile_opt = Some(acc);
         } else {
@@ -1362,6 +1611,16 @@ pub fn process_claim_default(
 
     // Check LoanOrder default
     if let Ok(mut loan) = LoanOrder::unpack_from_slice(&loan_account.try_borrow_data()?) {
+        // C-1 Security Check: Caller must be the pool authority
+        let pool_account = pool_account_opt.ok_or(ClockLendError::PoolInactive)?;
+        if *pool_account.key != loan.pool {
+            return Err(ClockLendError::InvalidVaultAccount.into());
+        }
+        let pool = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?)?;
+        if *caller.key != pool.authority {
+            return Err(ClockLendError::UnauthorizedCaller.into());
+        }
+
         if loan.status != LoanStatus::InGracePeriod {
             return Err(ClockLendError::GracePeriodActive.into());
         }
@@ -1378,42 +1637,77 @@ pub fn process_claim_default(
             return Err(ClockLendError::InvalidEscrowAccount.into());
         }
 
-        loan.status = LoanStatus::Defaulted;
-        loan.is_active = false;
-        loan.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
-
         let is_native_sol = loan.collateral_mint == Pubkey::default()
             || loan.collateral_mint == solana_program::system_program::ID
             || loan.collateral_mint == spl_token::native_mint::id();
+
+        // C-1 Security Check: Destination collateral account must belong to pool authority or pool vault
+        if is_native_sol {
+            if *destination_collateral_account.key != pool.vault_pda && *destination_collateral_account.key != pool.authority {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+        } else {
+            let dest_token_acc = spl_token::state::Account::unpack(&destination_collateral_account.try_borrow_data()?)?;
+            if dest_token_acc.owner != pool.authority && dest_token_acc.owner != pool.vault_pda {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+        }
+
+        // H-1 Security Check: If treasury collateral account is passed, verify it matches canonical Treasury PDA
+        let (expected_treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], program_id);
+        if let Some(treasury_account) = treasury_collateral_opt {
+            if is_native_sol {
+                if *treasury_account.key != expected_treasury_pda {
+                    return Err(ClockLendError::InvalidTreasuryAccount.into());
+                }
+            } else {
+                let treasury_token = spl_token::state::Account::unpack(&treasury_account.try_borrow_data()?)?;
+                if treasury_token.owner != expected_treasury_pda {
+                    return Err(ClockLendError::InvalidTreasuryAccount.into());
+                }
+            }
+        }
+
+        loan.status = LoanStatus::Defaulted;
+        loan.is_active = false;
+        loan.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
         // Feature 8: Monetization - Protocol Liquidation Margin (5% excess collateral to Treasury)
         let protocol_margin = ((loan.collateral_amount as u128 * 500) / 10000) as u64; // 5% liquidation margin
         let lender_collateral = loan.collateral_amount.saturating_sub(protocol_margin);
 
         if is_native_sol {
-            let escrow_lamports = collateral_escrow_account.lamports();
-            let total_transfer = loan.collateral_amount.min(escrow_lamports);
-
             if let Some(treasury_account) = treasury_collateral_opt {
-                let margin_amt = protocol_margin.min(total_transfer);
-                let rem_amt = total_transfer.saturating_sub(margin_amt);
-                **collateral_escrow_account.try_borrow_mut_lamports()? =
-                    escrow_lamports.saturating_sub(total_transfer);
-                **destination_collateral_account.try_borrow_mut_lamports()? =
-                    destination_collateral_account.lamports().saturating_add(rem_amt);
-                **treasury_account.try_borrow_mut_lamports()? =
-                    treasury_account.lamports().saturating_add(margin_amt);
+                let margin_amt = protocol_margin.min(loan.collateral_amount);
+                let rem_amt = loan.collateral_amount.saturating_sub(margin_amt);
+                transfer_native_sol_from_escrow(
+                    collateral_escrow_account,
+                    destination_collateral_account,
+                    system_program_opt,
+                    rem_amt,
+                    &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+                )?;
+                transfer_native_sol_from_escrow(
+                    collateral_escrow_account,
+                    treasury_account,
+                    system_program_opt,
+                    margin_amt,
+                    &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+                )?;
                 msg!(
                     "ClockLend: Liquidated {} SOL to lender, {} SOL margin to Treasury",
                     rem_amt,
                     margin_amt
                 );
             } else {
-                **collateral_escrow_account.try_borrow_mut_lamports()? =
-                    escrow_lamports.saturating_sub(total_transfer);
-                **destination_collateral_account.try_borrow_mut_lamports()? =
-                    destination_collateral_account.lamports().saturating_add(total_transfer);
-                msg!("ClockLend: Liquidated {} SOL to lender", total_transfer);
+                transfer_native_sol_from_escrow(
+                    collateral_escrow_account,
+                    destination_collateral_account,
+                    system_program_opt,
+                    loan.collateral_amount,
+                    &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+                )?;
+                msg!("ClockLend: Liquidated {} SOL to lender", loan.collateral_amount);
             }
         } else if let Some(token_program) = token_program_opt {
             if let Some(treasury_account) = treasury_collateral_opt {
@@ -1518,6 +1812,10 @@ pub fn process_claim_default(
 
     // Check P2POffer default
     if let Ok(mut offer) = P2POffer::unpack_from_slice(&loan_account.try_borrow_data()?) {
+        if !offer.is_initialized {
+            return Err(ClockLendError::InvalidInstruction.into());
+        }
+
         // Security check: Only the funder can claim the default
         if *caller.key != offer.funder {
             return Err(ClockLendError::UnauthorizedCaller.into());
@@ -1551,12 +1849,13 @@ pub fn process_claim_default(
             if *destination_collateral_account.key != offer.funder {
                 return Err(ClockLendError::Unauthorized.into());
             }
-            let escrow_lamports = collateral_escrow_account.lamports();
-            let transfer_amt = offer.collateral_amount.min(escrow_lamports);
-            **collateral_escrow_account.try_borrow_mut_lamports()? =
-                escrow_lamports.saturating_sub(transfer_amt);
-            **destination_collateral_account.try_borrow_mut_lamports()? =
-                destination_collateral_account.lamports().saturating_add(transfer_amt);
+            transfer_native_sol_from_escrow(
+                collateral_escrow_account,
+                destination_collateral_account,
+                system_program_opt,
+                offer.collateral_amount,
+                &[ESCROW_SEED, loan_account.key.as_ref(), &[escrow_bump]],
+            )?;
         } else {
             let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
             assert_token_program(token_program)?;
@@ -1672,17 +1971,26 @@ pub fn process_cancel_p2p_offer(
     let p2p_offer_account = next_account_info(account_info_iter)?;
     let collateral_escrow_account = next_account_info(account_info_iter)?;
     let creator_collateral_account = next_account_info(account_info_iter)?;
-    let token_program_opt = next_account_info(account_info_iter).ok();
 
     assert_signer(creator)?;
     assert_owned_by(p2p_offer_account, program_id)?;
+
+    let mut token_program_opt: Option<&AccountInfo> = None;
+    let mut system_program_opt: Option<&AccountInfo> = None;
+    while let Ok(acc) = next_account_info(account_info_iter) {
+        if *acc.key == spl_token::id() {
+            token_program_opt = Some(acc);
+        } else if *acc.key == solana_program::system_program::id() {
+            system_program_opt = Some(acc);
+        }
+    }
 
     let offer = P2POffer::unpack_from_slice(&p2p_offer_account.try_borrow_data()?)?;
     if offer.creator != *creator.key {
         return Err(ClockLendError::Unauthorized.into());
     }
 
-    if offer.status != OfferStatus::Open {
+    if !offer.is_initialized || offer.status != OfferStatus::Open {
         return Err(ClockLendError::OfferNotOpen.into());
     }
 
@@ -1699,9 +2007,13 @@ pub fn process_cancel_p2p_offer(
 
     if is_native_sol {
         let escrow_lamports = collateral_escrow_account.lamports();
-        **collateral_escrow_account.try_borrow_mut_lamports()? = 0;
-        **creator_collateral_account.try_borrow_mut_lamports()? =
-            creator_collateral_account.lamports().saturating_add(escrow_lamports);
+        transfer_native_sol_from_escrow(
+            collateral_escrow_account,
+            creator_collateral_account,
+            system_program_opt,
+            escrow_lamports,
+            &[ESCROW_SEED, p2p_offer_account.key.as_ref(), &[escrow_bump]],
+        )?;
         msg!(
             "ClockLend: P2P Offer #{} cancelled, refunded {} lamports to creator",
             offer.offer_id,
@@ -1733,12 +2045,23 @@ pub fn process_cancel_p2p_offer(
             &[&[ESCROW_SEED, p2p_offer_account.key.as_ref(), &[escrow_bump]]],
         )?;
 
-        let escrow_lamports = collateral_escrow_account.lamports();
-        if escrow_lamports > 0 {
-            **collateral_escrow_account.try_borrow_mut_lamports()? = 0;
-            **creator.try_borrow_mut_lamports()? =
-                creator.lamports().saturating_add(escrow_lamports);
-        }
+        // Close SPL token escrow account to return rent to creator safely
+        invoke_signed(
+            &spl_token::instruction::close_account(
+                token_program.key,
+                collateral_escrow_account.key,
+                creator.key,
+                collateral_escrow_account.key,
+                &[],
+            )?,
+            &[
+                collateral_escrow_account.clone(),
+                creator.clone(),
+                token_program.clone(),
+            ],
+            &[&[ESCROW_SEED, p2p_offer_account.key.as_ref(), &[escrow_bump]]],
+        )?;
+
         msg!(
             "ClockLend: P2P Offer #{} cancelled, refunded {} SKR tokens to creator",
             offer.offer_id,

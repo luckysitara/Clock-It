@@ -191,3 +191,13 @@ fn test_cancel_p2p_offer_instruction_serialization() {
         ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
     assert_eq!(ix, deserialized);
 }
+
+#[test]
+fn test_unstake_skr_instruction_serialization() {
+    let ix = ClockLendInstruction::UnstakeSKR { amount: 50_000_000 };
+    let serialized = borsh::to_vec(&ix).expect("Serialization failed");
+    let deserialized =
+        ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
+    assert_eq!(ix, deserialized);
+}
+

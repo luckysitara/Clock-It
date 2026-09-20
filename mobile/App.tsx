@@ -494,7 +494,8 @@ function MainApp() {
         order.poolId,
         order.id,
         totalDue,
-        false
+        true,
+        order.collateralName
       );
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
@@ -526,7 +527,7 @@ function MainApp() {
         if (!prev) return null;
         return {
           ...prev,
-          reputationScore: Math.min(100, prev.reputationScore + 5),
+          reputationScore: Math.min(10000, prev.reputationScore + 50),
           aprDiscount: Math.min(2.5, parseFloat((prev.aprDiscount + 0.2).toFixed(1))),
         };
       });
@@ -716,7 +717,7 @@ function MainApp() {
         if (!prev) return null;
         return {
           ...prev,
-          reputationScore: Math.min(100, prev.reputationScore + 10),
+          reputationScore: Math.min(10000, prev.reputationScore + 100),
         };
       });
 
@@ -790,7 +791,7 @@ function MainApp() {
         if (!prev) return null;
         return {
           ...prev,
-          reputationScore: Math.min(100, prev.reputationScore + 10),
+          reputationScore: Math.min(10000, prev.reputationScore + 100),
           totalLoansCompleted: prev.totalLoansCompleted + 1,
         };
       });
@@ -1018,8 +1019,8 @@ function MainApp() {
         else if (currentStaked >= 2500) newTier = 'Gold';
         else if (currentStaked >= 1000) newTier = 'Silver';
 
-        const currentScore = prev?.reputationScore || 70;
-        const newScore = Math.min(100, currentScore + Math.max(5, Math.floor(amount / 200)));
+        const currentScore = prev?.reputationScore || 10000;
+        const newScore = Math.min(10000, currentScore + Math.max(50, Math.floor(amount / 2)));
         const newDiscount = Math.min(3.0, parseFloat(((prev?.aprDiscount || 0) + 0.5).toFixed(1)));
 
         return {
