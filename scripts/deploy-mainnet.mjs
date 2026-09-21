@@ -1,0 +1,173 @@
+// ClockLend — mainnet bootstrap
+// Deploys the program, initializes the admin (ProgramData proof), creates the
+// treasury USDC token account, publishes the SOL (and optionally SKR) price
+// feeds, and optionally creates the first lending desk.
+//
+// PREREQUISITES (see docs/MAINNET_RUNBOOK.md):
+//   1. The deployer wallet holds ~3.5 SOL on mainnet-beta.
+//   2. Set DEPLOYER_KEY env var to the keypair JSON path if it is not
+//      ~/.config/solana/id.json. RECOMMENDED: use a fresh mainnet keypair.
+//
+// Usage:
+//   node scripts/deploy-mainnet.mjs [--skr-price 0.02] [--create-pool]
+//     --skr-price    publish the global SKR feed at this USD price
+//     --create-pool  also create "Seeker Genesis Circle" desk (mainnet USDC)
+//
+import fs from 'fs';
+import {
+  Connection, Keypair, PublicKey, Transaction, TransactionInstruction,
+  SystemProgram, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY,
+  sendAndConfirmTransaction,
+} from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountIdempotentInstruction,
+} from '@solana/spl-token';
+import { execSync } from 'child_process';
+
+const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const ASSOC_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA7knL');
+const USDC_MAINNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+const SKR_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
+const NATIVE_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+const BPF_LOADER = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+const ORACLE_SEED = Buffer.from('oracle');
+const POOL_SEED = Buffer.from('pool');
+const VAULT_SEED = Buffer.from('vault');
+const ADMIN_SEED = Buffer.from('admin');
+const TREASURY_SEED = Buffer.from('treasury');
+
+const RPC = process.env.MAINNET_RPC || 'https://api.mainnet-beta.solana.com';
+const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/id.json`;
+const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
+const conn = new Connection(RPC, 'confirmed');
+
+const w64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
+const w64s = (n) => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(n)); return b; };
+const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; };
+
+async function main() {
+  const args = process.argv.slice(2);
+  const skrPrice = parseFloat(args[args.indexOf('--skr-price') + 1] || '0');
+  const createPool = args.includes('--create-pool');
+
+  const balance = await conn.getBalance(keypair.publicKey);
+  console.log(`Deployer ${keypair.publicKey.toBase58()} balance: ${balance / 1e9} SOL`);
+  if (balance < 3_000_000_000) {
+    throw new Error('Insufficient mainnet SOL — fund the deployer wallet (~3.5 SOL) first.');
+  }
+
+  // 1. Deploy the program (write-buffer + upgrade) — same program id on mainnet
+  const soPath = new URL('../program/target/deploy/clock_lend.so', import.meta.url).pathname;
+  if (!fs.existsSync(soPath)) {
+    throw new Error(`${soPath} not found — run: cd program && cargo build-sbf`);
+  }
+  console.log('Writing program buffer...');
+  const bufOut = execSync(`solana program write-buffer --url mainnet-beta --keypair ${keypairPath} ${soPath}`, { encoding: 'utf8' });
+  const buffer = bufOut.match(/Buffer: (\w+)/)[1];
+  console.log('Upgrading program...');
+  execSync(`solana program deploy --url mainnet-beta --keypair ${keypairPath} --program-id ${PROGRAM_ID.toBase58()} --buffer ${buffer}`, { stdio: 'inherit' });
+
+  // 2. InitializeAdmin (sole root = on-chain upgrade authority via ProgramData)
+  const [adminPda] = PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);
+  const [programDataPda] = PublicKey.findProgramAddressSync([PROGRAM_ID.toBuffer()], BPF_LOADER);
+  console.log('Initializing AdminConfig...');
+  await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: adminPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: programDataPda, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([13]), // InitializeAdmin (tag 13)
+  })), [keypair], { commitment: 'confirmed' });
+  console.log(`Admin initialized: ${adminPda.toBase58()}`);
+
+  // 3. Create the treasury USDC token account (owner = treasury PDA)
+  const [treasuryPda] = PublicKey.findProgramAddressSync([TREASURY_SEED], PROGRAM_ID);
+  const treasuryAta = await getAssociatedTokenAddress(USDC_MAINNET_MINT, treasuryPda, true);
+  console.log('Creating treasury USDC ATA...');
+  await sendAndConfirmTransaction(conn, new Transaction().add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      keypair.publicKey, treasuryAta, treasuryPda, USDC_MAINNET_MINT,
+      TOKEN_PROGRAM_ID, ASSOC_TOKEN_PROGRAM,
+    )
+  ), [keypair], { commitment: 'confirmed' });
+  console.log(`Treasury USDC ATA: ${treasuryAta.toBase58()}`);
+
+  // 4. Publish the global SOL price feed (fetched from CoinGecko at deploy time)
+  const solUsd = await fetchUsdPrice('solana');
+  console.log(`Publishing SOL feed at $${solUsd}...`);
+  await setFeed(NATIVE_MINT, Math.round(solUsd * 1e6), 9, adminPda);
+
+  // 5. Optionally publish the SKR feed
+  if (skrPrice > 0) {
+    console.log(`Publishing SKR feed at $${skrPrice}...`);
+    await setFeed(SKR_MINT, Math.round(skrPrice * 1e6), 6, adminPda);
+  } else {
+    console.log('SKR feed skipped (pass --skr-price 0.02 to publish).');
+  }
+
+  // 6. Optionally create the first desk (mainnet USDC)
+  if (createPool) {
+    const poolId = 1n;
+    const [poolPda] = PublicKey.findProgramAddressSync(
+      [POOL_SEED, keypair.publicKey.toBuffer(), w64(poolId)], PROGRAM_ID);
+    const [vaultPda] = PublicKey.findProgramAddressSync([VAULT_SEED, poolPda.toBuffer()], PROGRAM_ID);
+    const name = Buffer.alloc(32);
+    Buffer.from('Seeker Genesis Circle').copy(name);
+    const data = Buffer.concat([
+      Buffer.from([0]), w64(poolId), Buffer.from([1]), u16(350), u16(9000),
+      w64s(3 * 86400), w64s(30 * 86400), name,
+    ]);
+    console.log('Creating "Seeker Genesis Circle" desk...');
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: poolPda, isSigner: false, isWritable: true },
+        { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
+        { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    })), [keypair], { commitment: 'confirmed' });
+    console.log(`Desk created: ${poolPda.toBase58()}`);
+  }
+
+  console.log('\nMAINNET BOOTSTRAP COMPLETE');
+  console.log('Next: run scripts/keeper.mjs on a schedule (staleness window is 3600s).');
+}
+
+async function setFeed(mint, priceMicroUsd, decimals, adminPda) {
+  const [oraclePda] = PublicKey.findProgramAddressSync([ORACLE_SEED, mint.toBuffer()], PROGRAM_ID);
+  const data = Buffer.concat([Buffer.from([12]), w64(priceMicroUsd), Buffer.from([decimals])]);
+  await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+      { pubkey: oraclePda, isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: adminPda, isSigner: false, isWritable: false },
+    ],
+    data,
+  })), [keypair], { commitment: 'confirmed' });
+  console.log(`Feed set: ${oraclePda.toBase58()} = ${priceMicroUsd} micro-USD (${decimals} decimals)`);
+}
+
+async function fetchUsdPrice(coingeckoId) {
+  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coingeckoId}&vs_currencies=usd`);
+  if (!res.ok) throw new Error(`CoinGecko failed: ${res.status}`);
+  const j = await res.json();
+  const price = j[coingeckoId]?.usd;
+  if (!price) throw new Error(`No price for ${coingeckoId}`);
+  return price;
+}
+
+main().catch((e) => { console.error('FAILED:', e.message || e); process.exit(1); });
