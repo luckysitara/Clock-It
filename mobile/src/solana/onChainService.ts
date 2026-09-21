@@ -669,16 +669,16 @@ export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usd
     'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
     'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', // SKR
   ].join(',');
-  // Candidate URL shapes: the configured URL may be a bare host, the price
-  // endpoint itself, or a gateway route — try each, take the first success.
+  // Jupiter Price API — proven shape from the reimagine stack is /price/v3
+  // (top-level token-id keys with usdPrice). v2 and bare shapes are kept as
+  // fallback candidates; CoinGecko is the last resort.
   const vsToken = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-  const candidates = JUPITER_API_URL
-    ? [
-        `${JUPITER_API_URL.replace(/\/+$/, '')}/price/v2?ids=${mintIds}&vsToken=${vsToken}`,
-        `${JUPITER_API_URL.replace(/\/+$/, '')}?ids=${mintIds}&vsToken=${vsToken}`,
-        `${JUPITER_API_URL.replace(/\/+$/, '')}/price?ids=${mintIds}&vsToken=${vsToken}`,
-      ]
-    : [`https://api.jup.ag/price/v2?ids=${mintIds}&vsToken=${vsToken}`];
+  const base = (JUPITER_API_URL || 'https://api.jup.ag').replace(/\/+$/, '');
+  const candidates = [
+    `${base}/price/v3?ids=${mintIds}`,
+    `${base}/price/v2?ids=${mintIds}&vsToken=${vsToken}`,
+    `${base}?ids=${mintIds}&vsToken=${vsToken}`,
+  ];
   try {
     let jupRes: Response | null = null;
     for (const url of candidates) {
@@ -690,8 +690,16 @@ export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usd
     if (jupRes && jupRes.ok) {
       const data = await jupRes.json();
       const byId: Record<string, number> = {};
-      for (const [k, v] of Object.entries(data?.data || {})) {
-        byId[k] = Number((v as any)?.price);
+      if (data?.data && typeof data.data === 'object') {
+        // v2 shape: { data: { [id]: { price } } }
+        for (const [k, v] of Object.entries(data.data)) {
+          byId[k] = Number((v as any)?.price);
+        }
+      } else {
+        // v3 shape: { [id]: { usdPrice } }
+        for (const [k, v] of Object.entries(data)) {
+          byId[k] = Number((v as any)?.usdPrice ?? (v as any)?.price);
+        }
       }
       if (byId['So11111111111111111111111111111111111111112']) {
         livePrices.sol = byId['So11111111111111111111111111111111111111112'];
