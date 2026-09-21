@@ -58,6 +58,7 @@ fn test_loan_order_serialization() {
         due_time: 1700000000 + 86400 * 7,
         grace_period_expires: 0,
         status: LoanStatus::Active,
+        locked_skr: 0,
     };
 
     let mut buffer = [0u8; LoanOrder::LEN];
@@ -105,6 +106,7 @@ fn test_user_profile_serialization() {
         total_loans_completed: 18,
         total_loans_defaulted: 0,
         reputation_score: 9950, // 99.5% completion rating
+        locked_skr: 0,
     };
 
     let mut buffer = [0u8; UserProfile::LEN];

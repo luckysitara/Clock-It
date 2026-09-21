@@ -64,6 +64,8 @@ pub enum ClockLendError {
     InvalidOracleAccount,
     #[error("Stale Oracle Price Feed")]
     StaleOraclePrice,
+    #[error("Staked SKR is locked by active loans")]
+    StakeLocked,
 }
 
 impl From<ClockLendError> for ProgramError {

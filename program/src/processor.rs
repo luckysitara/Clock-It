@@ -383,12 +383,13 @@ pub fn process_initialize_pool(
         &[POOL_SEED, authority.key.as_ref(), &pool_id_bytes, &[pool_bump]],
     )?;
 
-    // F-02: If SPL token liquidity mint and vault account is uninitialized, create/initialize vault token PDA
-    let is_native_sol_mint = *liquidity_mint.key == Pubkey::default()
-        || liquidity_mint.key == &solana_program::system_program::ID
-        || liquidity_mint.key == &spl_token::native_mint::id();
+    // Informational 2: Liquidity pools must be SPL token based. Raw native SOL is rejected (Wrapped SOL must be used instead).
+    if *liquidity_mint.key == Pubkey::default() || liquidity_mint.key == &solana_program::system_program::ID {
+        return Err(ClockLendError::UnsupportedCollateralMint.into());
+    }
 
-    if !is_native_sol_mint && vault_account.owner == &solana_program::system_program::id() {
+    // F-02: If SPL token/WSOL liquidity mint and vault account is uninitialized, create/initialize vault token PDA
+    if vault_account.owner == &solana_program::system_program::id() {
         if let Some(token_program) = token_program_opt {
             create_or_allocate_token_pda(
                 authority,
@@ -582,6 +583,7 @@ pub fn process_stake_skr(
             total_loans_completed: 0,
             total_loans_defaulted: 0,
             reputation_score: 10000, // 100% starting reputation
+            locked_skr: 0,
         };
         initial_profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
     }
@@ -643,6 +645,7 @@ pub fn process_unstake_skr(
     let user_skr_account = next_account_info(account_info_iter)?;
     let skr_escrow_account = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
+    let pool_account_opt = next_account_info(account_info_iter).ok();
 
     assert_signer(user)?;
     assert_token_program(token_program)?;
@@ -665,6 +668,12 @@ pub fn process_unstake_skr(
 
     if profile.staked_skr < amount {
         return Err(ClockLendError::ExpectedAmountMismatch.into());
+    }
+
+    // Security check: Staked SKR cannot be withdrawn while locked by active loans
+    let available_skr = profile.staked_skr.saturating_sub(profile.locked_skr);
+    if available_skr < amount {
+        return Err(ClockLendError::StakeLocked.into());
     }
 
     let (expected_skr_escrow_pda, escrow_bump) =
@@ -701,6 +710,17 @@ pub fn process_unstake_skr(
         .checked_sub(amount)
         .ok_or(ClockLendError::AmountOverflow)?;
     profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
+
+    // Informational 1: If pool is also provided, update pool's staked_skr_amount (to keep in sync)
+    if let Some(pool_account) = pool_account_opt {
+        if pool_account.owner == program_id && !pool_account.data_is_empty() {
+            let mut pool = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?)?;
+            if pool.authority == *user.key {
+                pool.staked_skr_amount = pool.staked_skr_amount.saturating_sub(amount);
+                pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
+            }
+        }
+    }
 
     msg!("ClockLend: Unstaked {} SKR tokens successfully", amount);
     Ok(())
@@ -1230,16 +1250,44 @@ pub fn process_borrow_from_pool(
     let due_time = now.checked_add(duration_seconds).ok_or(ClockLendError::AmountOverflow)?;
 
     let mut effective_interest_rate_bps = pool.interest_rate_bps;
+    let mut bond_to_lock: u64 = 0;
     if let Some(profile_acc) = user_profile_opt {
-        if profile_acc.owner == program_id && profile_acc.data_len() == UserProfile::LEN {
-            if let Ok(profile) = UserProfile::unpack_from_slice(&profile_acc.try_borrow_data()?) {
-                if profile.user == *borrower.key && profile.staked_skr > 0 {
-                    let discount = if profile.staked_skr >= 1_000_000_000 {
-                        effective_interest_rate_bps / 2
-                    } else {
-                        (effective_interest_rate_bps as u32 * 2500 / 10000) as u16
-                    };
-                    effective_interest_rate_bps = effective_interest_rate_bps.saturating_sub(discount);
+        if profile_acc.owner == program_id && (profile_acc.data_len() == UserProfile::LEN || profile_acc.data_len() == 51) {
+            if profile_acc.data_len() < UserProfile::LEN {
+                let rent = Rent::get()?;
+                let required_lamports = rent.minimum_balance(UserProfile::LEN);
+                if profile_acc.lamports() < required_lamports {
+                    let diff = required_lamports.saturating_sub(profile_acc.lamports());
+                    invoke(
+                        &system_instruction::transfer(borrower.key, profile_acc.key, diff),
+                        &[borrower.clone(), profile_acc.clone(), system_program.clone()],
+                    )?;
+                }
+                #[allow(deprecated)]
+                profile_acc.realloc(UserProfile::LEN, false)?;
+            }
+            let maybe_profile: Option<UserProfile> = {
+                let data = profile_acc.try_borrow_data()?;
+                UserProfile::unpack_from_slice(&data).ok()
+            };
+            if let Some(mut profile) = maybe_profile {
+                if profile.user == *borrower.key {
+                    let available_skr = profile.staked_skr.saturating_sub(profile.locked_skr);
+                    if available_skr >= 1_000_000_000 {
+                        // Tier 2: >= 1,000 SKR gives 50% discount and locks 1,000 SKR bond
+                        let discount = effective_interest_rate_bps / 2;
+                        effective_interest_rate_bps = effective_interest_rate_bps.saturating_sub(discount);
+                        bond_to_lock = 1_000_000_000;
+                    } else if available_skr >= 100_000_000 {
+                        // Tier 1: >= 100 SKR gives 25% discount and locks 100 SKR bond
+                        let discount = (effective_interest_rate_bps as u32 * 2500 / 10000) as u16;
+                        effective_interest_rate_bps = effective_interest_rate_bps.saturating_sub(discount);
+                        bond_to_lock = 100_000_000;
+                    }
+                    if bond_to_lock > 0 {
+                        profile.locked_skr = profile.locked_skr.saturating_add(bond_to_lock);
+                        profile.pack_into_slice(&mut profile_acc.try_borrow_mut_data()?)?;
+                    }
                 }
             }
         }
@@ -1269,6 +1317,7 @@ pub fn process_borrow_from_pool(
         due_time,
         grace_period_expires: 0,
         status: LoanStatus::Active,
+        locked_skr: bond_to_lock,
     };
 
     loan_order.pack_into_slice(&mut loan_order_account.try_borrow_mut_data()?)?;
@@ -1328,6 +1377,54 @@ pub fn process_create_p2p_offer(
         return Err(ClockLendError::InvalidEscrowAccount.into());
     }
 
+    // Escrow collateral: Native SOL or SPL token (SKR)
+    let is_native_sol = *collateral_mint.key == Pubkey::default()
+        || collateral_mint.key == &solana_program::system_program::ID
+        || collateral_mint.key == &spl_token::native_mint::id();
+    let is_skr = *collateral_mint.key == SKR_MINT;
+
+    // F-03: Collateral Allowlist - Collateral must be Native SOL or canonical SKR
+    if !is_native_sol && !is_skr {
+        return Err(ClockLendError::InvalidMint.into());
+    }
+
+    // Informational 3: P2P LTV Sanity Check - Max 150% LTV of collateral value (prevents uncollateralized loan spam)
+    let oracle_feed_opt = next_account_info(account_info_iter).ok();
+    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(oracle_acc) = oracle_feed_opt {
+        if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
+            let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
+            if feed.is_initialized && feed.price_micro_usd > 0 {
+                (feed.price_micro_usd, feed.decimals)
+            } else if is_native_sol {
+                (150_000_000, 9)
+            } else {
+                (20_000, 6)
+            }
+        } else if is_native_sol {
+            (150_000_000, 9)
+        } else {
+            (20_000, 6)
+        }
+    } else if is_native_sol {
+        (150_000_000, 9) // Baseline $150.00 / SOL (9 decimals)
+    } else {
+        (20_000, 6)      // Baseline $0.02 / SKR (6 decimals)
+    };
+
+    let collateral_value_micro_usd = (collateral_amount as u128)
+        .checked_mul(collateral_price_micro_usd as u128)
+        .ok_or(ClockLendError::AmountOverflow)?
+        / 10u128.pow(collateral_decimals as u32);
+
+    let max_requested_amount = collateral_value_micro_usd
+        .checked_mul(15000)
+        .ok_or(ClockLendError::AmountOverflow)?
+        / 10000;
+
+    if (requested_amount as u128) > max_requested_amount {
+        return Err(ClockLendError::InvalidCollateralRatio.into());
+    }
+
     // Create P2P offer PDA (safe against front-run lamport injection)
     create_or_allocate_pda(
         program_id,
@@ -1344,17 +1441,6 @@ pub fn process_create_p2p_offer(
                 return Err(ClockLendError::InvalidInstruction.into());
             }
         }
-    }
-
-    // Escrow collateral: Native SOL or SPL token (SKR)
-    let is_native_sol = *collateral_mint.key == Pubkey::default()
-        || collateral_mint.key == &solana_program::system_program::ID
-        || collateral_mint.key == &spl_token::native_mint::id();
-    let is_skr = *collateral_mint.key == SKR_MINT;
-
-    // F-03: Collateral Allowlist - Collateral must be Native SOL or canonical SKR
-    if !is_native_sol && !is_skr {
-        return Err(ClockLendError::InvalidMint.into());
     }
 
     if is_native_sol {
@@ -1535,7 +1621,7 @@ pub fn process_repay_loan(
             system_program_opt = Some(acc);
         } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
             pool_account_opt = Some(acc);
-        } else if acc.owner == program_id && acc.data_len() == UserProfile::LEN {
+        } else if acc.owner == program_id && (acc.data_len() == UserProfile::LEN || acc.data_len() == 51) {
             user_profile_opt = Some(acc);
         } else if pool_account_opt.is_none() && acc.owner == program_id {
             pool_account_opt = Some(acc);
@@ -1592,6 +1678,8 @@ pub fn process_repay_loan(
         // Checks-Effects-Interactions: Update state BEFORE transfers
         loan.is_active = false;
         loan.status = LoanStatus::Repaid;
+        let locked_to_release = loan.locked_skr;
+        loan.locked_skr = 0;
         loan.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
         // Feature 7: 15% Interest Take-Rate to ClockLend Treasury
@@ -1730,7 +1818,7 @@ pub fn process_repay_loan(
             );
         }
 
-        // Boost user credit profile if passed
+        // Boost user credit profile if passed and release locked SKR bond
         if let Some(profile_account) = user_profile_opt {
             if profile_account.owner == program_id && !profile_account.data_is_empty() {
                 let maybe_profile: Option<UserProfile> = {
@@ -1741,6 +1829,9 @@ pub fn process_repay_loan(
                     if profile.user == *borrower.key {
                         profile.total_loans_completed = profile.total_loans_completed.saturating_add(1);
                         profile.reputation_score = profile.reputation_score.saturating_add(50).min(10000);
+                        if locked_to_release > 0 {
+                            profile.locked_skr = profile.locked_skr.saturating_sub(locked_to_release);
+                        }
                         profile.pack_into_slice(&mut profile_account.try_borrow_mut_data()?)?;
                     }
                 }
@@ -1996,7 +2087,7 @@ pub fn process_claim_default(
             system_program_opt = Some(acc);
         } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
             pool_account_opt = Some(acc);
-        } else if acc.owner == program_id && acc.data_len() == UserProfile::LEN {
+        } else if acc.owner == program_id && (acc.data_len() == UserProfile::LEN || acc.data_len() == 51) {
             user_profile_opt = Some(acc);
         } else if *acc.key == expected_treasury_pda {
             treasury_collateral_opt = Some(acc);
@@ -2095,6 +2186,8 @@ pub fn process_claim_default(
 
         loan.status = LoanStatus::Defaulted;
         loan.is_active = false;
+        let loan_locked_skr = loan.locked_skr;
+        loan.locked_skr = 0;
         loan.pack_into_slice(&mut loan_account.try_borrow_mut_data()?)?;
 
         // Feature 8: Monetization - Protocol Liquidation Margin (5% excess collateral to Treasury)
@@ -2243,8 +2336,9 @@ pub fn process_claim_default(
                         profile.total_loans_defaulted = profile.total_loans_defaulted.saturating_add(1);
                         profile.reputation_score = profile.reputation_score.saturating_sub(1000); // severe penalty
 
-                        // F-06: Slash 20% of staked SKR only if escrow is present and tokens are successfully transferred
-                        let slash_amount = profile.staked_skr.saturating_mul(20) / 100;
+                        // F-06: Slash locked SKR bond (or 20% of staked SKR, whichever is greater)
+                        let base_slash = profile.staked_skr.saturating_mul(20) / 100;
+                        let slash_amount = loan_locked_skr.max(base_slash).min(profile.staked_skr);
                         if slash_amount > 0 {
                             if let (Some(skr_escrow), Some(token_program)) = (skr_escrow_opt, token_program_opt) {
                                 if *skr_escrow.key == expected_borrower_skr_escrow {
@@ -2280,9 +2374,14 @@ pub fn process_claim_default(
 
                                     // Only debit profile.staked_skr AFTER transfer completes successfully
                                     profile.staked_skr = profile.staked_skr.saturating_sub(slash_amount);
+                                    if loan_locked_skr > 0 {
+                                        profile.locked_skr = profile.locked_skr.saturating_sub(loan_locked_skr);
+                                    }
                                     msg!("ClockLend: Slashed & transferred {} SKR to lender ({})", slash_amount, slash_dest.key);
                                 }
                             }
+                        } else if loan_locked_skr > 0 {
+                            profile.locked_skr = profile.locked_skr.saturating_sub(loan_locked_skr);
                         }
                         profile.pack_into_slice(&mut profile_account.try_borrow_mut_data()?)?;
                     }

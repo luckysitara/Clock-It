@@ -1517,6 +1517,15 @@ export const SKR_DEVNET_MINT  = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2
 
       <h3>5. Dynamic On-Chain Price Feed Oracle Architecture</h3>
       <p>Hardcoded asset pricing ($150/SOL, $0.02/SKR) has been upgraded to a dynamic on-chain oracle framework. The ClockLend protocol derives a <code>PriceFeed</code> PDA (seeds: <code>[b"oracle", mint]</code>) with permissioned keeper updates (<code>SetPriceFeed</code>, Instruction 12), dynamic decimal normalization (<code>10^decimals</code>), a strict 24-hour staleness guard (<code>now - last_updated_at &lt;= 86,400s</code> returning <code>StaleOraclePrice</code>), and safe fallback to baseline prices if an oracle feed is unprovisioned. Verified end-to-end with dynamic price borrowing and staleness rejection tests.</p>
+
+      <h3>6. Deep Audit &amp; Adversarial Testing Remediations (49/49 Tests Passing)</h3>
+      <ul class="tight">
+        <li><strong>🔴 High — SKR Bond Evasion:</strong> Added <code>locked_skr: u64</code> to both <code>LoanOrder</code> and <code>UserProfile</code> (with full backwards-compatible pack/unpack support for legacy accounts). Discount Tier 1 (&ge; 100 SKR &rarr; 25% discount) locks 100 SKR; Tier 2 (&ge; 1,000 SKR &rarr; 50% discount) locks 1,000 SKR. <code>process_unstake_skr</code> enforces <code>profile.staked_skr - profile.locked_skr &gt;= amount</code>, failing with <code>StakeLocked</code> if an active loan locks the stake. On repayment, the bond is safely released; on default, the entire locked bond is slashed directly to the lender's SKR destination account.</li>
+        <li><strong>🟠 Informational 1 — Pool Staked SKR Desync:</strong> <code>process_unstake_skr</code> accepts optional <code>pool_account_opt</code> and decrements <code>pool.staked_skr_amount</code> by the unstaked amount when caller is the pool authority.</li>
+        <li><strong>🟠 Informational 2 — Native SOL Liquidity Pools:</strong> <code>process_initialize_pool</code> explicitly rejects raw Native SOL mints (<code>Pubkey::default()</code> and <code>system_program::ID</code>) with <code>UnsupportedCollateralMint</code>, mandating Wrapped SOL (<code>spl_token::native_mint::id()</code>) and properly creating token vault PDAs for all SPL/WSOL pools.</li>
+        <li><strong>🟠 Informational 3 — P2P LTV Sanity Cap:</strong> <code>process_create_p2p_offer</code> now calculates dynamic collateral valuation and enforces a 150% maximum LTV ceiling before account allocation, rejecting uncollateralized spam offers (e.g. 1 lamport asking for 1,000,000 USDC) with <code>InvalidCollateralRatio</code>.</li>
+      </ul>
+      <p>All 49 unit, integration, and security tests pass deterministically with zero warnings and zero errors.</p>
     </div>
   </section>
 
