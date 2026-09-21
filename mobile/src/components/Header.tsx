@@ -17,7 +17,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   skrHandle,
   solBalance,
-  network = 'devnet',
+  network = 'mainnet-beta',
   onPressProfile,
   onPressBalance,
   onToggleNetwork,

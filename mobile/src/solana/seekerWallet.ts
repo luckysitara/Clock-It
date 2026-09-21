@@ -5,8 +5,8 @@ import { base64ToUint8Array, base64ToBase58 } from '@solana-mobile/mobile-wallet
 import { Buffer } from 'buffer';
 import * as SecureStore from 'expo-secure-store';
 import {
-  devnetConnection,
   getConnection,
+  mainnetConnection,
   PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -112,14 +112,14 @@ export async function deriveSkrUsername(pubkey: PublicKey, mwaLabel?: string): P
 
   const base58 = pubkey.toBase58();
 
-  // 2. Recognized developer/faucet address mapping on Devnet
+  // 2. Recognized developer address mapping
   if (base58 === 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re') {
     return 'rootkit.skr';
   }
 
   // 3. Query on-chain SNS registry with a 1500ms timeout guard so it never blocks UI
   try {
-    const snsPromise = devnetConnection.getProgramAccounts(SNS_PROGRAM_ID, {
+    const snsPromise = mainnetConnection.getProgramAccounts(SNS_PROGRAM_ID, {
       filters: [{ memcmp: { offset: 32, bytes: base58 } }],
     });
     const timeoutPromise = new Promise<any[]>((_, reject) =>
@@ -147,7 +147,7 @@ export async function deriveSkrUsername(pubkey: PublicKey, mwaLabel?: string): P
 }
 
 // Connect to Seeker Wallet via Mobile Wallet Adapter
-export async function connectSeekerWallet(cluster: SolanaNetwork = 'devnet'): Promise<SeekerSession> {
+export async function connectSeekerWallet(cluster: SolanaNetwork = 'mainnet-beta'): Promise<SeekerSession> {
   // Execute MWA authorization with immediate return to prevent session timeout
   const authPayload = await transact(async (wallet: Web3MobileWallet) => {
     const authResult = await wallet.authorize({
@@ -245,7 +245,7 @@ export function validateTransactionInstructions(transaction: Transaction): void 
 export async function signAndSendSeekerTransaction(
   transaction: Transaction,
   session: SeekerSession,
-  network: SolanaNetwork = 'devnet'
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<string> {
   // Validate instructions against program ID allowlist before signing
   validateTransactionInstructions(transaction);

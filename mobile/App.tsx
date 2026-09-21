@@ -32,7 +32,6 @@ import {
   fetchLiveP2POffers,
   fetchLiveUserProfile,
   fetchLiveWalletAssets,
-  requestDevnetAirdrop,
   buildBorrowTx,
   buildRepayTx,
   buildTriggerGracePeriodTx,
@@ -67,7 +66,7 @@ function MainApp() {
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [lockScreenMode, setLockScreenMode] = useState<LockScreenMode>('unlock');
   const [session, setSession] = useState<SeekerSession | null>(null);
-  const [selectedNetwork, setSelectedNetwork] = useState<SolanaNetwork>('devnet');
+  const [selectedNetwork, setSelectedNetwork] = useState<SolanaNetwork>('mainnet-beta');
   const [activeTab, setActiveTab] = useState<Tab>('BORROW');
   const [transactionNotice, setTransactionNotice] = useState<TransactionNoticeData | null>(null);
   const [integrity, setIntegrity] = useState<DeviceIntegrityResult | null>(null);
@@ -146,12 +145,12 @@ function MainApp() {
 
   const [pools, setPools] = useState<LendingPool[]>([]);
   const [orders, setOrders] = useState<LoanOrder[]>([]);
-  const devnetOrdersRef = useRef<LoanOrder[]>([]);
-  const devnetOffersRef = useRef<P2POffer[]>(INITIAL_COMMUNITY_OFFERS);
+  const ordersRef = useRef<LoanOrder[]>([]);
+  const offersRef = useRef<P2POffer[]>(INITIAL_COMMUNITY_OFFERS);
   const [offers, setOffers] = useState<P2POffer[]>(INITIAL_COMMUNITY_OFFERS);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [walletAssets, setWalletAssets] = useState<WalletAssets>({
-    network: 'devnet',
+    network: 'mainnet-beta',
     solBalance: 0,
     usdcBalance: 0,
     skrBalance: 0,
@@ -178,34 +177,10 @@ function MainApp() {
   const refreshWalletAssets = async (userPubkey: PublicKey, net: SolanaNetwork) => {
     try {
       const assets = await fetchLiveWalletAssets(userPubkey, net);
-      if (net === 'devnet') {
-        const activeBorrowAmount = devnetOrdersRef.current
-          .filter((o) => o.status === 'Active' || o.status === 'InGracePeriod')
-          .reduce((sum, o) => sum + o.principalAmount, 0);
-        const activeLockedCollateral = devnetOrdersRef.current
-          .filter((o) => o.status === 'Active' || o.status === 'InGracePeriod')
-          .reduce((sum, o) => sum + (o.collateralName.includes('SOL') ? o.collateralAmount : 0), 0);
-        const activeLockedSkr = devnetOrdersRef.current
-          .filter((o) => o.status === 'Active' || o.status === 'InGracePeriod')
-          .reduce((sum, o) => sum + (o.collateralName.includes('SKR') ? o.collateralAmount : 0), 0);
-
-        const currentUsdc = parseFloat((assets.usdcBalance + activeBorrowAmount).toFixed(2));
-        const currentSol = Math.max(0, parseFloat((assets.solBalance - activeLockedCollateral).toFixed(3)));
-        const currentSkr = Math.max(0, parseFloat((assets.skrBalance - activeLockedSkr).toFixed(0)));
-        const totalUsd = parseFloat((currentSol * 101.12 + currentUsdc + currentSkr * 0.0192).toFixed(2));
-
-        setWalletAssets({
-          ...assets,
-          usdcBalance: currentUsdc,
-          solBalance: currentSol,
-          skrBalance: currentSkr,
-          totalUsdValue: totalUsd,
-        });
-        setSolBalance(currentSol);
-      } else {
-        setWalletAssets(assets);
-        setSolBalance(assets.solBalance);
-      }
+      // Balances are RPC-authoritative — the chain has already moved loan
+      // disbursements and collateral, so no local adjustments are applied.
+      setWalletAssets(assets);
+      setSolBalance(assets.solBalance);
     } catch (e) {
       console.log('Error refreshing assets:', e);
     }
@@ -229,9 +204,9 @@ function MainApp() {
         if (net === 'devnet') {
           const onChainOffers = liveOffers.value;
           const onChainIds = new Set(onChainOffers.map((o) => o.id));
-          const sessionActive = devnetOffersRef.current.filter((o) => !onChainIds.has(o.id));
+          const sessionActive = offersRef.current.filter((o) => !onChainIds.has(o.id));
           const combined = [...sessionActive, ...onChainOffers];
-          devnetOffersRef.current = combined;
+          offersRef.current = combined;
           setOffers(combined);
         } else {
           setOffers([]);
@@ -241,7 +216,7 @@ function MainApp() {
       if (liveOrders.status === 'fulfilled') {
         if (net === 'devnet') {
           const onChainOrders = liveOrders.value;
-          devnetOrdersRef.current = onChainOrders;
+          ordersRef.current = onChainOrders;
           setOrders(onChainOrders);
           await setCachedOrders(userPubkey.toBase58(), onChainOrders);
           // Recalculate assets with final verified on-chain orders
@@ -266,29 +241,17 @@ function MainApp() {
       // 1. Fast 0ms local hybrid cache hydration
       getCachedOrders(pubkeyStr).then((cached) => {
         if (cached && cached.length > 0) {
-          devnetOrdersRef.current = cached;
+          ordersRef.current = cached;
           setOrders(cached);
         }
         // 2. Query wallet assets (incorporating activeBorrowAmount immediately)
         refreshWalletAssets(pubkey, selectedNetwork);
       });
 
-      // 3. Concurrently pull ground-truth blockchain state from Solana Devnet
+      // 3. Concurrently pull ground-truth blockchain state
       loadProtocolData(pubkey, session.skrHandle, selectedNetwork);
     }
   }, [session?.publicKey, selectedNetwork]);
-
-  // Request Devnet SOL / USDC airdrop
-  const handleAirdrop = async () => {
-    if (!session) return;
-    try {
-      await requestDevnetAirdrop(session.publicKey);
-      await refreshWalletAssets(session.publicKey, selectedNetwork);
-      showToast('Devnet SOL & USDC Airdropped!');
-    } catch (err: any) {
-      Alert.alert('Funding Notice', err?.message || 'Faucet limit reached. Please wait a moment.');
-    }
-  };
 
   // Logout handler with sleek toast feedback (no annoying OS alert popup)
   const handleDisconnect = () => {
@@ -296,13 +259,13 @@ function MainApp() {
     const handle = session?.skrHandle ? `@${session.skrHandle}` : 'wallet';
     setSession(null);
     setOrders([]);
-    devnetOrdersRef.current = [];
-    devnetOffersRef.current = INITIAL_COMMUNITY_OFFERS;
+    ordersRef.current = [];
+    offersRef.current = INITIAL_COMMUNITY_OFFERS;
     setOffers(INITIAL_COMMUNITY_OFFERS);
     setUserProfile(null);
     setSolBalance(0);
     setWalletAssets({
-      network: 'devnet',
+      network: 'mainnet-beta',
       solBalance: 0,
       usdcBalance: 0,
       skrBalance: 0,
@@ -322,25 +285,6 @@ function MainApp() {
     pool: LendingPool
   ) => {
     if (!session) return;
-
-    // Smart network routing: check if user is on Mainnet
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend smart contracts are currently running on Solana Devnet (HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3).\n\nMainnet is currently read-only for asset balance tracking. Would you like to switch to Devnet to test borrowing and escrow locking?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Switch to Devnet',
-            onPress: () => {
-              setSelectedNetwork('devnet');
-              Alert.alert('Switched to Devnet', 'Network set to Devnet. You can now test instant borrowing.');
-            },
-          },
-        ]
-      );
-      return;
-    }
 
     const poolAuthority = new PublicKey(pool.authority);
     const collateralLamports = collateralName.toUpperCase().includes('SOL')
@@ -365,7 +309,7 @@ function MainApp() {
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('Borrow tx confirmed on-chain:', sig);
 
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // 2. Create active loan order in state
       const interestDue = parseFloat((borrowAmount * (pool.interestRateBps / 10000) * (7 / 365)).toFixed(2));
@@ -388,9 +332,9 @@ function MainApp() {
         solscanUrl,
       };
 
-      devnetOrdersRef.current = [newOrder, ...devnetOrdersRef.current.filter((o) => o.id !== loanId)];
-      setOrders(devnetOrdersRef.current);
-      await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+      ordersRef.current = [newOrder, ...ordersRef.current.filter((o) => o.id !== loanId)];
+      setOrders(ordersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
 
       // 3. Update wallet assets (credit borrowed USDC, deduct locked collateral)
       setWalletAssets((prev) => {
@@ -478,12 +422,12 @@ function MainApp() {
       );
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Remove / mark order as repaid
-      devnetOrdersRef.current = devnetOrdersRef.current.filter((o) => o.id !== order.id);
-      setOrders(devnetOrdersRef.current);
-      await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+      ordersRef.current = ordersRef.current.filter((o) => o.id !== order.id);
+      setOrders(ordersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
 
       // Return collateral to wallet and deduct repaid USDC
       setWalletAssets((prev) => {
@@ -562,14 +506,14 @@ function MainApp() {
 
       const tx = await buildTriggerGracePeriodTx(session.publicKey, loanPDA, poolPDA);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      devnetOrdersRef.current = devnetOrdersRef.current.map((o) =>
+      ordersRef.current = ordersRef.current.map((o) =>
         o.id === orderId ? { ...o, status: 'InGracePeriod' as const, txSignature: sig, solscanUrl } : o
       );
-      setOrders(devnetOrdersRef.current);
+      setOrders(ordersRef.current);
       if (session?.publicKey) {
-        await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+        await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
       }
       setTransactionNotice({
         type: 'grace',
@@ -583,12 +527,12 @@ function MainApp() {
     } catch (err: any) {
       console.warn('Trigger grace error:', err);
       // Still update UI locally with notice
-      devnetOrdersRef.current = devnetOrdersRef.current.map((o) =>
+      ordersRef.current = ordersRef.current.map((o) =>
         o.id === orderId ? { ...o, status: 'InGracePeriod' as const } : o
       );
-      setOrders(devnetOrdersRef.current);
+      setOrders(ordersRef.current);
       if (session?.publicKey) {
-        await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+        await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
       }
       setTransactionNotice({
         type: 'grace',
@@ -622,7 +566,7 @@ function MainApp() {
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('P2P pawn offer created on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       const solMatch = name.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
       const skrMatch = name.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
@@ -647,8 +591,8 @@ function MainApp() {
         solscanUrl,
       };
 
-      devnetOffersRef.current = [newOffer, ...devnetOffersRef.current.filter((o) => o.id !== offerId)];
-      setOffers(devnetOffersRef.current);
+      offersRef.current = [newOffer, ...offersRef.current.filter((o) => o.id !== offerId)];
+      setOffers(offersRef.current);
 
       // Deduct SOL or SKR for collateral or escrow rent
       setWalletAssets((prev) => {
@@ -710,9 +654,9 @@ function MainApp() {
       const tx = await buildFundP2POfferTx(session.publicKey, targetOffer);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('P2P pawn funded on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      devnetOffersRef.current = devnetOffersRef.current.map((o) =>
+      offersRef.current = offersRef.current.map((o) =>
         o.id === offerId
           ? {
               ...o,
@@ -723,7 +667,7 @@ function MainApp() {
             }
           : o
       );
-      setOffers([...devnetOffersRef.current]);
+      setOffers([...offersRef.current]);
 
       // Deduct funded principal from user's USDC balance
       setWalletAssets((prev) => {
@@ -788,13 +732,13 @@ function MainApp() {
     try {
       const tx = await buildRepayPawnOfferTx(session.publicKey, offer);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Update offer status to 'Repaid'
-      devnetOffersRef.current = devnetOffersRef.current.map((o) =>
+      offersRef.current = offersRef.current.map((o) =>
         o.id === offer.id ? { ...o, status: 'Repaid' as OfferStatus, solscanUrl, txSignature: sig } : o
       );
-      setOffers([...devnetOffersRef.current]);
+      setOffers([...offersRef.current]);
 
       // Release collateral back to user's wallet and deduct repaid USDC
       setWalletAssets((prev) => {
@@ -862,11 +806,11 @@ function MainApp() {
     try {
       const tx = await buildCancelPawnOfferTx(session.publicKey, offer);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Remove offer from active list
-      devnetOffersRef.current = devnetOffersRef.current.filter((o) => o.id !== offer.id);
-      setOffers([...devnetOffersRef.current]);
+      offersRef.current = offersRef.current.filter((o) => o.id !== offer.id);
+      setOffers([...offersRef.current]);
 
       // Return collateral to wallet
       setWalletAssets((prev) => {
@@ -934,7 +878,7 @@ function MainApp() {
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('Lending pool created on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       const newPool: LendingPool = {
         id: poolId,
@@ -1008,7 +952,7 @@ function MainApp() {
       const { tx, profilePDA, escrowPDA } = await buildStakeSkrTx(session.publicKey, amount);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('SKR staked on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Update user profile reputation & tier
       setUserProfile((prev) => {
@@ -1085,7 +1029,7 @@ function MainApp() {
       const tx = await buildDepositLiquidityTx(session.publicKey, pool.id, amount);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('Liquidity deposited on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Refresh pools so the desk's Available capacity reflects the deposit
       fetchLivePools(selectedNetwork).then((livePools) => setPools(livePools)).catch((err) => {
@@ -1131,7 +1075,7 @@ function MainApp() {
       const { tx, escrowPDA } = await buildUnstakeSkrTx(session.publicKey, amount);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
       console.log('SKR unstaked on-chain:', sig);
-      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+      const solscanUrl = `https://solscan.io/tx/${sig}`;
 
       // Credit the returned SKR back to the wallet
       setWalletAssets((prev) => {
@@ -1271,7 +1215,6 @@ function MainApp() {
             userProfile={currentProfile}
             walletAssets={walletAssets}
             onBorrow={handleBorrow}
-            onRequestAirdrop={handleAirdrop}
             isLoadingPools={isLoadingPools}
           />
         )}
@@ -1432,7 +1375,6 @@ function MainApp() {
         skrHandle={session.skrHandle}
         assets={walletAssets}
         network={selectedNetwork}
-        onSelectNetwork={(net) => setSelectedNetwork(net)}
         onRefresh={() => refreshWalletAssets(session.publicKey, selectedNetwork)}
         onSwitchAddress={handleSwitchAddress}
         onDisconnect={handleDisconnect}

@@ -60,7 +60,7 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
   };
 
   const openExplorer = () => {
-    Linking.openURL(`https://explorer.solana.com/address/${PROGRAM_ID.toBase58()}?cluster=devnet`);
+    Linking.openURL(`https://explorer.solana.com/address/${PROGRAM_ID.toBase58()}`);
   };
 
   const shorten = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-6)}`;
