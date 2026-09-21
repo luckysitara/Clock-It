@@ -43,6 +43,7 @@ import {
   buildCreatePoolTx,
   buildStakeSkrTx,
   buildUnstakeSkrTx,
+  buildDepositLiquidityTx,
   getCachedOrders,
   setCachedOrders,
 } from './src/solana/onChainService';
@@ -1150,6 +1151,64 @@ function MainApp() {
     }
   };
 
+  // Deposit liquidity into a desk the user owns (Pool Authority only)
+  const handleDepositLiquidity = async (pool: LendingPool, amount: number) => {
+    if (!session) return;
+
+    if (selectedNetwork === 'mainnet-beta') {
+      Alert.alert(
+        'Devnet Testing Mode',
+        'ClockLend liquidity pools are running on Solana Devnet.\n\nSwitch to Devnet to fund your desk.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
+        ]
+      );
+      return;
+    }
+
+    try {
+      const tx = await buildDepositLiquidityTx(session.publicKey, pool.id, amount);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      console.log('Liquidity deposited on-chain:', sig);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      // Refresh pools so the desk's Available capacity reflects the deposit
+      fetchLivePools().then((livePools) => setPools(livePools)).catch((err) => {
+        console.warn('Pool refresh after deposit failed:', err);
+      });
+
+      setTransactionNotice({
+        type: 'repay',
+        title: '💧 Desk Funded!',
+        subtitle: `Deposited $${amount.toLocaleString()} USDC into "${pool.name}". Borrowers can now draw against your desk.`,
+        amount: `$${amount.toLocaleString()} USDC`,
+        collateral: `Pool #${pool.id}`,
+        txSignature: sig,
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Done',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        setTransactionNotice({
+          type: 'error',
+          title: 'Deposit Cancelled',
+          subtitle: 'Transaction was cancelled in your wallet.',
+          primaryBtnText: 'Dismiss',
+        });
+        return;
+      }
+      console.warn('DepositLiquidity transaction failed:', err);
+      setTransactionNotice({
+        type: 'error',
+        title: 'Deposit Notice',
+        subtitle: err?.message || 'Could not deposit liquidity on-chain. Only the desk owner can fund a desk.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
   // NEW-3: Execute real on-chain Unstake SKR transaction (exit path for the bond)
   const handleUnstakeSkr = async (amount: number) => {
     if (!session) return;
@@ -1328,6 +1387,7 @@ function MainApp() {
             onRepayPawnOffer={handleRepayPawnOffer}
             onCancelPawnOffer={handleCancelPawnOffer}
             onCreatePool={handleCreatePool}
+            onDepositLiquidity={handleDepositLiquidity}
             onNfcBumpCircle={() => {
               loadProtocolData(session.publicKey, session.skrHandle);
             }}
