@@ -7,7 +7,9 @@ import {
 // Load the repo-root .env (no external deps) so server-side scripts can use
 // SOLANA_RPC_URL / HELIUS_RPC_URL without exporting them manually.
 function loadEnv() {
-  const envPath = new URL('../.env', import.meta.url).pathname;
+  // Try the repo-root .env first (server keys), then the app's mobile/.env
+  let envPath = new URL('../../.env', import.meta.url).pathname;
+  if (!fs.existsSync(envPath)) envPath = new URL('../.env', import.meta.url).pathname;
   try {
     for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
@@ -42,11 +44,22 @@ const w64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); r
 async function main() {
   const [adminPda] = PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);
 
-  const solUsd = solPriceOverride > 0 ? solPriceOverride : await fetchUsdPrice('solana');
+  const solUsd = solPriceOverride > 0
+    ? solPriceOverride
+    : await fetchJupUsdPrice(NATIVE_MINT.toBase58()).catch(() => fetchUsdPrice('solana'));
   await setFeed(NATIVE_MINT, Math.round(solUsd * 1e6), 9, adminPda, `SOL $${solUsd}`);
 
-  if (skrPrice > 0) {
-    await setFeed(SKR_MINT, Math.round(skrPrice * 1e6), 6, adminPda, `SKR $${skrPrice}`);
+  // SKR is listed on Jupiter (jup.ag/tokens/SKRbvo6Gf…); default to the live
+  // market price unless --skr-price is passed as a manual override.
+  if (skrPrice > 0 || network === 'mainnet-beta') {
+    const skrUsd = skrPrice > 0
+      ? skrPrice
+      : await fetchJupUsdPrice(SKR_MINT.toBase58()).catch(() => 0);
+    if (skrUsd > 0) {
+      await setFeed(SKR_MINT, Math.round(skrUsd * 1e6), 6, adminPda, `SKR $${skrUsd}`);
+    } else {
+      console.log('  SKR price unavailable from Jupiter — feed left unchanged.');
+    }
   }
   console.log(`${new Date().toISOString()} keeper run complete (${network})`);
 }
@@ -71,6 +84,17 @@ async function setFeed(mint, priceMicroUsd, decimals, adminPda, label) {
   } catch (e) {
     console.error(`  FAILED to update ${label}: ${e.message}`);
   }
+}
+
+async function fetchJupUsdPrice(mint) {
+  const base = (process.env.JUPITER_API_URL || 'https://api.jup.ag').replace(/\/+$/, '');
+  const headers = process.env.JUPITER_API_KEY ? { 'x-api-key': process.env.JUPITER_API_KEY } : {};
+  const res = await fetch(`${base}/price/v3?ids=${mint}`, { headers });
+  if (!res.ok) throw new Error(`Jupiter price failed: ${res.status}`);
+  const j = await res.json();
+  const usd = j?.[mint]?.usdPrice;
+  if (!usd) throw new Error(`No Jupiter price for ${mint}`);
+  return Number(usd);
 }
 
 async function fetchUsdPrice(coingeckoId) {

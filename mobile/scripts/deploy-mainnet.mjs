@@ -13,7 +13,9 @@ import { execSync } from 'child_process';
 // Load the repo-root .env (no external deps) so server-side scripts can use
 // SOLANA_RPC_URL / HELIUS_RPC_URL without exporting them manually.
 function loadEnv() {
-  const envPath = new URL('../.env', import.meta.url).pathname;
+  // Try the repo-root .env first (server keys), then the app's mobile/.env
+  let envPath = new URL('../../.env', import.meta.url).pathname;
+  if (!fs.existsSync(envPath)) envPath = new URL('../.env', import.meta.url).pathname;
   try {
     for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
@@ -97,17 +99,21 @@ async function main() {
   ), [keypair], { commitment: 'confirmed' });
   console.log(`Treasury USDC ATA: ${treasuryAta.toBase58()}`);
 
-  // 4. Publish the global SOL price feed (fetched from CoinGecko at deploy time)
-  const solUsd = await fetchUsdPrice('solana');
+  // 4. Publish the global SOL price feed (Jupiter first, CoinGecko fallback)
+  const solUsd = await fetchJupUsdPrice(NATIVE_MINT.toBase58()).catch(() => fetchUsdPrice('solana'));
   console.log(`Publishing SOL feed at $${solUsd}...`);
   await setFeed(NATIVE_MINT, Math.round(solUsd * 1e6), 9, adminPda);
 
-  // 5. Optionally publish the SKR feed
-  if (skrPrice > 0) {
-    console.log(`Publishing SKR feed at $${skrPrice}...`);
-    await setFeed(SKR_MINT, Math.round(skrPrice * 1e6), 6, adminPda);
+  // 5. Publish the SKR feed — Jupiter market price by default (SKR is listed
+  // at jup.ag/tokens/SKRbvo6Gf…), --skr-price overrides manually.
+  const skrUsd = skrPrice > 0
+    ? skrPrice
+    : await fetchJupUsdPrice(SKR_MINT.toBase58()).catch(() => 0);
+  if (skrUsd > 0) {
+    console.log(`Publishing SKR feed at $${skrUsd}...`);
+    await setFeed(SKR_MINT, Math.round(skrUsd * 1e6), 6, adminPda);
   } else {
-    console.log('SKR feed skipped (pass --skr-price 0.02 to publish).');
+    console.log('SKR feed skipped — no Jupiter price and no --skr-price override.');
   }
 
   // 6. Optionally create the first desk (mainnet USDC)
@@ -159,6 +165,17 @@ async function setFeed(mint, priceMicroUsd, decimals, adminPda) {
     data,
   })), [keypair], { commitment: 'confirmed' });
   console.log(`Feed set: ${oraclePda.toBase58()} = ${priceMicroUsd} micro-USD (${decimals} decimals)`);
+}
+
+async function fetchJupUsdPrice(mint) {
+  const base = (process.env.JUPITER_API_URL || 'https://api.jup.ag').replace(/\/+$/, '');
+  const headers = process.env.JUPITER_API_KEY ? { 'x-api-key': process.env.JUPITER_API_KEY } : {};
+  const res = await fetch(`${base}/price/v3?ids=${mint}`, { headers });
+  if (!res.ok) throw new Error(`Jupiter price failed: ${res.status}`);
+  const j = await res.json();
+  const usd = j?.[mint]?.usdPrice;
+  if (!usd) throw new Error(`No Jupiter price for ${mint}`);
+  return Number(usd);
 }
 
 async function fetchUsdPrice(coingeckoId) {
