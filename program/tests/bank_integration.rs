@@ -4435,8 +4435,509 @@ async fn test_bank_claim_default_without_token_program_rejected() {
     assert_eq!(loan_state.status, LoanStatus::InGracePeriod, "Loan state must not be corrupted!");
 }
 
+#[tokio::test]
+async fn test_bank_stake_skr_rejects_frontrun_escrow_authority() {
+    // Front-run defense: a token account pre-created at the skr_escrow PDA
+    // with an attacker-controlled authority must be rejected, otherwise the
+    // attacker could drain every token staked into it.
+    use solana_program::system_program;
+
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+
+    let user = Keypair::new();
+    let attacker = Keypair::new();
+
+    let (profile_pda, _) = Pubkey::find_program_address(&[PROFILE_SEED, user.pubkey().as_ref()], &program_id);
+    let (skr_escrow_pda, _) = Pubkey::find_program_address(&[b"skr_escrow", user.pubkey().as_ref()], &program_id);
+
+    program_test.add_account(
+        skr_escrow_pda,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(SKR_MINT, attacker.pubkey(), 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let user_skr = Keypair::new();
+    program_test.add_account(
+        user_skr.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(SKR_MINT, user.pubkey(), 1_000_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        user.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(user_skr.pubkey(), false),
+            AccountMeta::new(skr_escrow_pda, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(SKR_MINT, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::StakeSKR { amount: 100_000_000 }).unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &user], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Front-run escrow with attacker authority MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidAccountOwner as u32, "Error must be InvalidAccountOwner");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_create_p2p_offer_rejects_excessive_interest() {
+    // V-A1: interest beyond the principal would make the offer permanently
+    // unrepayable — reject at creation.
+    let program_id = Pubkey::new_unique();
+    let program_test = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let offer_id: u64 = 1;
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, payer.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(payer.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::CreateP2POffer {
+            offer_id,
+            requested_amount: 100_000_000,
+            collateral_amount: 1_000_000_000,
+            interest_offered: 200_000_000, // > principal — must be rejected
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Interest exceeding the principal MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidInstruction as u32, "Error must be InvalidInstruction");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_claim_default_native_rejects_vault_destination() {
+    // F6: raw lamports liquidated into the SPL vault token account would be
+    // permanently stranded — native SOL must go to the pool authority wallet.
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let pool_id: u64 = 1;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+    let loan_id: u64 = 300;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+
+    let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        name: [0u8; 32],
+        liquidity_mint: Pubkey::new_unique(),
+        vault_pda,
+        total_liquidity: 0,
+        total_borrowed: 100_000_000,
+        staked_skr_amount: 0,
+        interest_rate_bps: 600,
+        max_ltv_bps: 8500,
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 1,
+        loans_repaid: 0,
+        is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
+    };
+    program_test.add_account(pool_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&pool).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+
+    let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
+        is_active: true,
+        loan_id,
+        borrower: borrower.pubkey(),
+        pool: pool_pda,
+        principal_amount: 100_000_000,
+        collateral_mint: Pubkey::default(),
+        collateral_amount: 1_000_000_000,
+        interest_due: 0,
+        origination_time: 1000,
+        due_time: 2000,
+        grace_period_expires: 0,
+        status: LoanStatus::InGracePeriod,
+        locked_skr: 0,
+    };
+    program_test.add_account(loan_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&loan).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(escrow_pda, Account {
+        lamports: 1_000_000_000,
+        data: vec![],
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(treasury_pda, Account {
+        lamports: 10_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new(vault_pda, false), // WRONG: vault is an SPL token account
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(treasury_pda, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::ClaimDefault).unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Native SOL liquidation into the vault MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
 
 
+#[tokio::test]
+async fn test_bank_p2p_grace_trigger_transitions_and_gates() {
+    // P2P grace: only the creator or funder may trigger it, only after
+    // due_time, and the transition Funded -> InGracePeriod must persist.
+    use clock_lend::state::{OfferStatus, P2POffer};
+
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+
+    let creator = Keypair::new();
+    let funder = Keypair::new();
+    let outsider = Keypair::new();
+
+    let offer_id: u64 = 1;
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, creator.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+
+    // Offer A: funded and past due
+    let offer_a = P2POffer {
+        discriminator: P2POffer::DISCRIMINATOR,
+        is_initialized: true,
+        offer_id,
+        creator: creator.pubkey(),
+        funder: funder.pubkey(),
+        collateral_mint: Pubkey::default(), // native SOL
+        liquidity_mint: clock_lend::state::USDC_DEVNET_MINT,
+        collateral_amount: 1_000_000_000,
+        requested_amount: 100_000_000,
+        interest_offered: 10_000_000,
+        duration_seconds: 60,
+        created_at: 1000,
+        due_time: 0, // already past due
+        grace_period_expires: 0,
+        status: OfferStatus::Funded,
+    };
+    program_test.add_account(offer_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&offer_a).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(funder.pubkey(), Account {
+        lamports: 10_000_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(outsider.pubkey(), Account {
+        lamports: 10_000_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
 
 
+    // 4. Offer B: funded but NOT yet due -> grace rejected with LoanNotDue
+    let offer_id_b: u64 = 2;
+    let (offer_b_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, creator.pubkey().as_ref(), &offer_id_b.to_le_bytes()],
+        &program_id,
+    );
+    let offer_b = P2POffer {
+        due_time: 4_000_000_000, // far future
+        ..offer_a.clone()
+    };
+    program_test.add_account(offer_b_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&offer_b).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
 
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Outsider cannot trigger grace
+    let outsider_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(outsider.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::TriggerGracePeriod).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[outsider_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &outsider], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A non-party MUST NOT trigger P2P grace!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::UnauthorizedCaller as u32, "Error must be UnauthorizedCaller");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // 2. Funder triggers grace after due_time -> Funded -> InGracePeriod
+    let grace_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(funder.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::TriggerGracePeriod).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_ix.clone()], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &funder], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Funder MUST be able to trigger grace past due_time! Result: {:?}", res);
+
+    let offer_acc = banks_client.get_account(offer_pda).await.unwrap().unwrap();
+    let offer = P2POffer::unpack_from_slice(&offer_acc.data).unwrap();
+    assert_eq!(offer.status, OfferStatus::InGracePeriod, "Offer must transition to InGracePeriod");
+    assert!(offer.grace_period_expires > 0, "Grace expiry must be set to now + 86400");
+
+    let grace_b_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(funder.pubkey(), true),
+            AccountMeta::new(offer_b_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::TriggerGracePeriod).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_b_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &funder], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Grace before due_time MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::LoanNotDue as u32, "Error must be LoanNotDue");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_p2p_claim_default_after_grace() {
+    // P2P liquidation: only the funder may claim after grace expiry; the
+    // collateral moves to the funder and the offer becomes Defaulted.
+    use clock_lend::state::{OfferStatus, P2POffer};
+
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+
+    let creator = Keypair::new();
+    let funder = Keypair::new();
+    let outsider = Keypair::new();
+
+    let offer_id: u64 = 7;
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, creator.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+
+    let offer = P2POffer {
+        discriminator: P2POffer::DISCRIMINATOR,
+        is_initialized: true,
+        offer_id,
+        creator: creator.pubkey(),
+        funder: funder.pubkey(),
+        collateral_mint: Pubkey::default(), // native SOL
+        liquidity_mint: clock_lend::state::USDC_DEVNET_MINT,
+        collateral_amount: 1_000_000_000,
+        requested_amount: 100_000_000,
+        interest_offered: 10_000_000,
+        duration_seconds: 60,
+        created_at: 1000,
+        due_time: 2000,
+        grace_period_expires: 0, // expired
+        status: OfferStatus::InGracePeriod,
+    };
+    program_test.add_account(offer_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&offer).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(escrow_pda, Account {
+        lamports: 1_000_000_000,
+        data: vec![],
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(funder.pubkey(), Account {
+        lamports: 10_000_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+    program_test.add_account(outsider.pubkey(), Account {
+        lamports: 10_000_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Outsider cannot claim
+    let outsider_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(outsider.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new(outsider.pubkey(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::ClaimDefault).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[outsider_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &outsider], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A non-funder MUST NOT claim P2P collateral!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::UnauthorizedCaller as u32, "Error must be UnauthorizedCaller");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // 2. Funder claims after grace expiry
+    let funder_before = banks_client.get_account(funder.pubkey()).await.unwrap().unwrap().lamports;
+    let claim_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(funder.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new(funder.pubkey(), false), // native SOL destination == funder
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::ClaimDefault).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[claim_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &funder], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Funder MUST be able to claim defaulted collateral! Result: {:?}", res);
+
+    let escrow = banks_client.get_account(escrow_pda).await.unwrap();
+    assert!(escrow.is_none(), "Escrow must be fully drained and purged by rent collection");
+
+    let funder_after = banks_client.get_account(funder.pubkey()).await.unwrap().unwrap().lamports;
+    assert_eq!(funder_after, funder_before + 1_000_000_000, "Funder must receive the 1 SOL collateral");
+
+    let offer_acc = banks_client.get_account(offer_pda).await.unwrap().unwrap();
+    let offer_state = P2POffer::unpack_from_slice(&offer_acc.data).unwrap();
+    assert_eq!(offer_state.status, OfferStatus::Defaulted, "Offer must be Defaulted");
+}

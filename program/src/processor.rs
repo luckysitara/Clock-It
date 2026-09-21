@@ -198,6 +198,14 @@ fn create_or_allocate_token_pda<'a>(
         if pda_account.owner != token_program.key {
             return Err(ClockLendError::InvalidAccountOwner.into());
         }
+        // Front-run defense: if the token account already exists at the PDA
+        // address, its authority MUST be the intended PDA authority —
+        // otherwise whoever pre-created it could drain the funds deposited
+        // into it, and the program (signing as the PDA) could never withdraw.
+        let existing = spl_token::state::Account::unpack(&pda_account.try_borrow_data()?)?;
+        if existing.owner != *owner_authority.key {
+            return Err(ClockLendError::InvalidAccountOwner.into());
+        }
         Ok(())
     }
 }
@@ -253,9 +261,11 @@ pub fn process_instruction(
             max_duration,
             name,
         } => {
+            // F7: is_oracle_free is an explicit name-prefix convention only —
+            // the hidden trailing-byte channel was dead code (borsh rejects
+            // trailing bytes) and is removed.
             let is_oracle_free = name.starts_with(b"ORACLE_FREE")
-                || name.starts_with(b"oracle_free")
-                || (instruction_data.len() > 62 && instruction_data[62] != 0);
+                || name.starts_with(b"oracle_free");
             process_initialize_pool(
                 program_id,
                 accounts,
@@ -412,6 +422,7 @@ pub fn process_initialize_pool(
     // F-02: If SPL token/WSOL liquidity mint and vault account is uninitialized, create/initialize vault token PDA
     if vault_account.owner == &solana_program::system_program::id() {
         if let Some(token_program) = token_program_opt {
+            assert_token_program(token_program)?;
             create_or_allocate_token_pda(
                 authority,
                 vault_account,
@@ -422,6 +433,16 @@ pub fn process_initialize_pool(
                 None,
                 &[VAULT_SEED, pool_account.key.as_ref(), &[vault_bump]],
             )?;
+        }
+    }
+
+    // Front-run defense: if the vault token account pre-exists, its authority
+    // must be the vault PDA — otherwise deposits would be drainable by the
+    // account's pre-creator.
+    if vault_account.owner == &spl_token::id() {
+        let vault_token = spl_token::state::Account::unpack(&vault_account.try_borrow_data()?)?;
+        if vault_token.owner != *vault_account.key {
+            return Err(ClockLendError::InvalidAccountOwner.into());
         }
     }
 
@@ -495,6 +516,10 @@ pub fn process_deposit_liquidity(
     let vault_token = spl_token::state::Account::unpack(&vault_account.try_borrow_data()?)?;
     if vault_token.mint != pool.liquidity_mint {
         return Err(ClockLendError::InvalidMint.into());
+    }
+    // Front-run defense: vault authority must be the vault PDA
+    if vault_token.owner != *vault_account.key {
+        return Err(ClockLendError::InvalidAccountOwner.into());
     }
 
     // Transfer liquidity tokens from depositor to pool vault
@@ -593,6 +618,17 @@ pub fn process_stake_skr(
                 &[b"skr_escrow", user.key.as_ref(), &[escrow_bump]],
             )?;
         }
+    }
+
+    // Front-run defense: the escrow token account's authority MUST be the
+    // escrow PDA itself — a pre-created account with an attacker-controlled
+    // authority would let the attacker drain every token staked into it.
+    let escrow_token = spl_token::state::Account::unpack(&skr_escrow_account.try_borrow_data()?)?;
+    if escrow_token.owner != *skr_escrow_account.key {
+        return Err(ClockLendError::InvalidAccountOwner.into());
+    }
+    if escrow_token.mint != SKR_MINT {
+        return Err(ClockLendError::InvalidMint.into());
     }
 
     let is_new_profile = user_profile_account.owner == &solana_program::system_program::id();
@@ -920,12 +956,18 @@ pub fn process_set_price_feed(
     let mut feed = if !oracle_account.data_is_empty() && oracle_account.owner == program_id {
         if let Ok(existing) = PriceFeed::unpack_from_slice(&oracle_account.try_borrow_data()?) {
             if existing.is_initialized {
-                // If feed already initialized, signer MUST be existing.authority or AdminConfig admin/oracle_authority
+                // If feed already initialized, signer MUST be existing.authority —
+                // or, for GLOBAL feeds only, the AdminConfig admin/oracle_authority.
+                // Pool-scoped feeds stay under their pool authority's sole control.
                 let is_auth = if existing.authority == *authority.key {
                     true
-                } else if let Some(admin_acc) = admin_account_opt {
-                    if let Ok(admin_config) = AdminConfig::unpack_from_slice(&admin_acc.try_borrow_data()?) {
-                        admin_config.is_initialized && (admin_config.admin == *authority.key || admin_config.oracle_authority == *authority.key)
+                } else if !is_pool_oracle {
+                    if let Some(admin_acc) = admin_account_opt {
+                        if let Ok(admin_config) = AdminConfig::unpack_from_slice(&admin_acc.try_borrow_data()?) {
+                            admin_config.is_initialized && (admin_config.admin == *authority.key || admin_config.oracle_authority == *authority.key)
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     }
@@ -1387,6 +1429,10 @@ pub fn process_borrow_from_pool(
         if escrow_token_acc.mint != *collateral_mint.key {
             return Err(ClockLendError::InvalidMint.into());
         }
+        // Front-run defense: collateral escrow authority must be the escrow PDA
+        if escrow_token_acc.owner != *collateral_escrow_account.key {
+            return Err(ClockLendError::InvalidAccountOwner.into());
+        }
         invoke(
             &spl_token::instruction::transfer(
                 token_program.key,
@@ -1611,6 +1657,12 @@ pub fn process_create_p2p_offer(
         return Err(ClockLendError::InvalidInstruction.into());
     }
 
+    // V-A1: bound the offered interest so an offer can never become
+    // permanently unrepayable (interest capped at 100% of principal)
+    if interest_offered > requested_amount {
+        return Err(ClockLendError::InvalidInstruction.into());
+    }
+
     let offer_id_bytes = offer_id.to_le_bytes();
     let (expected_offer_pda, offer_bump) = Pubkey::find_program_address(
         &[P2P_SEED, creator.key.as_ref(), &offer_id_bytes],
@@ -1763,6 +1815,10 @@ pub fn process_create_p2p_offer(
         let escrow_token_acc = spl_token::state::Account::unpack(&collateral_escrow_account.try_borrow_data()?)?;
         if escrow_token_acc.mint != *collateral_mint.key {
             return Err(ClockLendError::InvalidMint.into());
+        }
+        // Front-run defense: pawn escrow authority must be the escrow PDA
+        if escrow_token_acc.owner != *collateral_escrow_account.key {
+            return Err(ClockLendError::InvalidAccountOwner.into());
         }
         invoke(
             &spl_token::instruction::transfer(
@@ -2515,7 +2571,10 @@ pub fn process_claim_default(
 
             // C-1 Security Check: Destination collateral account must belong to pool authority or pool vault
             if is_native_sol {
-                if *destination_collateral_account.key != pool.vault_pda && *destination_collateral_account.key != pool.authority {
+                if *destination_collateral_account.key != pool.authority {
+                    // F6: native SOL liquidation MUST go to the pool
+                    // authority's wallet — raw lamports sent to the SPL
+                    // vault token account would be permanently stranded.
                     return Err(ClockLendError::Unauthorized.into());
                 }
             } else {
@@ -3074,6 +3133,11 @@ pub fn process_withdraw_treasury(
     let treasury_token_opt = next_account_info(account_info_iter).ok();
     let token_program_opt = next_account_info(account_info_iter).ok();
     let system_program_opt = next_account_info(account_info_iter).ok();
+
+    // L-3: validate the system program before CPI-ing into it as the treasury PDA
+    if let Some(system_program) = system_program_opt {
+        assert_system_program(system_program)?;
+    }
 
     if let (Some(treasury_token_acc), Some(token_prog)) = (treasury_token_opt, token_program_opt) {
         if treasury_token_acc.owner == token_prog.key {
