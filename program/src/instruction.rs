@@ -179,12 +179,15 @@ pub enum ClockLendInstruction {
         price_micro_usd: u64,
         decimals: u8,
     },
-    /// 13. Initialize global protocol admin config (one-time deploy-time initialization)
+    /// 13. Initialize global protocol admin config (one-time deploy-time initialization).
+    /// Also rotates the admin / oracle authority when called again.
     /// Accounts:
-    /// 0. `[signer]` Initial Admin (Must match upgrade authority)
+    /// 0. `[signer]` Caller (MUST be the program's on-chain upgrade authority)
     /// 1. `[writable]` AdminConfig PDA `[b"admin"]`
     /// 2. `[]` System Program
-    /// 3. `[optional]` ProgramData account (for on-chain upgrade authority verification)
+    /// 3. `[]` ProgramData account (REQUIRED — sole proof of upgrade-authority)
+    /// 4. `[optional]` New Admin (rotation only; skipped if absent)
+    /// 5. `[optional]` New Oracle Authority (rotation only; skipped if absent)
     InitializeAdmin,
     /// 14. Withdraw accumulated protocol fees from treasury (Admin only)
     /// Accounts:
