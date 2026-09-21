@@ -58,6 +58,8 @@ export function getConnection(network: SolanaNetwork = 'devnet'): Connection {
 // Default export connection for backwards compatibility
 export const connection = devnetConnection;
 
+export { PROGRAM_ID };
+
 export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
