@@ -7,6 +7,36 @@
 
 ---
 
+## 🏭 Production Status & Mainnet Path (2026-09-21)
+
+The app is now **mainnet-only**: every money flow executes on mainnet-beta, all devnet
+faucet/switch UI has been removed, and the data layer is fully network-aware.
+
+**Program (v5)** — deployed and verified on devnet (on-chain hash-checked):
+- 15 instructions, 8-byte account discriminators with fail-closed dispatch, upgrade-authority
+  admin root (no hardcoded keys), PDA-verified escrows with front-run authority defense
+- 74/74 tests, including P2P lifecycle, liquidation, treasury, and type-confusion regression suites
+- Prior audit classes closed: type confusion, offer re-init, admin race, treasury burn,
+  P2P mint injection, SKR liquidation, dust-bricked cancel
+
+**Infrastructure**
+- RPC: Helius gatekeeper → configured RPC → PublicNode → official fallback (env-driven,
+  `mobile/.env` `EXPO_PUBLIC_*` vars, gitignored)
+- Pricing: Jupiter Price API v3 for SOL **and SKR** (SKR is listed — ~$0.021, ~$766K liquidity)
+  with CoinGecko fallback; the keeper refreshes both on-chain feeds from the same source
+- Keeper: `mobile/scripts/keeper.mjs` (cron every 15 min, 3600s staleness window)
+- Deploy: `mobile/scripts/deploy-mainnet.mjs` — program, admin init (ProgramData proof),
+  treasury ATA, SOL/SKR feeds, first desk
+
+**Remaining mainnet blockers (user-side only)**
+1. Fund the deployer wallet ~3.5 SOL on mainnet-beta
+2. Generate a fresh mainnet deploy keypair (the devnet key is embedded in app source as a
+   legacy fallback)
+
+Then follow [`docs/MAINNET_RUNBOOK.md`](docs/MAINNET_RUNBOOK.md) — deploy, cron the keeper, verify.
+
+---
+
 ## 📑 Table of Contents
 1. [Executive Summary & Hackathon Pitch](#-executive-summary--hackathon-pitch)
 2. [Project Whitepaper](#-project-whitepaper)
