@@ -166,4 +166,15 @@ pub enum ClockLendInstruction {
     UnstakeSKR {
         amount: u64,
     },
+    /// 12. Set or update on-chain oracle price feed for an asset mint
+    /// Accounts:
+    /// 0. `[signer]` Authority (Oracle keeper or pool authority)
+    /// 1. `[writable]` PriceFeed PDA `[b"oracle", mint]`
+    /// 2. `[]` Asset Mint
+    /// 3. `[]` System Program
+    /// 4. `[optional]` Clock Sysvar
+    SetPriceFeed {
+        price_micro_usd: u64,
+        decimals: u8,
+    },
 }

@@ -2,7 +2,7 @@ use borsh::BorshDeserialize;
 use clock_lend::{
     instruction::ClockLendInstruction,
     state::{
-        LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, UserProfile,
+        LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
     },
 };
 use solana_program::pubkey::Pubkey;
@@ -200,4 +200,42 @@ fn test_unstake_skr_instruction_serialization() {
         ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
     assert_eq!(ix, deserialized);
 }
+
+#[test]
+fn test_price_feed_serialization() {
+    let mint = Pubkey::new_unique();
+    let authority = Pubkey::new_unique();
+    let feed = PriceFeed {
+        is_initialized: true,
+        mint,
+        price_micro_usd: 185_500_000, // $185.50
+        decimals: 9,
+        last_updated_at: 1720000000,
+        authority,
+    };
+
+    let mut buffer = [0u8; PriceFeed::LEN];
+    feed.pack_into_slice(&mut buffer).expect("Pack failed");
+
+    let unpacked = PriceFeed::unpack_from_slice(&buffer).expect("Unpack failed");
+    assert_eq!(unpacked.is_initialized, true);
+    assert_eq!(unpacked.mint, mint);
+    assert_eq!(unpacked.price_micro_usd, 185_500_000);
+    assert_eq!(unpacked.decimals, 9);
+    assert_eq!(unpacked.last_updated_at, 1720000000);
+    assert_eq!(unpacked.authority, authority);
+}
+
+#[test]
+fn test_set_price_feed_instruction_serialization() {
+    let ix = ClockLendInstruction::SetPriceFeed {
+        price_micro_usd: 25_000, // $0.025 SKR
+        decimals: 6,
+    };
+    let serialized = borsh::to_vec(&ix).expect("Serialization failed");
+    let deserialized =
+        ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
+    assert_eq!(ix, deserialized);
+}
+
 

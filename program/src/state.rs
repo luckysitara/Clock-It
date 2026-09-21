@@ -11,6 +11,7 @@ pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const P2P_SEED: &[u8] = b"p2p_offer";
 pub const PROFILE_SEED: &[u8] = b"profile";
 pub const TREASURY_SEED: &[u8] = b"treasury";
+pub const ORACLE_SEED: &[u8] = b"oracle";
 pub const SKR_MINT: Pubkey = solana_program::pubkey!("SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3");
 pub const USDC_DEVNET_MINT: Pubkey = solana_program::pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
@@ -153,6 +154,33 @@ pub struct UserProfile {
 
 impl UserProfile {
     pub const LEN: usize = 1 + 32 + 8 + 4 + 4 + 2; // 51 bytes
+
+    pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
+        BorshDeserialize::try_from_slice(src).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        if dst.len() < serialized.len() {
+            return Err(ProgramError::AccountDataTooSmall);
+        }
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
+pub struct PriceFeed {
+    pub is_initialized: bool,
+    pub mint: Pubkey,
+    pub price_micro_usd: u64, // Price in micro-USD (6 decimals: 1_000_000 = $1.00)
+    pub decimals: u8,          // Token decimals (e.g. 9 for SOL, 6 for SKR, 6 for USDC)
+    pub last_updated_at: i64,  // Unix timestamp of last keeper update
+    pub authority: Pubkey,     // Oracle keeper or admin authority
+}
+
+impl PriceFeed {
+    pub const LEN: usize = 1 + 32 + 8 + 1 + 8 + 32; // 82 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         BorshDeserialize::try_from_slice(src).map_err(|_| ProgramError::InvalidAccountData)

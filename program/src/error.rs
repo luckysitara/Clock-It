@@ -60,6 +60,10 @@ pub enum ClockLendError {
     InsufficientCollateral,
     #[error("Unsupported Collateral Mint")]
     UnsupportedCollateralMint,
+    #[error("Invalid Oracle Account")]
+    InvalidOracleAccount,
+    #[error("Stale Oracle Price Feed")]
+    StaleOraclePrice,
 }
 
 impl From<ClockLendError> for ProgramError {

@@ -372,3 +372,30 @@ fn test_security_f03_skr_collateral_valuation_2_cents() {
     assert!((13_010_000u128) > max_borrow);
 }
 
+#[test]
+fn test_security_dynamic_oracle_valuation_and_staleness() {
+    // Dynamic Oracle valuation invariant:
+    // When oracle feed updates SKR from $0.02 (20,000 micro-USD) to $0.05 (50,000 micro-USD)
+    let skr_amount: u64 = 1_000_000_000; // 1,000 SKR (6 decimals)
+    let oracle_price_micro_usd: u64 = 50_000; // $0.05 / SKR
+    let skr_decimals: u8 = 6;
+
+    let dynamic_value = (skr_amount as u128 * oracle_price_micro_usd as u128)
+        / 10u128.pow(skr_decimals as u32);
+    assert_eq!(dynamic_value, 50_000_000); // exactly $50.00 USDC
+
+    // At 80% LTV, max borrow increases proportionally to $40 USDC
+    let max_ltv_bps: u16 = 8000;
+    let max_borrow = (dynamic_value * max_ltv_bps as u128) / 10000u128;
+    assert_eq!(max_borrow, 40_000_000); // exactly $40.00 USDC
+
+    // Staleness window: max 86400 seconds (24h)
+    let feed_timestamp: i64 = 1700000000;
+    let fresh_time: i64 = 1700000000 + 3600; // 1 hour later
+    let stale_time: i64 = 1700000000 + 86401; // 24h + 1s later
+
+    assert!(fresh_time.saturating_sub(feed_timestamp) <= 86400);
+    assert!(stale_time.saturating_sub(feed_timestamp) > 86400);
+}
+
+

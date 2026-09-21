@@ -6,6 +6,7 @@ import {
   TransactionInstruction,
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
+  SYSVAR_CLOCK_PUBKEY,
   ComputeBudgetProgram,
 } from '@solana/web3.js';
 import { Buffer } from 'buffer';
@@ -22,6 +23,7 @@ import {
   getP2POfferPDA,
   getSkrEscrowPDA,
   getTreasuryPDA,
+  getOraclePDA,
 } from './program';
 import {
   PoolType,
@@ -812,6 +814,7 @@ export async function buildBorrowTx(
 
   const [treasuryPDA] = getTreasuryPDA();
   const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
+  const [oraclePDA] = getOraclePDA(collateralMint);
 
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -828,6 +831,7 @@ export async function buildBorrowTx(
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: profilePDA, isSigner: false, isWritable: true },
       { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
+      { pubkey: oraclePDA, isSigner: false, isWritable: false },
     ],
     data,
   });
@@ -846,6 +850,39 @@ export async function buildBorrowTx(
   );
 
   return { tx, escrowPDA, loanId };
+}
+
+// Build Set Price Feed Transaction instruction (ClockLend Instruction 12)
+export async function buildSetPriceFeedTx(
+  authority: PublicKey,
+  mint: PublicKey,
+  priceMicroUsd: number | bigint,
+  decimals: number
+): Promise<Transaction> {
+  const [oraclePDA] = getOraclePDA(mint);
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // Layout: 1 byte tag (12) + 8 bytes price_micro_usd + 1 byte decimals = 10 bytes
+  const data = Buffer.alloc(10);
+  data.writeUInt8(12, 0); // Instruction 12: SetPriceFeed
+  writeU64LE(BigInt(priceMicroUsd)).copy(data, 1);
+  data.writeUInt8(decimals, 9);
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: oraclePDA, isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
+  return tx;
 }
 
 // Build Repay Transaction instruction

@@ -1513,7 +1513,10 @@ export const SKR_DEVNET_MINT  = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2
       </table>
 
       <h3>4. Real In-Process SVM Test Suite</h3>
-      <p>The test suite in <code>program/tests/bank_integration.rs</code> was expanded with real SVM tests covering unauthorized mint, unauthorized collateral, mandatory treasury enforcement, defaulted-loan overwrite prevention, and claim-default slash destination validation (both specific error code rejection when omitted and end-to-end token transfer on success). All 39 tests pass with 0 errors and 0 warnings.</p>
+      <p>The test suite in <code>program/tests/bank_integration.rs</code> was expanded with real SVM tests covering unauthorized mint, unauthorized collateral, mandatory treasury enforcement, defaulted-loan overwrite prevention, claim-default slash destination validation, dynamic price feed updates, staleness rejection, and unauthorized signer protection. All 45 tests pass with 0 errors and 0 warnings.</p>
+
+      <h3>5. Dynamic On-Chain Price Feed Oracle Architecture</h3>
+      <p>Hardcoded asset pricing ($150/SOL, $0.02/SKR) has been upgraded to a dynamic on-chain oracle framework. The ClockLend protocol derives a <code>PriceFeed</code> PDA (seeds: <code>[b"oracle", mint]</code>) with permissioned keeper updates (<code>SetPriceFeed</code>, Instruction 12), dynamic decimal normalization (<code>10^decimals</code>), a strict 24-hour staleness guard (<code>now - last_updated_at &lt;= 86,400s</code> returning <code>StaleOraclePrice</code>), and safe fallback to baseline prices if an oracle feed is unprovisioned. Verified end-to-end with dynamic price borrowing and staleness rejection tests.</p>
     </div>
   </section>
 
