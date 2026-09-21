@@ -20,12 +20,9 @@ use crate::{
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
         ADMIN_SEED, ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
-        SKR_MINT, USDC_DEVNET_MINT, DISCRIMINATOR_ADMIN, DISCRIMINATOR_FEED, DISCRIMINATOR_LOAN, DISCRIMINATOR_OFFER, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
+        SKR_MINT, USDC_DEVNET_MINT, USDC_MAINNET_MINT, DISCRIMINATOR_ADMIN, DISCRIMINATOR_FEED, DISCRIMINATOR_LOAN, DISCRIMINATOR_OFFER, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
     },
 };
-
-pub const UPGRADE_AUTHORITY: Pubkey = solana_program::pubkey!("BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re");
-
 
 // Security helper: verify account owner
 #[inline(always)]
@@ -772,35 +769,32 @@ pub fn process_initialize_admin(
     assert_signer(authority)?;
     assert_system_program(system_program)?;
 
-    // C-3 & M-1: Authenticate caller against program upgrade authority or ProgramData
-    let program_data_opt = next_account_info(account_info_iter).ok();
-    let is_valid_admin = if *authority.key == UPGRADE_AUTHORITY {
-        true
-    } else if let Some(program_data_info) = program_data_opt {
-        let (expected_pda, _) = Pubkey::find_program_address(&[program_id.as_ref()], &solana_program::bpf_loader_upgradeable::id());
-        if *program_data_info.key == expected_pda && program_data_info.owner == &solana_program::bpf_loader_upgradeable::id() {
-            let data = program_data_info.try_borrow_data()?;
-            // UpgradeableLoaderState::ProgramData layout:
-            // 0..4: Discriminant = 3u32 (ProgramData)
-            // 4..12: Slot (u64)
-            // 12..16: Option<Pubkey> tag (1u32 = Some)
-            // 16..48: 32-byte upgrade authority Pubkey
-            if data.len() >= 48 && &data[12..16] == &[1, 0, 0, 0] {
-                let auth = Pubkey::new_from_array(data[16..48].try_into().unwrap());
-                auth == *authority.key
-            } else if data.len() >= 45 && data[12] == 1 {
-                let auth = Pubkey::new_from_array(data[13..45].try_into().unwrap());
-                auth == *authority.key
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
+    // C-3 & M-1: The ONLY root is the program's on-chain upgrade authority,
+    // proven via the ProgramData account. No hardcoded keys.
+    let program_data_info = match next_account_info(account_info_iter) {
+        Ok(acc) => acc,
+        Err(_) => return Err(ClockLendError::Unauthorized.into()),
     };
-    if !is_valid_admin {
+    let (expected_pda, _) = Pubkey::find_program_address(
+        &[program_id.as_ref()],
+        &solana_program::bpf_loader_upgradeable::id(),
+    );
+    if *program_data_info.key != expected_pda
+        || program_data_info.owner != &solana_program::bpf_loader_upgradeable::id()
+    {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+    // UpgradeableLoaderState::ProgramData metadata layout (45 bytes):
+    // 0..4: Discriminant = 3u32 (ProgramData)
+    // 4..12: Slot (u64)
+    // 12: Option<Pubkey> tag (1u8 = Some)
+    // 13..45: 32-byte upgrade authority Pubkey
+    let data = program_data_info.try_borrow_data()?;
+    if data.len() < 45 || data[0..4] != 3u32.to_le_bytes() || data[12] != 1 {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+    let upgrade_authority = Pubkey::new_from_array(data[13..45].try_into().unwrap());
+    if upgrade_authority != *authority.key {
         return Err(ClockLendError::Unauthorized.into());
     }
 
@@ -812,10 +806,8 @@ pub fn process_initialize_admin(
     if admin_account.owner == program_id && !admin_account.data_is_empty() {
         if let Ok(mut existing) = AdminConfig::unpack_from_slice(&admin_account.try_borrow_data()?) {
             if existing.is_initialized {
-                // Rotation: caller must be current admin or verified upgrade authority
-                if existing.admin != *authority.key && !is_valid_admin {
-                    return Err(ClockLendError::Unauthorized.into());
-                }
+                // Rotation: the caller has already proven upgrade-authority
+                // credentials above, so any rotation is authorized.
                 let new_admin_opt = next_account_info(account_info_iter).ok();
                 if let Some(new_admin_acc) = new_admin_opt {
                     existing.admin = *new_admin_acc.key;
@@ -1667,13 +1659,22 @@ pub fn process_create_p2p_offer(
             oracle_feed_opt = Some(acc);
         } else if acc.owner == &spl_token::id() && acc.data_len() == spl_token::state::Mint::LEN {
             liquidity_mint = *acc.key;
-        } else if *acc.key == USDC_DEVNET_MINT || *acc.key == spl_token::native_mint::id() {
+        } else if *acc.key == USDC_DEVNET_MINT {
             liquidity_mint = *acc.key;
         } else if oracle_feed_opt.is_none() && (acc.owner == program_id || acc.data_len() == PriceFeed::LEN) {
             oracle_feed_opt = Some(acc);
         } else if oracle_feed_opt.is_none() {
             oracle_feed_opt = Some(acc);
         }
+    }
+
+    // F5: Allowlist the loan asset. Only 6-decimal USD-pegged mints are
+    // supported, so requested_amount (base units) is directly comparable to
+    // the micro-USD collateral value computed below (10^6 scale on both
+    // sides). Non-USD loan assets would need price normalization and are
+    // rejected outright.
+    if liquidity_mint != USDC_DEVNET_MINT && liquidity_mint != USDC_MAINNET_MINT {
+        return Err(ClockLendError::InvalidMint.into());
     }
 
     // H-3: Fail closed when canonical price feed is missing or unprovisioned on value-authorizing paths
@@ -2424,18 +2425,58 @@ pub fn process_claim_default(
             let (expected_borrower_skr_escrow, skr_bump) =
                 Pubkey::find_program_address(&[b"skr_escrow", loan.borrower.as_ref()], program_id);
 
+            let is_native_sol = loan.collateral_mint == Pubkey::default()
+                || loan.collateral_mint == solana_program::system_program::ID
+                || loan.collateral_mint == spl_token::native_mint::id();
+
+            // F1: classify optional token accounts by ROLE, not by mint alone, so a
+            // treasury-owned account of the collateral mint remains usable as the
+            // margin treasury even when the collateral is SKR. (Previously any
+            // treasury-owned SKR account was captured as the slash destination,
+            // which made SPL-collateral liquidation impossible.)
+            let mut treasury_token_opt: Option<&AccountInfo> = None;
+            let mut slash_fallback_opt: Option<&AccountInfo> = None;
+
             for acc in &spl_token_accounts {
                 if *acc.key == expected_borrower_skr_escrow {
                     skr_escrow_opt = Some(*acc);
-                } else if let Ok(tok) = spl_token::state::Account::unpack(&acc.try_borrow_data()?) {
-                    if tok.mint == SKR_MINT
-                        && (tok.owner == pool.authority || tok.owner == pool.vault_pda || tok.owner == expected_treasury_pda)
-                    {
+                    continue;
+                }
+                let Ok(tok) = spl_token::state::Account::unpack(&acc.try_borrow_data()?) else {
+                    continue;
+                };
+                // Margin treasury (SPL collateral only): treasury-owned account of the collateral mint
+                if !is_native_sol
+                    && tok.mint == loan.collateral_mint
+                    && tok.owner == expected_treasury_pda
+                    && treasury_token_opt.is_none()
+                {
+                    treasury_token_opt = Some(*acc);
+                }
+                // Slash destination: SKR accounts owned by authority/vault/treasury.
+                // Prefer authority/vault-owned; a treasury-owned SKR account is only the fallback.
+                if tok.mint == SKR_MINT
+                    && (tok.owner == pool.authority
+                        || tok.owner == pool.vault_pda
+                        || tok.owner == expected_treasury_pda)
+                {
+                    if tok.owner == expected_treasury_pda {
+                        if slash_fallback_opt.is_none() {
+                            slash_fallback_opt = Some(*acc);
+                        }
+                    } else if skr_slash_dest_opt.is_none() {
                         skr_slash_dest_opt = Some(*acc);
-                    } else if tok.owner == expected_treasury_pda {
-                        treasury_collateral_opt = Some(*acc);
                     }
                 }
+            }
+            if skr_slash_dest_opt.is_none() {
+                skr_slash_dest_opt = slash_fallback_opt;
+            }
+            // For SPL collateral the margin treasury is the role-classified token
+            // account; for native SOL it remains the bare treasury PDA captured by
+            // the outer scan.
+            if !is_native_sol {
+                treasury_collateral_opt = treasury_token_opt;
             }
 
             let slash_destination_account: Option<&AccountInfo> = if let Some(dest) = skr_slash_dest_opt {
@@ -2472,10 +2513,6 @@ pub fn process_claim_default(
                 return Err(ClockLendError::InvalidEscrowAccount.into());
             }
 
-            let is_native_sol = loan.collateral_mint == Pubkey::default()
-                || loan.collateral_mint == solana_program::system_program::ID
-                || loan.collateral_mint == spl_token::native_mint::id();
-
             // C-1 Security Check: Destination collateral account must belong to pool authority or pool vault
             if is_native_sol {
                 if *destination_collateral_account.key != pool.vault_pda && *destination_collateral_account.key != pool.authority {
@@ -2501,7 +2538,7 @@ pub fn process_claim_default(
                     }
                 } else {
                     let treasury_token = spl_token::state::Account::unpack(&treasury_account.try_borrow_data()?)?;
-                    if treasury_token.owner != expected_treasury_pda {
+                    if treasury_token.owner != expected_treasury_pda || treasury_token.mint != loan.collateral_mint {
                         return Err(ClockLendError::InvalidTreasuryAccount.into());
                     }
                 }

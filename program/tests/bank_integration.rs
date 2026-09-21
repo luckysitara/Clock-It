@@ -1052,6 +1052,189 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
 }
 
 #[tokio::test]
+async fn test_bank_claim_default_skr_collateral_success() {
+    // Regression test for F1: SKR-collateral pool loans MUST be liquidatable.
+    // The treasury-owned SKR account serves as the 5% margin treasury while the
+    // authority-owned SKR account receives the lender's share — the treasury is
+    // classified by role (owner == treasury PDA, mint == collateral mint), not
+    // stolen by the slash-destination classifier.
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let pool_id: u64 = 1;
+    let pool_id_bytes = pool_id.to_le_bytes();
+
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id_bytes],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+
+    let loan_id: u64 = 200;
+    let loan_id_bytes = loan_id.to_le_bytes();
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id_bytes],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+
+    let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        name: [0u8; 32],
+        liquidity_mint: Pubkey::new_unique(),
+        vault_pda,
+        total_liquidity: 10_000_000_000,
+        total_borrowed: 100_000_000,
+        staked_skr_amount: 0,
+        interest_rate_bps: 600,
+        max_ltv_bps: 8500,
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 1,
+        loans_repaid: 0,
+        is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
+    };
+    program_test.add_account(
+        pool_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&pool).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
+        is_active: true,
+        loan_id,
+        borrower: borrower.pubkey(),
+        pool: pool_pda,
+        principal_amount: 100_000_000,
+        collateral_mint: SKR_MINT, // SPL (SKR) collateral
+        collateral_amount: 1_000_000_000, // 1,000 SKR
+        interest_due: 1_000_000,
+        origination_time: 1000,
+        due_time: 2000,
+        grace_period_expires: 0, // expired
+        status: LoanStatus::InGracePeriod,
+        locked_skr: 0,
+    };
+    program_test.add_account(
+        loan_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&loan).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Collateral escrow: SPL token account (SKR mint, authority = escrow PDA) holding 1,000 SKR
+    program_test.add_account(
+        escrow_pda,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(SKR_MINT, escrow_pda, 1_000_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Lender destination: authority-owned SKR token account (receives 95%)
+    let authority_skr_token = Keypair::new();
+    program_test.add_account(
+        authority_skr_token.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(SKR_MINT, authority.pubkey(), 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Margin treasury: treasury-owned SKR token account (receives 5%)
+    let treasury_skr_token = Keypair::new();
+    program_test.add_account(
+        treasury_skr_token.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(SKR_MINT, treasury_pda, 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let claim_ix_data = borsh::to_vec(&ClockLendInstruction::ClaimDefault).unwrap();
+
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(loan_pda, false),
+        AccountMeta::new(escrow_pda, false),
+        AccountMeta::new(authority_skr_token.pubkey(), false), // SPL lender destination
+        AccountMeta::new(pool_pda, false),
+        AccountMeta::new(treasury_skr_token.pubkey(), false), // treasury-owned SKR margin account
+        AccountMeta::new_readonly(spl_token::id(), false),
+    ];
+
+    let instruction = Instruction {
+        program_id,
+        accounts,
+        data: claim_ix_data,
+    };
+
+    let mut transaction = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
+    transaction.sign(&[&payer, &authority], recent_blockhash);
+
+    let result = banks_client.process_transaction(transaction).await;
+    assert!(result.is_ok(), "ClaimDefault MUST succeed for SKR collateral! Result: {:?}", result);
+
+    // 1. Escrow fully drained
+    let updated_escrow = banks_client.get_account(escrow_pda).await.unwrap().unwrap();
+    let escrow_tok = spl_token::state::Account::unpack(&updated_escrow.data).unwrap();
+    assert_eq!(escrow_tok.amount, 0, "Escrow must be fully drained");
+
+    // 2. Lender received 95% (1,000 - 50 = 950 SKR)
+    let updated_dest = banks_client.get_account(authority_skr_token.pubkey()).await.unwrap().unwrap();
+    let dest_tok = spl_token::state::Account::unpack(&updated_dest.data).unwrap();
+    assert_eq!(dest_tok.amount, 950_000_000, "Lender destination must receive 950,000,000 SKR");
+
+    // 3. Treasury received the 5% margin (50 SKR)
+    let updated_treasury = banks_client.get_account(treasury_skr_token.pubkey()).await.unwrap().unwrap();
+    let treasury_tok = spl_token::state::Account::unpack(&updated_treasury.data).unwrap();
+    assert_eq!(treasury_tok.amount, 50_000_000, "Treasury must receive the 50,000,000 SKR margin");
+
+    // 4. Loan marked Defaulted and total_borrowed unwound
+    let updated_loan_acc = banks_client.get_account(loan_pda).await.unwrap().unwrap();
+    let updated_loan = LoanOrder::unpack_from_slice(&updated_loan_acc.data).unwrap();
+    assert_eq!(updated_loan.status, LoanStatus::Defaulted);
+    assert_eq!(updated_loan.is_active, false);
+
+    let updated_pool_acc = banks_client.get_account(pool_pda).await.unwrap().unwrap();
+    let updated_pool = LendingPool::unpack_from_slice(&updated_pool_acc.data).unwrap();
+    assert_eq!(updated_pool.total_borrowed, 0, "total_borrowed must be decremented on default");
+}
+
+#[tokio::test]
 async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
     let program_id = Pubkey::new_unique();
     let usdc_mint = Pubkey::new_unique();
@@ -2195,6 +2378,103 @@ async fn test_bank_create_p2p_offer_rejects_unreasonable_ltv() {
 }
 
 #[tokio::test]
+async fn test_bank_create_p2p_offer_rejects_unallowlisted_liquidity_mint() {
+    // F5 regression: the loan asset (liquidity_mint) is allowlisted to
+    // 6-decimal USD-pegged mints (devnet/mainnet USDC). A creator cannot
+    // declare an arbitrary mint and exploit the base-unit vs micro-USD
+    // comparison (e.g. a 2-decimal token denominated as if it were USDC).
+    let program_id = Pubkey::new_unique();
+
+    let (sol_oracle_pda, _) = Pubkey::find_program_address(
+        &[ORACLE_SEED, spl_token::native_mint::id().as_ref()],
+        &program_id,
+    );
+    let sol_feed = PriceFeed {
+        discriminator: PriceFeed::DISCRIMINATOR,
+        is_initialized: true,
+        mint: spl_token::native_mint::id(),
+        price_micro_usd: 150_000_000, // $150.00 / SOL
+        decimals: 9,
+        last_updated_at: 1720000000,
+        max_staleness_seconds: i64::MAX,
+        authority: Pubkey::default(),
+    };
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+    program_test.add_account(
+        sol_oracle_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&sol_feed).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // A fake 2-decimal token mint, owned by the token program (82 bytes)
+    let fake_mint = Keypair::new();
+    program_test.add_account(
+        fake_mint.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: mint_data(2),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let offer_id: u64 = 7;
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, payer.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+
+    // 1 SOL collateral, 100 USDC requested — reasonable under the real feed,
+    // but the creator declares the fake 2-decimal mint as the loan asset.
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(payer.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false), // Native SOL collateral
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(sol_oracle_pda, false),
+            AccountMeta::new_readonly(fake_mint.pubkey(), false), // Unallowlisted loan asset
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::CreateP2POffer {
+            offer_id,
+            requested_amount: 100_000_000, // 100 units of the fake mint
+            collateral_amount: 1_000_000_000, // 1 SOL
+            interest_offered: 10_000_000,
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "An unallowlisted loan-asset mint MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidMint as u32, "Error must be InvalidMint");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
 async fn test_bank_oracle_permissionless_claim_rejected_v2() {
     let program_id = Pubkey::new_unique();
     let admin_authority = Keypair::new();
@@ -2369,6 +2649,121 @@ async fn test_bank_oracle_permissionless_claim_rejected_v2() {
     let res_overwrite = banks_client.process_transaction(tx_overwrite).await;
     assert!(res_overwrite.is_err(), "Attacker MUST NOT overwrite existing price feed!");
     match res_overwrite.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_initialize_admin_rejects_non_upgrade_authority() {
+    // F3/F4 regression: no hardcoded key — the ONLY valid caller is the key
+    // recorded in the ProgramData account's upgrade-authority field.
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let real_authority = Keypair::new();
+    let attacker = Keypair::new();
+
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    let (program_data_pda, _) = Pubkey::find_program_address(
+        &[program_id.as_ref()],
+        &solana_program::bpf_loader_upgradeable::id(),
+    );
+
+    let mut program_data_bytes = vec![0u8; 45];
+    program_data_bytes[0] = 3;
+    program_data_bytes[12] = 1;
+    program_data_bytes[13..45].copy_from_slice(real_authority.pubkey().as_ref());
+    program_test.add_account(
+        program_data_pda,
+        Account {
+            lamports: 10_000_000,
+            data: program_data_bytes,
+            owner: solana_program::bpf_loader_upgradeable::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        attacker.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let attacker_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(admin_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(program_data_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[attacker_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &attacker], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A non-upgrade-authority signer MUST be rejected");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_initialize_admin_requires_programdata() {
+    // F3/F4 regression: omitting the ProgramData account must fail closed.
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let caller = Keypair::new();
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    program_test.add_account(
+        caller.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(admin_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &caller], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Omitting the ProgramData account MUST be rejected");
+    match res.unwrap_err() {
         BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
             assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
         }
