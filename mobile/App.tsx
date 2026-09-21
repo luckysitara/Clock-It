@@ -82,7 +82,7 @@ const INITIAL_COMMUNITY_OFFERS: P2POffer[] = [
   },
   {
     id: 9014,
-    creator: 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re',
+    creator: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
     collateralName: 'Seeker Chapter 2 Preorder cNFT',
     collateralType: 'cNFT',
     collateralAmount: 1,
@@ -482,9 +482,17 @@ function MainApp() {
   const handleRepay = async (order: LoanOrder) => {
     if (!session) return;
 
-    const poolAuthority = new PublicKey(
-      pools.find((p) => p.id === order.poolId)?.authority || 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re'
-    );
+    const matchingPool = pools.find((p) => p.id === order.poolId);
+    if (!matchingPool) {
+      setTransactionNotice({
+        type: 'error',
+        title: 'Pool Authority Not Found',
+        subtitle: `Could not determine pool authority for Pool #${order.poolId}.`,
+        primaryBtnText: 'Dismiss',
+      });
+      return;
+    }
+    const poolAuthority = new PublicKey(matchingPool.authority);
     const totalDue = parseFloat((order.principalAmount + order.interestDue).toFixed(2));
 
     try {

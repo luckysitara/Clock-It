@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { PublicKey } from '@solana/web3.js';
 import { useTheme } from '../theme/ThemeContext';
-import { connectSeekerWallet, deriveSkrUsername, SeekerSession } from '../solana/seekerWallet';
+import { connectSeekerWallet, deriveSkrUsername, createPreviewSession, SeekerSession } from '../solana/seekerWallet';
 
 const LOGO_IMG = require('../../assets/logo.png');
 
@@ -38,13 +38,8 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
           {
             text: 'Preview Mode',
             onPress: async () => {
-              const devnetPubkey = new PublicKey('BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re');
-              const skrHandle = await deriveSkrUsername(devnetPubkey);
-              onConnected({
-                publicKey: devnetPubkey,
-                skrHandle,
-                isSeekerGenesisVerified: true,
-              });
+              const previewSession = await createPreviewSession();
+              onConnected(previewSession);
             },
           },
         ]

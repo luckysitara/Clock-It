@@ -1,8 +1,9 @@
 import '../polyfill';
-import { PublicKey, Transaction } from '@solana/web3.js';
+import { PublicKey, Transaction, Keypair } from '@solana/web3.js';
 import { transact, Web3MobileWallet } from '@solana-mobile/mobile-wallet-adapter-protocol-web3js';
 import { base64ToUint8Array, base64ToBase58 } from '@solana-mobile/mobile-wallet-adapter-protocol/encoding';
 import { Buffer } from 'buffer';
+import * as SecureStore from 'expo-secure-store';
 import {
   devnetConnection,
   getConnection,
@@ -179,6 +180,32 @@ export async function createManualSession(pubkeyInput: string | PublicKey): Prom
   const skrHandle = await deriveSkrUsername(pubkey);
   return {
     publicKey: pubkey,
+    skrHandle,
+    isSeekerGenesisVerified: true,
+  };
+}
+
+const PREVIEW_WALLET_KEY = 'clocklend_preview_demo_key';
+
+export async function getOrCreatePreviewWallet(): Promise<PublicKey> {
+  try {
+    const saved = await SecureStore.getItemAsync(PREVIEW_WALLET_KEY);
+    if (saved && saved.length >= 32) {
+      return new PublicKey(saved);
+    }
+    const ephemeralKey = Keypair.generate().publicKey;
+    await SecureStore.setItemAsync(PREVIEW_WALLET_KEY, ephemeralKey.toBase58());
+    return ephemeralKey;
+  } catch {
+    return Keypair.generate().publicKey;
+  }
+}
+
+export async function createPreviewSession(): Promise<SeekerSession> {
+  const previewPubkey = await getOrCreatePreviewWallet();
+  const skrHandle = await deriveSkrUsername(previewPubkey);
+  return {
+    publicKey: previewPubkey,
     skrHandle,
     isSeekerGenesisVerified: true,
   };
