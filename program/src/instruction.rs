@@ -124,10 +124,16 @@ pub enum ClockLendInstruction {
     /// 0. `[signer]` Caller (Pool Authority, LP, or P2P Funder)
     /// 1. `[writable]` LoanOrder PDA OR P2POffer PDA
     /// 2. `[writable]` Collateral Escrow PDA
-    /// 3. `[writable]` Destination Collateral Account (Pool or Funder)
-    /// 4. `[writable, optional]` UserProfile PDA (marks default, slashes SKR)
-    /// 5. `[]` Token Program
-    /// 6. `[]` Clock Sysvar
+    /// 3. `[writable]` Destination Collateral Account (Pool Vault/Authority or Funder)
+    /// Optional / Context-specific Accounts:
+    /// 4. `[writable, optional]` LendingPool PDA (required for pool loans)
+    /// 5. `[writable, optional]` UserProfile PDA (for credit penalty & SKR slashing)
+    /// 6. `[writable, optional]` Treasury Account (required for 5% liquidation margin when collateral > 0)
+    /// 7. `[writable, optional]` SKR Escrow Account PDA `[b"skr_escrow", borrower]` (if borrower has staked SKR)
+    /// 8. `[writable, optional]` SKR Slash Destination Token Account (required for SOL loans when borrower has staked SKR)
+    /// 9. `[]` Token Program (required for SPL collateral or SKR slashing)
+    /// 10. `[]` System Program (required for Native SOL collateral)
+    /// 11. `[]` Clock Sysvar
     ClaimDefault,
 
     /// 9. Withdraw liquidity from pool vault (Pool Authority only)

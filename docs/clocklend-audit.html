@@ -1513,7 +1513,7 @@ export const SKR_DEVNET_MINT  = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2
       </table>
 
       <h3>4. Real In-Process SVM Test Suite</h3>
-      <p>The test suite in <code>program/tests/bank_integration.rs</code> was expanded with real SVM tests covering unauthorized mint, unauthorized collateral, mandatory treasury enforcement, defaulted-loan overwrite prevention, and claim-default slash destination validation. All 38 tests pass with 0 errors and 0 warnings.</p>
+      <p>The test suite in <code>program/tests/bank_integration.rs</code> was expanded with real SVM tests covering unauthorized mint, unauthorized collateral, mandatory treasury enforcement, defaulted-loan overwrite prevention, and claim-default slash destination validation (both specific error code rejection when omitted and end-to-end token transfer on success). All 39 tests pass with 0 errors and 0 warnings.</p>
     </div>
   </section>
 
