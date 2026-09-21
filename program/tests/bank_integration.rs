@@ -2,7 +2,7 @@ use clock_lend::{
     instruction::ClockLendInstruction,
     processor::process_instruction,
     state::{
-        LendingPool, LoanOrder, LoanStatus, PoolType, ESCROW_SEED, LOAN_SEED, POOL_SEED,
+        LendingPool, LoanOrder, LoanStatus, PoolType, UserProfile, ESCROW_SEED, LOAN_SEED, POOL_SEED,
         PROFILE_SEED, SKR_MINT, VAULT_SEED,
     },
 };
@@ -610,4 +610,172 @@ async fn test_bank_borrow_rejects_overwriting_defaulted_loan() {
 
     let result = banks_client.process_transaction(transaction).await;
     assert!(result.is_err(), "Re-borrow on a Defaulted loan MUST be rejected!");
+}
+
+#[tokio::test]
+async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let pool_id: u64 = 1;
+    let pool_id_bytes = pool_id.to_le_bytes();
+
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id_bytes],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+
+    let loan_id: u64 = 100;
+    let loan_id_bytes = loan_id.to_le_bytes();
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id_bytes],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+
+    let (profile_pda, _) = Pubkey::find_program_address(&[PROFILE_SEED, borrower.pubkey().as_ref()], &program_id);
+    let (skr_escrow_pda, _) = Pubkey::find_program_address(&[b"skr_escrow", borrower.pubkey().as_ref()], &program_id);
+
+    // Pre-populate pool account
+    let pool = LendingPool {
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        name: [0u8; 32],
+        liquidity_mint: Pubkey::new_unique(),
+        vault_pda,
+        total_liquidity: 10_000_000_000,
+        total_borrowed: 100_000_000,
+        staked_skr_amount: 0,
+        interest_rate_bps: 600,
+        max_ltv_bps: 8500,
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 1,
+        loans_repaid: 0,
+    };
+    program_test.add_account(
+        pool_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&pool).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Pre-populate loan in grace period (grace period expired)
+    let loan = LoanOrder {
+        is_active: true,
+        loan_id,
+        borrower: borrower.pubkey(),
+        pool: pool_pda,
+        principal_amount: 100_000_000,
+        collateral_mint: Pubkey::default(), // Native SOL
+        collateral_amount: 1_000_000_000,
+        interest_due: 1_000_000,
+        origination_time: 1000,
+        due_time: 2000,
+        grace_period_expires: 0, // already expired
+        status: LoanStatus::InGracePeriod,
+    };
+    program_test.add_account(
+        loan_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&loan).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Pre-populate escrow with 1 SOL
+    program_test.add_account(
+        escrow_pda,
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Pre-populate borrower profile with staked SKR
+    let profile = UserProfile {
+        is_initialized: true,
+        user: borrower.pubkey(),
+        staked_skr: 100_000_000, // 100 SKR staked
+        total_loans_completed: 0,
+        total_loans_defaulted: 0,
+        reputation_score: 5000,
+    };
+    program_test.add_account(
+        profile_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&profile).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Pre-populate borrower skr_escrow account (mock token account)
+    let skr_escrow_data = vec![0u8; 165];
+    program_test.add_account(
+        skr_escrow_pda,
+        Account {
+            lamports: 10_000_000,
+            data: skr_escrow_data,
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    let claim_ix_data = borsh::to_vec(&ClockLendInstruction::ClaimDefault).unwrap();
+
+    // Destination collateral account is authority.pubkey() - a Native SOL wallet!
+    // No independent SKR token account is passed for slashing.
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(loan_pda, false),
+        AccountMeta::new(escrow_pda, false),
+        AccountMeta::new(authority.pubkey(), false),
+        AccountMeta::new(pool_pda, false),
+        AccountMeta::new(profile_pda, false),
+        AccountMeta::new(skr_escrow_pda, false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+        AccountMeta::new_readonly(solana_program::system_program::id(), false),
+    ];
+
+    let instruction = Instruction {
+        program_id,
+        accounts,
+        data: claim_ix_data,
+    };
+
+    let mut transaction = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
+    transaction.sign(&[&payer, &authority], recent_blockhash);
+
+    // F-06: Because destination_collateral_account is a wallet and cannot receive SPL tokens,
+    // and no independent SKR token account was provided, the transaction MUST fail
+    // rather than swallowing the CPI error and silently desyncing profile.staked_skr!
+    let result = banks_client.process_transaction(transaction).await;
+    assert!(
+        result.is_err(),
+        "ClaimDefault on SOL-collateral loan with staked SKR MUST fail if no valid SKR destination is provided!"
+    );
 }

@@ -1781,8 +1781,10 @@ pub fn process_claim_default(
     let mut user_profile_opt: Option<&AccountInfo> = None;
     let mut treasury_collateral_opt: Option<&AccountInfo> = None;
     let mut skr_escrow_opt: Option<&AccountInfo> = None;
+    let mut skr_slash_dest_opt: Option<&AccountInfo> = None;
     let mut token_program_opt: Option<&AccountInfo> = None;
     let mut system_program_opt: Option<&AccountInfo> = None;
+    let mut spl_token_accounts: Vec<&AccountInfo> = Vec::new();
 
     let (expected_treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], program_id);
 
@@ -1798,15 +1800,7 @@ pub fn process_claim_default(
         } else if *acc.key == expected_treasury_pda {
             treasury_collateral_opt = Some(acc);
         } else if acc.owner == &spl_token::id() {
-            if let Ok(tok) = spl_token::state::Account::unpack(&acc.try_borrow_data()?) {
-                if tok.owner == expected_treasury_pda {
-                    treasury_collateral_opt = Some(acc);
-                } else {
-                    skr_escrow_opt = Some(acc);
-                }
-            } else {
-                treasury_collateral_opt = Some(acc);
-            }
+            spl_token_accounts.push(acc);
         } else {
             treasury_collateral_opt = Some(acc);
         }
@@ -1830,6 +1824,41 @@ pub fn process_claim_default(
         if *caller.key != pool.authority {
             return Err(ClockLendError::UnauthorizedCaller.into());
         }
+
+        let (expected_borrower_skr_escrow, skr_bump) =
+            Pubkey::find_program_address(&[b"skr_escrow", loan.borrower.as_ref()], program_id);
+
+        for acc in spl_token_accounts {
+            if *acc.key == expected_borrower_skr_escrow {
+                skr_escrow_opt = Some(acc);
+            } else if let Ok(tok) = spl_token::state::Account::unpack(&acc.try_borrow_data()?) {
+                if tok.mint == SKR_MINT
+                    && (tok.owner == pool.authority || tok.owner == pool.vault_pda || tok.owner == expected_treasury_pda)
+                {
+                    skr_slash_dest_opt = Some(acc);
+                } else if tok.owner == expected_treasury_pda {
+                    treasury_collateral_opt = Some(acc);
+                }
+            }
+        }
+
+        let slash_destination_account: Option<&AccountInfo> = if let Some(dest) = skr_slash_dest_opt {
+            Some(dest)
+        } else if destination_collateral_account.owner == &spl_token::id() {
+            if let Ok(tok) = spl_token::state::Account::unpack(&destination_collateral_account.try_borrow_data()?) {
+                if tok.mint == SKR_MINT
+                    && (tok.owner == pool.authority || tok.owner == pool.vault_pda || tok.owner == expected_treasury_pda)
+                {
+                    Some(destination_collateral_account)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         if loan.status != LoanStatus::InGracePeriod {
             return Err(ClockLendError::GracePeriodActive.into());
@@ -2013,31 +2042,44 @@ pub fn process_claim_default(
                         profile.total_loans_defaulted = profile.total_loans_defaulted.saturating_add(1);
                         profile.reputation_score = profile.reputation_score.saturating_sub(1000); // severe penalty
 
-                        // F-06: Slash 20% of staked SKR only if escrow is present and tokens are transferred
+                        // F-06: Slash 20% of staked SKR only if escrow is present and tokens are successfully transferred
                         let slash_amount = profile.staked_skr.saturating_mul(20) / 100;
                         if slash_amount > 0 {
-                            let (expected_borrower_skr_escrow, skr_bump) =
-                                Pubkey::find_program_address(&[b"skr_escrow", loan.borrower.as_ref()], program_id);
                             if let (Some(skr_escrow), Some(token_program)) = (skr_escrow_opt, token_program_opt) {
                                 if *skr_escrow.key == expected_borrower_skr_escrow {
-                                    let _ = invoke_signed(
+                                    let slash_dest = slash_destination_account
+                                        .ok_or(ClockLendError::InvalidInstruction)?;
+                                    let dest_tok = spl_token::state::Account::unpack(&slash_dest.try_borrow_data()?)?;
+                                    if dest_tok.mint != SKR_MINT {
+                                        return Err(ClockLendError::UnsupportedCollateralMint.into());
+                                    }
+                                    if dest_tok.owner != pool.authority
+                                        && dest_tok.owner != pool.vault_pda
+                                        && dest_tok.owner != expected_treasury_pda
+                                    {
+                                        return Err(ClockLendError::Unauthorized.into());
+                                    }
+
+                                    invoke_signed(
                                         &spl_token::instruction::transfer(
                                             token_program.key,
                                             skr_escrow.key,
-                                            destination_collateral_account.key,
+                                            slash_dest.key,
                                             skr_escrow.key,
                                             &[],
                                             slash_amount,
                                         )?,
                                         &[
                                             skr_escrow.clone(),
-                                            destination_collateral_account.clone(),
+                                            slash_dest.clone(),
                                             token_program.clone(),
                                         ],
                                         &[&[b"skr_escrow", loan.borrower.as_ref(), &[skr_bump]]],
-                                    );
+                                    )?;
+
+                                    // Only debit profile.staked_skr AFTER transfer completes successfully
                                     profile.staked_skr = profile.staked_skr.saturating_sub(slash_amount);
-                                    msg!("ClockLend: Slashed & transferred {} SKR to lender", slash_amount);
+                                    msg!("ClockLend: Slashed & transferred {} SKR to lender ({})", slash_amount, slash_dest.key);
                                 }
                             }
                         }

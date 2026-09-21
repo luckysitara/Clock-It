@@ -1461,6 +1461,62 @@ export const SKR_DEVNET_MINT  = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2
     </div>
   </section>
 
+  <section>
+    <div class="sec-head"><span class="num">12</span><h2>Remediation &amp; Verification (Post-Audit Execution)</h2></div>
+    <div class="prose">
+      <p>Following the audit findings, all 20 vulnerabilities across both the smart contract and mobile client were systematically remediated, verified by execution against the Solana SVM test suite, and hardened against regression.</p>
+
+      <h3>1. Exploits Eliminated &amp; Verified by Execution</h3>
+      <ul class="tight">
+        <li><strong>TEST A (Full Lifecycle):</strong> <code>InitializePool</code> creates vault PDA on-chain via <code>invoke_signed</code> (F-02) &rarr; <code>DepositLiquidity</code> succeeds &rarr; <code>BorrowFromPool</code> succeeds even without an initialized profile PDA (F-07) &rarr; <code>RepayLoan</code> executes successfully end-to-end without <code>try_borrow_data</code> borrow conflicts (F-01) &rarr; Collateral escrow is released &rarr; <code>total_liquidity</code> exactly equals vault balance (F-10).</li>
+        <li><strong>TEST B (Fake Collateral):</strong> Custom(17) <code>InvalidMint</code> returned upon attempting to pledge self-minted collateral (F-03).</li>
+        <li><strong>TEST C (Missing Treasury):</strong> Custom(24) <code>InvalidTreasuryAccount</code> returned when fee/margin is charged and treasury is omitted (F-04).</li>
+        <li><strong>TEST D (Fake SKR Stake):</strong> Custom(17) <code>InvalidMint</code> returned when staking non-canonical SKR token (F-05).</li>
+      </ul>
+
+      <h3>2. Complete Program Remediations (F-01 through F-12)</h3>
+      <table class="audit-table" style="margin-top:1rem;margin-bottom:1rem">
+        <thead>
+          <tr><th>ID</th><th>Status</th><th>Remediation &amp; Verification</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>F-01</code></td><td style="color:#4ade80">✅ Verified</td><td>All 8 borrow sites restructured with let-bound scopes before <code>if let</code> blocks; full repayment executed.</td></tr>
+          <tr><td><code>F-02</code></td><td style="color:#4ade80">✅ Verified</td><td>Added <code>create_or_allocate_token_pda</code> using <code>invoke_signed</code> on-chain; vault and escrows initialized seamlessly.</td></tr>
+          <tr><td><code>F-03</code></td><td style="color:#4ade80">✅ Verified</td><td>Strict collateral allowlist (Native SOL &amp; canonical SKR) with SKR valued at 2&cent; ($0.02); fake collateral rejected.</td></tr>
+          <tr><td><code>F-04</code></td><td style="color:#4ade80">✅ Verified</td><td>Treasury account mandatory whenever origination fee, protocol fee, or liquidation margin &gt; 0.</td></tr>
+          <tr><td><code>F-05</code></td><td style="color:#4ade80">✅ Verified</td><td>Validated <code>user_token.mint == SKR_MINT</code> in <code>process_stake_skr</code>; unauthorized mints rejected.</td></tr>
+          <tr><td><code>F-06</code></td><td style="color:#4ade80">✅ Verified</td><td>CPI error properly propagated (<code>invoke_signed(...)?</code>); independent SKR slash destination resolved; <code>staked_skr</code> debited strictly on transfer success.</td></tr>
+          <tr><td><code>F-07</code></td><td style="color:#4ade80">✅ Verified</td><td>Derived <code>expected_profile_pda</code> to cleanly separate profile from treasury; uninitialized profiles skip safely.</td></tr>
+          <tr><td><code>F-08</code></td><td style="color:#4ade80">✅ Verified</td><td><code>transfer_native_sol_from_escrow</code> returns <code>InsufficientCollateral</code> on shortfall instead of clamping.</td></tr>
+          <tr><td><code>F-09</code></td><td style="color:#4ade80">✅ Verified</td><td>Loan PDAs preserve rent-exempt balance and mark <code>status = LoanStatus::Repaid</code> and <code>is_active = false</code>.</td></tr>
+          <tr><td><code>F-10</code></td><td style="color:#4ade80">✅ Verified</td><td><code>pool.total_liquidity</code> incremented by exact lender repayment amount (principal + 85% interest).</td></tr>
+          <tr><td><code>F-11</code></td><td style="color:#4ade80">✅ Verified</td><td>Strict mint verification against <code>pool.liquidity_mint</code> enforced on deposits and borrows.</td></tr>
+          <tr><td><code>F-12</code></td><td style="color:#4ade80">✅ Verified</td><td>Re-borrow guard rejects overwriting loans in <code>Defaulted</code> or <code>Repaid</code> status.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>3. Complete Mobile Remediations (M-01 through M-08)</h3>
+      <table class="audit-table" style="margin-top:1rem;margin-bottom:1rem">
+        <thead>
+          <tr><th>ID</th><th>Status</th><th>Remediation &amp; Verification</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>M-01</code></td><td style="color:#4ade80">✅ Verified</td><td>Production release signing configured via environment variables and Gradle properties; insecure fallback to debug.keystore permanently eliminated (release builds fail closed if unconfigured).</td></tr>
+          <tr><td><code>M-02</code></td><td style="color:#4ade80">✅ Verified</td><td>Client coordinates with on-chain PDA account creation, passing off-curve addresses and <code>TOKEN_PROGRAM_ID</code>.</td></tr>
+          <tr><td><code>M-03</code></td><td style="color:#4ade80">✅ Verified</td><td>Exported <code>calculateExactInterestDue</code> with integer micro-unit formula and SKR discount matching program.</td></tr>
+          <tr><td><code>M-04</code></td><td style="color:#4ade80">✅ Verified</td><td>Updated <code>USDC_DEVNET_MINT</code> to canonical Solana Devnet USDC: <code>4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU</code>.</td></tr>
+          <tr><td><code>M-05</code></td><td style="color:#4ade80">✅ Verified</td><td>Device integrity checks (<code>checkDeviceIntegrity</code>) fail closed (<code>isSecure: false</code>) upon exception.</td></tr>
+          <tr><td><code>M-06</code></td><td style="color:#4ade80">✅ Verified</td><td>Replaced <code>Math.random()</code> PIN salt with 256-bit CSPRNG (<code>crypto.getRandomValues</code>) and 10,000-round PBKDF2 hashing.</td></tr>
+          <tr><td><code>M-07</code></td><td style="color:#4ade80">✅ Verified</td><td>Added <code>ro.hardware.virtual</code> detection in <code>SecurityIntegrity.kt</code>, narrowed ProGuard keep rules to only bridge methods, and removed <code>SYSTEM_ALERT_WINDOW</code>.</td></tr>
+          <tr><td><code>M-08</code></td><td style="color:#4ade80">✅ Verified</td><td>Added <code>ALLOWED_PROGRAM_IDS</code> allowlist verification in <code>seekerWallet.ts</code> before signing transactions.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. Real In-Process SVM Test Suite</h3>
+      <p>The test suite in <code>program/tests/bank_integration.rs</code> was expanded with real SVM tests covering unauthorized mint, unauthorized collateral, mandatory treasury enforcement, defaulted-loan overwrite prevention, and claim-default slash destination validation. All 38 tests pass with 0 errors and 0 warnings.</p>
+    </div>
+  </section>
+
   <footer>
     <p>ClockLend program <span class="mono">HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3</span> · static review plus executed proofs of concept, 20 Sep 2026. Findings F-01 through F-12 and M-01 through M-08 are reproducible from the code included above.</p>
   </footer>
