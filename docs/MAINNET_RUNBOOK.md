@@ -17,8 +17,11 @@ prepared but **not executed** (deployer wallet has 0 mainnet SOL). Follow this c
       ```
       The program derives the admin from the **on-chain upgrade authority** (no hardcoded
       key since F3), so a fresh key works cleanly.
-- [ ] **SKR price decision.** The SKR mint exists on mainnet (6 decimals ✓). Decide the
-      initial SKR feed price (or run SKR-collateral flows on devnet only).
+- [ ] **SKR price source — RESOLVED.** SKR is listed on Jupiter with a real market
+      (jup.ag/tokens/SKRbvo6Gf…, ~$0.021 at last check, ~$766K liquidity). The deploy
+      script seeds the SKR feed from Jupiter's Price API v3 automatically; the keeper
+      refreshes both SOL and SKR feeds from the same source every run.
+      `--skr-price <usd>` still overrides manually if you want a policy floor.
 - [ ] `cd program && cargo build-sbf && cargo test` (74/74).
 
 ## 1. Deploy
@@ -26,7 +29,7 @@ prepared but **not executed** (deployer wallet has 0 mainnet SOL). Follow this c
 ```bash
 cd /home/rootkit/lend
 export DEPLOYER_KEY=~/.config/solana/mainnet-deployer.json
-node scripts/deploy-mainnet.mjs --skr-price 0.02 --create-pool
+node mobile/scripts/deploy-mainnet.mjs --create-pool
 ```
 
 This, in order: deploys the program (same id `HAjGxuih…`, upgradeable), calls
