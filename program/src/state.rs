@@ -36,6 +36,9 @@ pub enum AccountKind {
 
 impl AccountKind {
     pub fn from_slice(src: &[u8]) -> Self {
+        if src.len() == 182 && src[0] == 1 {
+            return AccountKind::LendingPool;
+        }
         if src.len() < 8 {
             return AccountKind::Unknown;
         }
@@ -105,18 +108,85 @@ impl LendingPool {
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
             BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else if src.len() == 182 && src[0] == 1 {
+            // Legacy 182-byte LendingPool from devnet v1 deployment
+            let is_initialized = src[0] == 1;
+            let pool_type = match src[1] {
+                0 => PoolType::Individual,
+                1 => PoolType::Circle,
+                2 => PoolType::Institutional,
+                _ => return Err(ProgramError::InvalidAccountData),
+            };
+            let authority = Pubkey::new_from_array(src[2..34].try_into().unwrap());
+            let liquidity_mint = Pubkey::new_from_array(src[34..66].try_into().unwrap());
+            let vault_pda = Pubkey::new_from_array(src[66..98].try_into().unwrap());
+            let total_liquidity = u64::from_le_bytes(src[98..106].try_into().unwrap());
+            let total_borrowed = u64::from_le_bytes(src[106..114].try_into().unwrap());
+            let staked_skr_amount = u64::from_le_bytes(src[114..122].try_into().unwrap());
+            let interest_rate_bps = u16::from_le_bytes(src[122..124].try_into().unwrap());
+            let max_ltv_bps = u16::from_le_bytes(src[124..126].try_into().unwrap());
+            let min_duration = i64::from_le_bytes(src[126..134].try_into().unwrap());
+            let max_duration = i64::from_le_bytes(src[134..142].try_into().unwrap());
+            let loans_originated = u32::from_le_bytes(src[142..146].try_into().unwrap());
+            let loans_repaid = u32::from_le_bytes(src[146..150].try_into().unwrap());
+            let mut name = [0u8; 32];
+            name.copy_from_slice(&src[150..182]);
+
+            Ok(Self {
+                discriminator: Self::DISCRIMINATOR,
+                is_initialized,
+                pool_id: 1,
+                pool_type,
+                authority,
+                liquidity_mint,
+                vault_pda,
+                total_liquidity,
+                total_borrowed,
+                staked_skr_amount,
+                interest_rate_bps,
+                max_ltv_bps,
+                min_duration,
+                max_duration,
+                loans_originated,
+                loans_repaid,
+                name,
+                is_oracle_free: false,
+                has_custom_oracle: false,
+            })
         } else {
             Err(ProgramError::InvalidAccountData)
         }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        if dst.len() < Self::LEN {
-            return Err(ProgramError::AccountDataTooSmall);
+        if dst.len() >= Self::LEN {
+            let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+            dst[..serialized.len()].copy_from_slice(&serialized);
+            Ok(())
+        } else if dst.len() == 182 {
+            dst[0] = if self.is_initialized { 1 } else { 0 };
+            dst[1] = match self.pool_type {
+                PoolType::Individual => 0,
+                PoolType::Circle => 1,
+                PoolType::Institutional => 2,
+            };
+            dst[2..34].copy_from_slice(self.authority.as_ref());
+            dst[34..66].copy_from_slice(self.liquidity_mint.as_ref());
+            dst[66..98].copy_from_slice(self.vault_pda.as_ref());
+            dst[98..106].copy_from_slice(&self.total_liquidity.to_le_bytes());
+            dst[106..114].copy_from_slice(&self.total_borrowed.to_le_bytes());
+            dst[114..122].copy_from_slice(&self.staked_skr_amount.to_le_bytes());
+            dst[122..124].copy_from_slice(&self.interest_rate_bps.to_le_bytes());
+            dst[124..126].copy_from_slice(&self.max_ltv_bps.to_le_bytes());
+            dst[126..134].copy_from_slice(&self.min_duration.to_le_bytes());
+            dst[134..142].copy_from_slice(&self.max_duration.to_le_bytes());
+            dst[142..146].copy_from_slice(&self.loans_originated.to_le_bytes());
+            dst[146..150].copy_from_slice(&self.loans_repaid.to_le_bytes());
+            dst[150..182].copy_from_slice(&self.name);
+            Ok(())
+        } else {
+            Err(ProgramError::AccountDataTooSmall)
         }
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        dst[..serialized.len()].copy_from_slice(&serialized);
-        Ok(())
     }
 }
 
@@ -168,6 +238,7 @@ pub struct P2POffer {
     pub creator: Pubkey,
     pub funder: Pubkey,
     pub collateral_mint: Pubkey,
+    pub liquidity_mint: Pubkey,
     pub collateral_amount: u64,
     pub requested_amount: u64,
     pub interest_offered: u64,
@@ -180,11 +251,47 @@ pub struct P2POffer {
 
 impl P2POffer {
     pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_OFFER;
-    pub const LEN: usize = 8 + 1 + 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 8 + 1; // 168 bytes
+    pub const LEN: usize = 8 + 1 + 8 + 32 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 8 + 1; // 200 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
             BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else if src.len() >= 168 && &src[0..8] == &Self::DISCRIMINATOR {
+            #[derive(BorshDeserialize)]
+            struct LegacyP2POffer {
+                discriminator: [u8; 8],
+                is_initialized: bool,
+                offer_id: u64,
+                creator: Pubkey,
+                funder: Pubkey,
+                collateral_mint: Pubkey,
+                collateral_amount: u64,
+                requested_amount: u64,
+                interest_offered: u64,
+                duration_seconds: i64,
+                created_at: i64,
+                due_time: i64,
+                grace_period_expires: i64,
+                status: OfferStatus,
+            }
+            let legacy = LegacyP2POffer::try_from_slice(&src[..168]).map_err(|_| ProgramError::InvalidAccountData)?;
+            Ok(Self {
+                discriminator: legacy.discriminator,
+                is_initialized: legacy.is_initialized,
+                offer_id: legacy.offer_id,
+                creator: legacy.creator,
+                funder: legacy.funder,
+                collateral_mint: legacy.collateral_mint,
+                liquidity_mint: USDC_DEVNET_MINT,
+                collateral_amount: legacy.collateral_amount,
+                requested_amount: legacy.requested_amount,
+                interest_offered: legacy.interest_offered,
+                duration_seconds: legacy.duration_seconds,
+                created_at: legacy.created_at,
+                due_time: legacy.due_time,
+                grace_period_expires: legacy.grace_period_expires,
+                status: legacy.status,
+            })
         } else {
             Err(ProgramError::InvalidAccountData)
         }

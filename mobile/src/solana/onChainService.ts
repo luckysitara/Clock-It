@@ -68,6 +68,7 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZb
 // M-04: Canonical Solana Devnet USDC Mint
 export const USDC_DEVNET_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 export const SKR_DEVNET_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
+export const NATIVE_SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 
 // M-03: Integer Interest Calculation Helper matching Smart Contract exactly
 export function calculateExactInterestDue(
@@ -280,6 +281,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
           id,
           poolId: 1,
           poolName: 'Seeker Genesis Circle',
+          poolPubkey: poolPubkey.toBase58(),
           borrower: borrowerPubkey,
           principalAmount,
           collateralName,
@@ -468,23 +470,67 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
     const offers: P2POffer[] = [];
 
     for (const acc of accounts) {
-      if (acc.account.data.length === 170 || acc.account.data.length === 168 || acc.account.data.length === 162) {
+      if (acc.account.data.length >= 162) {
         const data = Buffer.from(acc.account.data);
-        const isV2 = data.length >= 168;
-        const isListed = data.readUInt8(isV2 ? 8 : 0) === 1;
-        if (!isListed) continue;
+        let isInitialized = false;
+        let offerId = 0;
+        let creator = '';
+        let funder = '';
+        let collateralMint = '';
+        let liquidityMint = USDC_DEVNET_MINT.toBase58();
+        let collateralLamports = 0;
+        let requestedLamports = 0;
+        let interestLamports = 0;
+        let durationSeconds = 0;
+        let createdAt = 0;
+        let dueTime = 0;
+        let statusByte = 0;
 
-        const offerId = Number(data.readBigUInt64LE(isV2 ? 9 : 1));
-        const creator = new PublicKey(data.subarray(isV2 ? 17 : 9, isV2 ? 49 : 41)).toBase58();
-        const funder = new PublicKey(data.subarray(isV2 ? 49 : 41, isV2 ? 81 : 73)).toBase58();
-        const collateralMint = new PublicKey(data.subarray(isV2 ? 81 : 73, isV2 ? 113 : 105)).toBase58();
-        const collateralLamports = Number(data.readBigUInt64LE(isV2 ? 113 : 105));
-        const requestedLamports = Number(data.readBigUInt64LE(isV2 ? 121 : 113));
-        const interestLamports = Number(data.readBigUInt64LE(isV2 ? 129 : 121));
-        const durationSeconds = Number(data.readBigInt64LE(isV2 ? 137 : 129));
-        const createdAt = Number(data.readBigInt64LE(isV2 ? 145 : 137));
-        const dueTime = Number(data.readBigInt64LE(isV2 ? 153 : 145));
-        const statusByte = data.readUInt8(isV2 ? (data.length === 170 ? 169 : 167) : 161);
+        if (data.length >= 200) {
+          isInitialized = data.readUInt8(8) === 1;
+          offerId = Number(data.readBigUInt64LE(9));
+          creator = new PublicKey(data.subarray(17, 49)).toBase58();
+          funder = new PublicKey(data.subarray(49, 81)).toBase58();
+          collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
+          liquidityMint = new PublicKey(data.subarray(113, 145)).toBase58();
+          collateralLamports = Number(data.readBigUInt64LE(145));
+          requestedLamports = Number(data.readBigUInt64LE(153));
+          interestLamports = Number(data.readBigUInt64LE(161));
+          durationSeconds = Number(data.readBigInt64LE(169));
+          createdAt = Number(data.readBigInt64LE(177));
+          dueTime = Number(data.readBigInt64LE(185));
+          statusByte = data.readUInt8(data.length >= 202 ? 201 : data.length - 1);
+        } else if (data.length >= 168) {
+          isInitialized = data.readUInt8(8) === 1;
+          offerId = Number(data.readBigUInt64LE(9));
+          creator = new PublicKey(data.subarray(17, 49)).toBase58();
+          funder = new PublicKey(data.subarray(49, 81)).toBase58();
+          collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
+          collateralLamports = Number(data.readBigUInt64LE(113));
+          requestedLamports = Number(data.readBigUInt64LE(121));
+          interestLamports = Number(data.readBigUInt64LE(129));
+          durationSeconds = Number(data.readBigInt64LE(137));
+          createdAt = Number(data.readBigInt64LE(145));
+          dueTime = Number(data.readBigInt64LE(153));
+          statusByte = data.readUInt8(data.length === 170 ? 169 : 167);
+        } else if (data.length === 162) {
+          isInitialized = data.readUInt8(0) === 1;
+          offerId = Number(data.readBigUInt64LE(1));
+          creator = new PublicKey(data.subarray(9, 41)).toBase58();
+          funder = new PublicKey(data.subarray(41, 73)).toBase58();
+          collateralMint = new PublicKey(data.subarray(73, 105)).toBase58();
+          collateralLamports = Number(data.readBigUInt64LE(105));
+          requestedLamports = Number(data.readBigUInt64LE(113));
+          interestLamports = Number(data.readBigUInt64LE(121));
+          durationSeconds = Number(data.readBigInt64LE(129));
+          createdAt = Number(data.readBigInt64LE(137));
+          dueTime = Number(data.readBigInt64LE(145));
+          statusByte = data.readUInt8(161);
+        } else {
+          continue;
+        }
+
+        if (!isInitialized) continue;
 
         const requestedAmount = requestedLamports / 1_000_000;
         const interestOffered = interestLamports / 1_000_000;
@@ -512,6 +558,7 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
           collateralType: 'Token',
           collateralAmount: collateralAmount > 0 ? collateralAmount : 1,
           collateralMint,
+          liquidityMint,
           requestedAmount,
           interestOffered,
           durationDays: durationDays || 7,
@@ -832,7 +879,8 @@ export async function buildBorrowTx(
 
   const [treasuryPDA] = getTreasuryPDA();
   const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
-  const [oraclePDA] = getOraclePDA(collateralMint);
+  const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
+  const [oraclePDA] = getOraclePDA(oracleMint);
 
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -1098,6 +1146,9 @@ export async function buildCreateP2POfferTx(
     ? creator
     : getAssociatedTokenAddress(SKR_DEVNET_MINT, creator);
 
+  const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
+  const [oraclePDA] = getOraclePDA(oracleMint);
+
   // ClockLendInstruction::CreateP2POffer (Variant 4):
   // 1 byte tag (4) + 8 bytes offer_id + 8 bytes requested_amount + 8 bytes collateral_amount + 8 bytes interest_offered + 8 bytes duration_seconds = 41 bytes
   const data = Buffer.alloc(41);
@@ -1118,6 +1169,8 @@ export async function buildCreateP2POfferTx(
       { pubkey: collateralMint, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: oraclePDA, isSigner: false, isWritable: false },
+      { pubkey: USDC_DEVNET_MINT, isSigner: false, isWritable: false },
     ],
     data,
   });

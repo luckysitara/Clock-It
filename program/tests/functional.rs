@@ -85,6 +85,7 @@ fn test_p2p_offer_serialization() {
         creator: Pubkey::new_unique(),
         funder: Pubkey::default(),
         collateral_mint: Pubkey::new_unique(),
+        liquidity_mint: Pubkey::new_unique(),
         collateral_amount: 1, // 1 NFT
         requested_amount: 250_000_000,
         interest_offered: 15_000_000,

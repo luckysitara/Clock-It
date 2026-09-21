@@ -40,6 +40,7 @@ export interface LoanOrder {
   txSignature?: string;
   escrowAddress?: string;
   solscanUrl?: string;
+  poolPubkey?: string;
 }
 
 export interface P2POffer {
@@ -51,6 +52,7 @@ export interface P2POffer {
   collateralType: 'NFT' | 'cNFT' | 'Token';
   collateralAmount: number;
   collateralMint?: string;
+  liquidityMint?: string;
   collateralImage?: string;
   requestedAmount: number; // USDC
   interestOffered: number; // USDC

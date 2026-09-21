@@ -172,6 +172,7 @@ fn test_security_cancel_p2p_offer_invariant() {
         creator,
         funder: Pubkey::default(),
         collateral_mint: Pubkey::default(),
+        liquidity_mint: Pubkey::default(),
         collateral_amount: 1_000_000_000,
         requested_amount: 100_000_000,
         interest_offered: 5_000_000,

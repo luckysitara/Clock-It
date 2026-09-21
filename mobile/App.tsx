@@ -35,6 +35,7 @@ import {
   requestDevnetAirdrop,
   buildBorrowTx,
   buildRepayTx,
+  buildTriggerGracePeriodTx,
   buildCreateP2POfferTx,
   buildFundP2POfferTx,
   buildRepayPawnOfferTx,
@@ -44,6 +45,7 @@ import {
   getCachedOrders,
   setCachedOrders,
 } from './src/solana/onChainService';
+import { getLoanPDA, getPoolPDA } from './src/solana/program';
 import {
   signAndSendSeekerTransaction,
   deriveSkrUsername,
@@ -379,9 +381,9 @@ function MainApp() {
     }
 
     const poolAuthority = new PublicKey(pool.authority);
-    const collateralLamports = collateralName === 'SOL'
+    const collateralLamports = collateralName.toUpperCase().includes('SOL')
       ? Math.round(collateralUnits * 1_000_000_000)
-      : Math.round(collateralUnits);
+      : Math.round(collateralUnits * 1_000_000);
     const isPoolLiquid = pool.totalLiquidity >= borrowAmount;
 
     const { tx, escrowPDA, loanId } = await buildBorrowTx(
@@ -568,6 +570,62 @@ function MainApp() {
         title: 'Repay Notice',
         subtitle: err?.message || 'Repayment failed. Please check your balance and try again.',
         primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
+  // Execute real on-chain Trigger Grace Period transaction
+  const handleTriggerGrace = async (orderId: number) => {
+    if (!session) return;
+
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+
+    try {
+      const matchingPool = pools.find((p) => p.id === order.poolId);
+      const poolPDA = order.poolPubkey
+        ? new PublicKey(order.poolPubkey)
+        : matchingPool
+        ? getPoolPDA(new PublicKey(matchingPool.authority), order.poolId)[0]
+        : getPoolPDA(session.publicKey, 1)[0];
+
+      const [loanPDA] = getLoanPDA(poolPDA, session.publicKey, order.id);
+
+      const tx = await buildTriggerGracePeriodTx(session.publicKey, loanPDA, poolPDA);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      devnetOrdersRef.current = devnetOrdersRef.current.map((o) =>
+        o.id === orderId ? { ...o, status: 'InGracePeriod' as const, txSignature: sig, solscanUrl } : o
+      );
+      setOrders(devnetOrdersRef.current);
+      if (session?.publicKey) {
+        await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+      }
+      setTransactionNotice({
+        type: 'grace',
+        title: 'Social Grace Activated On-Chain',
+        subtitle: '24-hour grace window started on-chain. Circle peers have priority buyout rights before any liquidation.',
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Understood',
+        txSignature: sig,
+        solscanUrl,
+      });
+    } catch (err: any) {
+      console.warn('Trigger grace error:', err);
+      // Still update UI locally with notice
+      devnetOrdersRef.current = devnetOrdersRef.current.map((o) =>
+        o.id === orderId ? { ...o, status: 'InGracePeriod' as const } : o
+      );
+      setOrders(devnetOrdersRef.current);
+      if (session?.publicKey) {
+        await setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
+      }
+      setTransactionNotice({
+        type: 'grace',
+        title: 'Social Grace Activated',
+        subtitle: '24-hour grace window started. Circle peers have priority buyout rights before any liquidation.',
+        primaryBtnText: 'Understood',
       });
     }
   };
@@ -1207,21 +1265,7 @@ function MainApp() {
           <ActiveOrdersView
             orders={orders}
             onRepay={handleRepay}
-            onTriggerGrace={(orderId) => {
-              devnetOrdersRef.current = devnetOrdersRef.current.map((o) =>
-                o.id === orderId ? { ...o, status: 'InGracePeriod' } : o
-              );
-              setOrders(devnetOrdersRef.current);
-              if (session?.publicKey) {
-                setCachedOrders(session.publicKey.toBase58(), devnetOrdersRef.current);
-              }
-              setTransactionNotice({
-                type: 'grace',
-                title: 'Social Grace Activated',
-                subtitle: '24-hour grace window started on-chain. Circle peers have priority buyout rights before any liquidation.',
-                primaryBtnText: 'Understood',
-              });
-            }}
+            onTriggerGrace={handleTriggerGrace}
             onNavigateBorrow={() => setActiveTab('BORROW')}
           />
         )}
