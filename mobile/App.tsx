@@ -57,47 +57,7 @@ import { LendingPool, LoanOrder, P2POffer, OfferStatus, UserProfile, WalletAsset
 
 type Tab = 'BORROW' | 'MARKET' | 'LOANS' | 'PROFILE';
 
-const INITIAL_COMMUNITY_OFFERS: P2POffer[] = [
-  {
-    id: 9012,
-    creator: '9aJbM6GZ8YQ1b8U2E7f3Wv1qV1pL7k9Xm2Y4z5N8qR7s',
-    collateralName: 'Saga Monke Genesis #482',
-    collateralType: 'NFT',
-    collateralAmount: 1,
-    requestedAmount: 180,
-    interestOffered: 15,
-    durationDays: 7,
-    createdAt: Math.floor(Date.now() / 1000) - 3600 * 8,
-    status: 'Open',
-    escrowAddress: '7uL4Qv7yH9d2aX6kM1pZ8w4bC3eT5yG2jR6mN8sV9pX',
-  },
-  {
-    id: 9013,
-    creator: '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG',
-    collateralName: '1,500 SKR Token',
-    collateralType: 'Token',
-    collateralAmount: 1500,
-    requestedAmount: 25,
-    interestOffered: 3.5,
-    durationDays: 14,
-    createdAt: Math.floor(Date.now() / 1000) - 3600 * 20,
-    status: 'Open',
-    escrowAddress: '3zR1Kp5sX8mY2aL7v9bC4eT6yH1d9jN2mW8qV4pG7sL',
-  },
-  {
-    id: 9014,
-    creator: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
-    collateralName: 'Seeker Chapter 2 Preorder cNFT',
-    collateralType: 'cNFT',
-    collateralAmount: 1,
-    requestedAmount: 350,
-    interestOffered: 28,
-    durationDays: 30,
-    createdAt: Math.floor(Date.now() / 1000) - 3600 * 48,
-    status: 'Open',
-    escrowAddress: '8qM4V2yT7xK1pL6sZ9bC3eW5jR2mN8sV1pX7uL4Qv9d',
-  },
-];
+const INITIAL_COMMUNITY_OFFERS: P2POffer[] = [];
 
 function MainApp() {
   const { colors, mode } = useTheme();
@@ -256,10 +216,10 @@ function MainApp() {
     try {
       setIsLoadingPools(true);
       const [livePools, profile, liveOrders, liveOffers] = await Promise.allSettled([
-        fetchLivePools(),
-        fetchLiveUserProfile(userPubkey, skrHandle),
-        fetchLiveUserOrders(userPubkey),
-        fetchLiveP2POffers(),
+        fetchLivePools(net),
+        fetchLiveUserProfile(userPubkey, skrHandle, net),
+        fetchLiveUserOrders(userPubkey, net),
+        fetchLiveP2POffers(net),
       ]);
 
       if (livePools.status === 'fulfilled') setPools(livePools.value);
@@ -396,7 +356,8 @@ function MainApp() {
       collateralLamports,
       7,
       collateralName,
-      isPoolLiquid
+      isPoolLiquid,
+      new PublicKey(pool.liquidityMint)
     );
 
     try {
@@ -512,7 +473,8 @@ function MainApp() {
         totalDue,
         true,
         order.collateralName,
-        poolPubkeyOverride
+        poolPubkeyOverride,
+        matchingPool ? new PublicKey(matchingPool.liquidityMint) : undefined
       );
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
@@ -645,18 +607,6 @@ function MainApp() {
     days: number
   ) => {
     if (!session) return;
-
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend smart contracts and P2P pawn escrows are currently running on Solana Devnet.\n\nWould you like to switch to Devnet to list this pawn offer?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
-        ]
-      );
-      return;
-    }
 
     const offerId = Math.floor(1000 + Math.random() * 9000);
 
@@ -966,18 +916,6 @@ function MainApp() {
   ) => {
     if (!session) return;
 
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend smart contracts are currently running on Solana Devnet.\n\nWould you like to switch to Devnet to create this lending desk?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
-        ]
-      );
-      return;
-    }
-
     const poolId = Math.floor(100 + Math.random() * 900);
     const interestRateBps = Math.round(aprPercent * 100);
     const maxLtvBps = Math.round(maxLtvPercent * 100);
@@ -1066,18 +1004,6 @@ function MainApp() {
   const handleStakeSkr = async (amount: number) => {
     if (!session) return;
 
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend smart contracts and reputation escrows are running on Solana Devnet.\n\nWould you like to switch to Devnet to stake your SKR bond?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
-        ]
-      );
-      return;
-    }
-
     try {
       const { tx, profilePDA, escrowPDA } = await buildStakeSkrTx(session.publicKey, amount);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
@@ -1155,18 +1081,6 @@ function MainApp() {
   const handleDepositLiquidity = async (pool: LendingPool, amount: number) => {
     if (!session) return;
 
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend liquidity pools are running on Solana Devnet.\n\nSwitch to Devnet to fund your desk.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
-        ]
-      );
-      return;
-    }
-
     try {
       const tx = await buildDepositLiquidityTx(session.publicKey, pool.id, amount);
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
@@ -1174,7 +1088,7 @@ function MainApp() {
       const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
 
       // Refresh pools so the desk's Available capacity reflects the deposit
-      fetchLivePools().then((livePools) => setPools(livePools)).catch((err) => {
+      fetchLivePools(selectedNetwork).then((livePools) => setPools(livePools)).catch((err) => {
         console.warn('Pool refresh after deposit failed:', err);
       });
 
@@ -1212,18 +1126,6 @@ function MainApp() {
   // NEW-3: Execute real on-chain Unstake SKR transaction (exit path for the bond)
   const handleUnstakeSkr = async (amount: number) => {
     if (!session) return;
-
-    if (selectedNetwork === 'mainnet-beta') {
-      Alert.alert(
-        'Devnet Testing Mode',
-        'ClockLend smart contracts and reputation escrows are running on Solana Devnet.\n\nSwitch to Devnet to unstake your SKR bond.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
-        ]
-      );
-      return;
-    }
 
     try {
       const { tx, escrowPDA } = await buildUnstakeSkrTx(session.publicKey, amount);
@@ -1327,7 +1229,7 @@ function MainApp() {
     stakedSkr: 0,
     totalLoansCompleted: 0,
     totalLoansDefaulted: 0,
-    reputationScore: 10000,
+    reputationScore: 0,
     tier: 'Silver',
     aprDiscount: 0,
   };

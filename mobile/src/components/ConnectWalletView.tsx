@@ -108,24 +108,6 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
           </Text>
         </View>
 
-        {/* Live Protocol Stats Strip */}
-        <View style={[styles.statsRow, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-          <View style={styles.statCol}>
-            <Text style={[styles.statVal, { color: colors.primary }]}>$4.2M+</Text>
-            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Total Volume</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: colors.divider }]} />
-          <View style={styles.statCol}>
-            <Text style={[styles.statVal, { color: colors.text }]}>90%</Text>
-            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Max LTV</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: colors.divider }]} />
-          <View style={styles.statCol}>
-            <Text style={[styles.statVal, { color: colors.accent }]}>0.0%</Text>
-            <Text style={[styles.statLbl, { color: colors.textMuted }]}>Default Rate</Text>
-          </View>
-        </View>
-
         {/* Supported Collateral Assets Row */}
         <View style={styles.collateralSection}>
           <Text style={[styles.sectionHeading, { color: colors.textMuted }]}>SUPPORTED ASSETS</Text>

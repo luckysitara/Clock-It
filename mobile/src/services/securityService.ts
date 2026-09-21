@@ -76,12 +76,13 @@ function sha256(ascii: string): string {
 }
 
 export async function isLockEnabled(): Promise<boolean> {
+  // Fail CLOSED: a SecureStore read error must never boot the app unlocked.
   try {
     const val = await SecureStore.getItemAsync(KEY_LOCK_ENABLED);
-    return val === 'true';
+    return val !== 'false';
   } catch (err) {
-    console.warn('Error reading lock state:', err);
-    return false;
+    console.warn('Error reading lock state — defaulting to LOCKED:', err);
+    return true;
   }
 }
 
