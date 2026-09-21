@@ -81,13 +81,13 @@ export const TransactionNoticeModal: React.FC<TransactionNoticeModalProps> = ({
     if (data.solscanUrl) {
       Linking.openURL(data.solscanUrl).catch(() => {});
     } else if (data.txSignature) {
-      Linking.openURL(`https://solscan.io/tx/${data.txSignature}?cluster=devnet`).catch(() => {});
+      Linking.openURL(`https://solscan.io/tx/${data.txSignature}`).catch(() => {});
     }
   };
 
   const handleOpenEscrow = () => {
     if (data.escrowAddress) {
-      Linking.openURL(`https://solscan.io/account/${data.escrowAddress}?cluster=devnet`).catch(() => {});
+      Linking.openURL(`https://solscan.io/account/${data.escrowAddress}`).catch(() => {});
     }
   };
 
@@ -147,7 +147,7 @@ export const TransactionNoticeModal: React.FC<TransactionNoticeModalProps> = ({
                     <Text style={[styles.evidenceHeaderText, { color: colors.text }]}>ON-CHAIN VERIFICATION</Text>
                   </View>
                   <View style={[styles.networkBadge, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}>
-                    <Text style={[styles.networkBadgeText, { color: colors.primary }]}>Solana Devnet</Text>
+                    <Text style={[styles.networkBadgeText, { color: colors.primary }]}>Solana Mainnet</Text>
                   </View>
                 </View>
 

@@ -15,7 +15,6 @@ import {
 import { PublicKey } from '@solana/web3.js';
 import { useTheme } from '../theme/ThemeContext';
 import { WalletAssets, SolanaNetwork } from '../types';
-import { requestDevnetAirdrop } from '../solana/onChainService';
 
 const SOL_LOGO = require('../../assets/tokens/sol.png');
 const SKR_LOGO = require('../../assets/tokens/skr.png');
@@ -28,7 +27,6 @@ interface WalletAssetsModalProps {
   skrHandle: string;
   assets: WalletAssets;
   network: SolanaNetwork;
-  onSelectNetwork: (network: SolanaNetwork) => void;
   onRefresh: () => Promise<void>;
   onSwitchAddress?: (pubkey: PublicKey) => void;
   onDisconnect: () => void;
@@ -41,13 +39,11 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
   skrHandle,
   assets,
   network,
-  onSelectNetwork,
   onRefresh,
   onSwitchAddress,
   onDisconnect,
 }) => {
   const { colors } = useTheme();
-  const [isAirdropping, setIsAirdropping] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showSwitchInput, setShowSwitchInput] = useState(false);
   const [switchAddrText, setSwitchAddrText] = useState('');
@@ -61,38 +57,7 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
   const solUsd = assets.solBalance * solPrice;
   const skrUsd = assets.skrBalance * skrPrice;
 
-  const handleAirdrop = async () => {
-    if (network !== 'devnet') {
-      Alert.alert('Faucet Notice', 'Test funds can only be claimed on Solana Devnet.');
-      return;
-    }
-    setIsAirdropping(true);
-    try {
-      const sig = await requestDevnetAirdrop(walletAddress);
-      Alert.alert('🚰 Test Funds Received', 'Successfully funded +1.0 SOL to your wallet.');
-      await onRefresh();
-    } catch (err: any) {
-      Alert.alert('Funding Notice', err?.message || 'Faucet limit reached. Please try again in a few moments.');
-    } finally {
-      setIsAirdropping(false);
-    }
-  };
 
-  const handleGetDevnetUsdc = () => {
-    Alert.alert(
-      '💧 Official Circle Devnet USDC Faucet',
-      `Circle provides free official Devnet USDC on Solana for developers.\n\nYour Devnet Wallet Address:\n${walletAddress.toBase58()}\n\nWould you like to open Circle's faucet in your browser?`,
-      [
-        {
-          text: 'Open Circle Faucet ↗',
-          onPress: () => {
-            Linking.openURL('https://faucet.circle.com').catch(() => {});
-          },
-        },
-        { text: 'Cancel', style: 'cancel' },
-      ]
-    );
-  };
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -139,49 +104,6 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
               activeOpacity={0.7}
             >
               <Text style={[styles.closeText, { color: colors.textSecondary }]}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Network Switcher Tabs */}
-          <View style={[styles.networkSegment, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
-            <TouchableOpacity
-              style={[
-                styles.segmentBtn,
-                network === 'devnet' && [styles.segmentBtnActive, { backgroundColor: colors.card, borderColor: colors.cardBorder }],
-              ]}
-              onPress={() => onSelectNetwork('devnet')}
-              activeOpacity={0.8}
-            >
-              <View style={[styles.segDot, { backgroundColor: '#10B981' }]} />
-              <Text
-                style={[
-                  styles.segmentText,
-                  { color: network === 'devnet' ? colors.text : colors.textMuted },
-                  network === 'devnet' && styles.segmentTextBold,
-                ]}
-              >
-                Devnet
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.segmentBtn,
-                network === 'mainnet-beta' && [styles.segmentBtnActive, { backgroundColor: colors.card, borderColor: colors.cardBorder }],
-              ]}
-              onPress={() => onSelectNetwork('mainnet-beta')}
-              activeOpacity={0.8}
-            >
-              <View style={[styles.segDot, { backgroundColor: '#A855F7' }]} />
-              <Text
-                style={[
-                  styles.segmentText,
-                  { color: network === 'mainnet-beta' ? colors.text : colors.textMuted },
-                  network === 'mainnet-beta' && styles.segmentTextBold,
-                ]}
-              >
-                Mainnet-Beta
-              </Text>
             </TouchableOpacity>
           </View>
 
@@ -404,35 +326,6 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
 
             {/* Quick Actions */}
             <View style={styles.actionGrid}>
-              {network === 'devnet' && (
-                <>
-                  <TouchableOpacity
-                    style={[styles.actionBtn, { backgroundColor: colors.primary }]}
-                    onPress={handleAirdrop}
-                    disabled={isAirdropping}
-                    activeOpacity={0.85}
-                  >
-                    {isAirdropping ? (
-                      <ActivityIndicator color={colors.primaryText} />
-                    ) : (
-                      <Text style={[styles.actionBtnText, { color: colors.primaryText }]}>
-                        🚰 Claim Test Funds (+1 SOL)
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.actionBtn, { backgroundColor: '#2775CA' }]}
-                    onPress={handleGetDevnetUsdc}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[styles.actionBtnText, { color: '#FFFFFF' }]}>
-                      💧 Claim Devnet USDC (Circle Faucet ↗)
-                    </Text>
-                  </TouchableOpacity>
-                </>
-              )}
-
               <TouchableOpacity
                 style={[styles.refreshBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
                 onPress={handleManualRefresh}

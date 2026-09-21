@@ -119,7 +119,7 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                     <Text style={[styles.evidenceTitle, { color: colors.text }]}>ON-CHAIN VERIFICATION</Text>
                   </View>
                   <View style={[styles.networkBadge, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}>
-                    <Text style={[styles.networkBadgeText, { color: colors.primary }]}>Solana Devnet</Text>
+                    <Text style={[styles.networkBadgeText, { color: colors.primary }]}>Solana Mainnet</Text>
                   </View>
                 </View>
 
@@ -133,7 +133,7 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                       <TouchableOpacity
                         style={[styles.solscanChip, { backgroundColor: colors.primary }]}
                         onPress={() => {
-                          const url = order.solscanUrl || `https://solscan.io/tx/${order.txSignature}?cluster=devnet`;
+                          const url = order.solscanUrl || `https://solscan.io/tx/${order.txSignature}`;
                           Linking.openURL(url).catch(() => {
                             Alert.alert('Solscan Transaction', order.txSignature!);
                           });
@@ -149,7 +149,7 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                     <Text style={[styles.evidenceLabel, { color: colors.textMuted }]}>Tx Signature</Text>
                     <TouchableOpacity
                       onPress={() => {
-                        const url = `https://solscan.io/account/${order.borrower}?cluster=devnet`;
+                        const url = `https://solscan.io/account/${order.borrower}`;
                         Linking.openURL(url).catch(() => {});
                       }}
                     >
@@ -163,7 +163,7 @@ export const ActiveOrdersView: React.FC<ActiveOrdersViewProps> = ({
                     <Text style={[styles.evidenceLabel, { color: colors.textMuted }]}>Escrow PDA</Text>
                     <TouchableOpacity
                       onPress={() => {
-                        const url = `https://solscan.io/account/${order.escrowAddress}?cluster=devnet`;
+                        const url = `https://solscan.io/account/${order.escrowAddress}`;
                         Linking.openURL(url).catch(() => {
                           Alert.alert('Escrow Account', order.escrowAddress!);
                         });

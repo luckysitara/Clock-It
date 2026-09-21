@@ -51,12 +51,12 @@ export const MAINNET_RPCS = [
 export const devnetConnection = new Connection(DEVNET_RPCS[0], 'confirmed');
 export const mainnetConnection = new Connection(MAINNET_RPCS[0], 'confirmed');
 
-export function getConnection(network: SolanaNetwork = 'devnet'): Connection {
+export function getConnection(network: SolanaNetwork = 'mainnet-beta'): Connection {
   return network === 'mainnet-beta' ? mainnetConnection : devnetConnection;
 }
 
 // Default export connection for backwards compatibility
-export const connection = devnetConnection;
+export const connection = mainnetConnection;
 
 export { PROGRAM_ID };
 
@@ -65,9 +65,10 @@ export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-// M-04: Canonical Solana Devnet USDC Mint
+// M-04: Legacy devnet USDC mint (kept for parsing legacy devnet accounts)
 export const USDC_DEVNET_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
-export const SKR_DEVNET_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
+export const USDC_MAINNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+export const SKR_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
 export const NATIVE_SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 
 // M-03: Integer Interest Calculation Helper matching Smart Contract exactly
@@ -91,11 +92,8 @@ export function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): Pu
   return address;
 }
 
-// Seeded verified Devnet pool addresses for instantaneous retrieval
-const SEEDED_POOLS = [
-  new PublicKey('6EK2pPKZyqZZfUj6MxJ1cS2jYQzXppMAVf9Wm1VsPgoi'), // Seeker Genesis Circle
-  new PublicKey('AgMT2TRQ9xdTqf2CV8Gnjg564hDdKXBumhkhwi8egAKy'), // Tokyo Whale Desk
-];
+// Seeded pool addresses for instantaneous retrieval (populated after mainnet desk creation)
+const SEEDED_POOLS: PublicKey[] = [];
 
 // Helper to query with automatic fallback to secondary RPC endpoints
 export async function queryRpcWithFallback<T>(
@@ -195,8 +193,8 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
   };
 }
 
-// Fetch all live Lending Pools from the deployed Devnet contract
-export async function fetchLivePools(network: SolanaNetwork = 'devnet'): Promise<LendingPool[]> {
+// Fetch all live Lending Pools from the deployed contract
+export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): Promise<LendingPool[]> {
   const poolsMap = new Map<string, LendingPool>();
   const rpcConn = getConnection(network);
 
@@ -232,8 +230,8 @@ export async function fetchLivePools(network: SolanaNetwork = 'devnet'): Promise
   return Array.from(poolsMap.values());
 }
 
-// Fetch live user loan orders directly from Solana Devnet contract & on-chain state
-export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNetwork = 'devnet'): Promise<LoanOrder[]> {
+// Fetch live user loan orders directly from the contract & on-chain state
+export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNetwork = 'mainnet-beta'): Promise<LoanOrder[]> {
   const rpcConn = getConnection(network);
   const borrowerPubkey = borrower.toBase58();
   const cachedOrders = await getCachedOrders(borrowerPubkey);
@@ -265,7 +263,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
         const poolPubkey = new PublicKey(data.subarray(isV2 ? 49 : 41, isV2 ? 81 : 73));
         const principalAmount = Number(data.readBigUInt64LE(isV2 ? 81 : 73)) / 1_000_000;
         const collateralMint = new PublicKey(data.subarray(isV2 ? 89 : 81, isV2 ? 121 : 113)).toBase58();
-        const isSkr = collateralMint === SKR_DEVNET_MINT.toBase58();
+        const isSkr = collateralMint === SKR_MINT.toBase58();
         const rawCollateral = Number(data.readBigUInt64LE(isV2 ? 121 : 113));
         const collateralAmount = isSkr ? rawCollateral / 1_000_000 : rawCollateral / 1_000_000_000;
         const collateralName = isSkr ? `${collateralAmount.toLocaleString()} SKR` : `${collateralAmount.toFixed(2)} SOL`;
@@ -305,7 +303,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
     console.warn('Program account query notice:', err);
   }
 
-  // 2. Scan Solana Devnet blockchain transactions & memos for ground-truth borrow/repay history
+  // 2. Scan blockchain transactions & memos for ground-truth borrow/repay history
   try {
     const signatures = await rpcConn.getSignaturesForAddress(borrower, { limit: 60 });
     const memos = signatures
@@ -446,11 +444,11 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
         status,
         txSignature: cand.sig,
         escrowAddress: escrowPDA.toBase58(),
-        solscanUrl: `https://solscan.io/tx/${cand.sig}?cluster=devnet`,
+        solscanUrl: `https://solscan.io/tx/${cand.sig}`,
       });
     }
   } catch (sigErr) {
-    console.warn('Devnet signature scan notice:', sigErr);
+    console.warn('Signature scan notice:', sigErr);
   }
 
   // 3. Fallback: if blockchain was temporarily unreachable or slow, keep active cached orders
@@ -470,7 +468,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
 }
 
 // Fetch live P2P pawn offers directly from Devnet contract
-export async function fetchLiveP2POffers(network: SolanaNetwork = 'devnet'): Promise<P2POffer[]> {
+export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'): Promise<P2POffer[]> {
   const rpcConn = getConnection(network);
   try {
     const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
@@ -544,7 +542,7 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'devnet'): Pro
         const requestedAmount = requestedLamports / 1_000_000;
         const interestOffered = interestLamports / 1_000_000;
         const durationDays = Math.max(1, Math.round(durationSeconds / 86400));
-        const isSkr = collateralMint === SKR_DEVNET_MINT.toBase58();
+        const isSkr = collateralMint === SKR_MINT.toBase58();
         const collateralDecimals = isSkr ? 1_000_000 : 1_000_000_000;
         const collateralAmount = collateralLamports / collateralDecimals;
         const collateralName = isSkr
@@ -587,7 +585,7 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'devnet'): Pro
 }
 
 // Fetch live UserProfile PDA from Devnet contract
-export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: string, network: SolanaNetwork = 'devnet'): Promise<UserProfile> {
+export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: string, network: SolanaNetwork = 'mainnet-beta'): Promise<UserProfile> {
   const rpcConn = getConnection(network);
   try {
     const [profilePDA] = getProfilePDA(userPubkey);
@@ -734,7 +732,7 @@ function calculateTokenUsd(mint: string, amount: number, prices = livePrices): n
 // Query live user balances across SOL and all SPL token holdings on specified network with multi-RPC fallback
 export async function fetchLiveWalletAssets(
   userPubkey: PublicKey,
-  network: SolanaNetwork = 'devnet'
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<WalletAssets> {
   // 1. Query native SOL balance with RPC fallback
   let solLamports = 0;
@@ -858,7 +856,7 @@ export async function buildBorrowTx(
   durationDays: number,
   collateralName: string = 'SOL',
   isPoolLiquid: boolean = true,
-  liquidityMint: PublicKey = USDC_DEVNET_MINT
+  liquidityMint: PublicKey = USDC_MAINNET_MINT
 ): Promise<{ tx: Transaction; escrowPDA: PublicKey; loanId: number }> {
   const [poolPDA] = getPoolPDA(poolAuthority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
@@ -883,10 +881,10 @@ export async function buildBorrowTx(
   const isNativeSol = collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
     ? borrower
-    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+    : getAssociatedTokenAddress(SKR_MINT, borrower);
   const collateralMint = isNativeSol
     ? SystemProgram.programId
-    : SKR_DEVNET_MINT;
+    : SKR_MINT;
 
   const [treasuryPDA] = getTreasuryPDA();
   const treasuryUsdcAccount = getAssociatedTokenAddress(liquidityMint, treasuryPDA);
@@ -1003,7 +1001,7 @@ export async function buildRepayTx(
   isPoolLiquid: boolean = true,
   collateralName: string = 'SOL',
   poolPubkeyOverride?: PublicKey,
-  liquidityMint: PublicKey = USDC_DEVNET_MINT
+  liquidityMint: PublicKey = USDC_MAINNET_MINT
 ): Promise<Transaction> {
   // NEW-2: bind repayment to the loan's actual pool pubkey (read from the loan
   // PDA) instead of re-deriving the pool PDA from a menu-driven (authority, id).
@@ -1021,7 +1019,7 @@ export async function buildRepayTx(
   const isNativeSol = collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
     ? borrower
-    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+    : getAssociatedTokenAddress(SKR_MINT, borrower);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
@@ -1117,20 +1115,6 @@ export async function buildWithdrawLiquidityTx(
   return tx;
 }
 
-// Request 1 Devnet SOL airdrop directly to the user's connected wallet
-export async function requestDevnetAirdrop(userPubkey: PublicKey): Promise<string> {
-  const sig = await devnetConnection.requestAirdrop(userPubkey, 1_000_000_000);
-  const { blockhash, lastValidBlockHeight } = await devnetConnection.getLatestBlockhash('confirmed');
-  await devnetConnection.confirmTransaction(
-    {
-      signature: sig,
-      blockhash,
-      lastValidBlockHeight,
-    },
-    'confirmed'
-  );
-  return sig;
-}
 
 // Build Create P2P Pawn Offer Transaction
 export async function buildCreateP2POfferTx(
@@ -1160,10 +1144,10 @@ export async function buildCreateP2POfferTx(
     collateralAmount = Math.round(parseFloat(skrMatch[1]) * 1_000_000);
   }
 
-  const collateralMint = isNativeSol ? SystemProgram.programId : SKR_DEVNET_MINT;
+  const collateralMint = isNativeSol ? SystemProgram.programId : SKR_MINT;
   const creatorCollateralAccount = isNativeSol
     ? creator
-    : getAssociatedTokenAddress(SKR_DEVNET_MINT, creator);
+    : getAssociatedTokenAddress(SKR_MINT, creator);
 
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
@@ -1214,7 +1198,7 @@ export async function buildFundP2POfferTx(
 ): Promise<Transaction> {
   const creator = new PublicKey(offer.creator);
   const [offerPDA] = getP2POfferPDA(creator, offer.id);
-  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_DEVNET_MINT;
+  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_MAINNET_MINT;
   const funderUsdcAccount = getAssociatedTokenAddress(offerMint, funder);
   const creatorUsdcAccount = getAssociatedTokenAddress(offerMint, creator);
 
@@ -1262,14 +1246,14 @@ export async function buildRepayPawnOfferTx(
   const [offerPDA] = getP2POfferPDA(borrower, offer.id);
   const [escrowPDA] = getEscrowPDA(offerPDA);
   const funder = new PublicKey(offer.funder);
-  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_DEVNET_MINT;
+  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_MAINNET_MINT;
   const borrowerUsdcAccount = getAssociatedTokenAddress(offerMint, borrower);
   const funderUsdcAccount = getAssociatedTokenAddress(offerMint, funder);
 
   const isNativeSol = offer.collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
     ? borrower
-    : getAssociatedTokenAddress(SKR_DEVNET_MINT, borrower);
+    : getAssociatedTokenAddress(SKR_MINT, borrower);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
@@ -1348,7 +1332,7 @@ export async function buildCancelPawnOfferTx(
   data.writeUInt8(10, 0);
 
   const isNativeSol = offer.collateralName.toUpperCase().includes('SOL');
-  const creatorCollateralAccount = isNativeSol ? creator : getAssociatedTokenAddress(SKR_DEVNET_MINT, creator);
+  const creatorCollateralAccount = isNativeSol ? creator : getAssociatedTokenAddress(SKR_MINT, creator);
 
   const keys = [
     { pubkey: creator, isSigner: true, isWritable: true },
@@ -1460,7 +1444,7 @@ export async function buildStakeSkrTx(
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
   const [escrowPDA] = getSkrEscrowPDA(user);
-  const userSkrAccount = getAssociatedTokenAddress(SKR_DEVNET_MINT, user);
+  const userSkrAccount = getAssociatedTokenAddress(SKR_MINT, user);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
@@ -1492,7 +1476,7 @@ export async function buildStakeSkrTx(
         { pubkey: escrowPDA, isSigner: false, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SKR_DEVNET_MINT, isSigner: false, isWritable: false },
+        { pubkey: SKR_MINT, isSigner: false, isWritable: false },
       ],
       data,
     })
@@ -1518,7 +1502,7 @@ export async function buildUnstakeSkrTx(
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
   const [escrowPDA] = getSkrEscrowPDA(user);
-  const userSkrAccount = getAssociatedTokenAddress(SKR_DEVNET_MINT, user);
+  const userSkrAccount = getAssociatedTokenAddress(SKR_MINT, user);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));

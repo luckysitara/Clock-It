@@ -263,15 +263,6 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
                 <Text style={[styles.airdropBtnText, { color: colors.primaryText }]}>Use SOL Instead</Text>
               </TouchableOpacity>
             )}
-            {collateralType === 'SOL' && onRequestAirdrop && (
-              <TouchableOpacity
-                style={[styles.airdropBtn, { backgroundColor: colors.primary }]}
-                onPress={onRequestAirdrop}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.airdropBtnText, { color: colors.primaryText }]}>Devnet +1 SOL</Text>
-              </TouchableOpacity>
-            )}
           </View>
         )}
       </View>
