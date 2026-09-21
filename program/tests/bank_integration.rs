@@ -283,6 +283,7 @@ async fn test_bank_borrow_rejects_unauthorized_collateral_mint() {
 
     // Setup pool fixture
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -299,6 +300,8 @@ async fn test_bank_borrow_rejects_unauthorized_collateral_mint() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -411,6 +414,7 @@ async fn test_bank_borrow_requires_treasury_when_origination_fee_positive() {
     );
 
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -427,6 +431,8 @@ async fn test_bank_borrow_requires_treasury_when_origination_fee_positive() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -540,6 +546,7 @@ async fn test_bank_borrow_rejects_overwriting_defaulted_loan() {
     );
 
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -556,6 +563,8 @@ async fn test_bank_borrow_rejects_overwriting_defaulted_loan() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -570,6 +579,7 @@ async fn test_bank_borrow_rejects_overwriting_defaulted_loan() {
 
     // Existing loan is DEFAULTED
     let defaulted_loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
         is_active: false,
         loan_id,
         borrower: borrower.pubkey(),
@@ -676,6 +686,7 @@ async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
 
     // Pre-populate pool account
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -692,6 +703,8 @@ async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
         loans_originated: 1,
         loans_repaid: 0,
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -706,6 +719,7 @@ async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
 
     // Pre-populate loan in grace period (grace period expired)
     let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
         is_active: true,
         loan_id,
         borrower: borrower.pubkey(),
@@ -745,6 +759,7 @@ async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
 
     // Pre-populate borrower profile with staked SKR
     let profile = UserProfile {
+        discriminator: UserProfile::DISCRIMINATOR,
         is_initialized: true,
         user: borrower.pubkey(),
         staked_skr: 100_000_000, // 100 SKR staked
@@ -867,6 +882,7 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
     );
 
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -883,6 +899,8 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
         loans_originated: 1,
         loans_repaid: 0,
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -896,6 +914,7 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
     );
 
     let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
         is_active: true,
         loan_id,
         borrower: borrower.pubkey(),
@@ -933,6 +952,7 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
     );
 
     let profile = UserProfile {
+        discriminator: UserProfile::DISCRIMINATOR,
         is_initialized: true,
         user: borrower.pubkey(),
         staked_skr: 100_000_000, // 100 SKR
@@ -1066,6 +1086,7 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
     );
 
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -1082,6 +1103,8 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -1171,8 +1194,10 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
         Account {
             lamports: 10_000_000,
             data: borsh::to_vec(&AdminConfig {
+                discriminator: AdminConfig::DISCRIMINATOR,
                 is_initialized: true,
                 admin: oracle_authority.pubkey(),
+                oracle_authority: oracle_authority.pubkey(),
             })
             .unwrap(),
             owner: program_id,
@@ -1291,6 +1316,7 @@ async fn test_bank_borrow_rejects_stale_oracle_price() {
     );
 
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -1307,6 +1333,8 @@ async fn test_bank_borrow_rejects_stale_oracle_price() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: false,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -1362,12 +1390,14 @@ async fn test_bank_borrow_rejects_stale_oracle_price() {
 
     // Add stale oracle account: updated at timestamp 1 (more than 24h old)
     let stale_feed = PriceFeed {
+        discriminator: PriceFeed::DISCRIMINATOR,
         is_initialized: true,
         mint: SKR_MINT,
         price_micro_usd: 50_000,
         decimals: 6,
         last_updated_at: 1, // Ancient timestamp -> STALE
         authority: oracle_authority.pubkey(),
+        max_staleness_seconds: 86400,
     };
     program_test.add_account(
         oracle_pda,
@@ -1434,12 +1464,14 @@ async fn test_bank_set_price_feed_rejects_unauthorized_signer() {
     );
 
     let existing_feed = PriceFeed {
+        discriminator: PriceFeed::DISCRIMINATOR,
         is_initialized: true,
         mint: SKR_MINT,
         price_micro_usd: 20_000,
         decimals: 6,
         last_updated_at: 1720000000,
         authority: original_authority.pubkey(),
+        max_staleness_seconds: 86400,
     };
     program_test.add_account(
         oracle_pda,
@@ -1518,6 +1550,7 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
     );
 
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -1534,6 +1567,8 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -1602,6 +1637,7 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
     );
 
     let profile = UserProfile {
+        discriminator: UserProfile::DISCRIMINATOR,
         is_initialized: true,
         user: borrower.pubkey(),
         staked_skr: 1_000_000_000, // 1000 SKR
@@ -1798,6 +1834,7 @@ async fn test_bank_claim_default_slashes_locked_bond() {
     );
 
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -1814,6 +1851,8 @@ async fn test_bank_claim_default_slashes_locked_bond() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
     program_test.add_account(
         pool_pda,
@@ -1828,6 +1867,7 @@ async fn test_bank_claim_default_slashes_locked_bond() {
 
     // Loan had 1,000 SKR locked bond (50% discount tier) and expired in grace period
     let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
         is_active: true,
         loan_id,
         borrower: borrower.pubkey(),
@@ -1865,6 +1905,7 @@ async fn test_bank_claim_default_slashes_locked_bond() {
     );
 
     let profile = UserProfile {
+        discriminator: UserProfile::DISCRIMINATOR,
         is_initialized: true,
         user: borrower.pubkey(),
         staked_skr: 1_000_000_000, // 1000 SKR staked
@@ -2142,7 +2183,26 @@ async fn test_bank_oracle_permissionless_claim_rejected_v2() {
         processor!(process_instruction),
     );
 
+    let (program_data_pda, _) = Pubkey::find_program_address(
+        &[program_id.as_ref()],
+        &solana_program::bpf_loader_upgradeable::id(),
+    );
+    let mut program_data_bytes = vec![0u8; 45];
+    program_data_bytes[0] = 3;
+    program_data_bytes[12] = 1;
+    program_data_bytes[13..45].copy_from_slice(admin_authority.pubkey().as_ref());
+
     let mut program_test = program_test;
+    program_test.add_account(
+        program_data_pda,
+        Account {
+            lamports: 10_000_000,
+            data: program_data_bytes,
+            owner: solana_program::bpf_loader_upgradeable::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
     program_test.add_account(
         admin_authority.pubkey(),
         Account {
@@ -2200,6 +2260,7 @@ async fn test_bank_oracle_permissionless_claim_rejected_v2() {
             AccountMeta::new(admin_authority.pubkey(), true),
             AccountMeta::new(admin_pda, false),
             AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(program_data_pda, false),
         ],
         data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
     };
@@ -2318,6 +2379,7 @@ async fn test_bank_oracle_optionality_exploit_rejected_v3() {
 
     // Dynamic pool: is_oracle_free is FALSE, max LTV is 75%
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -2334,6 +2396,8 @@ async fn test_bank_oracle_optionality_exploit_rejected_v3() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: false,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -2381,8 +2445,10 @@ async fn test_bank_oracle_optionality_exploit_rejected_v3() {
         Account {
             lamports: 10_000_000,
             data: borsh::to_vec(&AdminConfig {
+                discriminator: AdminConfig::DISCRIMINATOR,
                 is_initialized: true,
                 admin: admin.pubkey(),
+                oracle_authority: admin.pubkey(),
             })
             .unwrap(),
             owner: program_id,
@@ -2627,6 +2693,7 @@ async fn test_bank_oracle_free_pool_baseline_success() {
 
     // Pool explicitly configured as oracle-free
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: authority.pubkey(),
@@ -2643,6 +2710,8 @@ async fn test_bank_oracle_free_pool_baseline_success() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: true,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -2755,6 +2824,7 @@ async fn test_bank_pool_specific_oracle_gating() {
     );
 
     let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
         pool_type: PoolType::Individual,
         authority: pool_authority.pubkey(),
@@ -2771,6 +2841,8 @@ async fn test_bank_pool_specific_oracle_gating() {
         loans_repaid: 0,
         name: [0u8; 32],
         is_oracle_free: false,
+        pool_id,
+        has_custom_oracle: false,
     };
 
     program_test.add_account(
@@ -2857,6 +2929,473 @@ async fn test_bank_pool_specific_oracle_gating() {
     let res_auth = banks_client.process_transaction(tx_auth).await;
     assert!(res_auth.is_ok(), "Pool authority initializing pool-specific oracle MUST succeed!");
 }
+
+#[tokio::test]
+async fn test_bank_withdraw_treasury_admin_auth_success_and_exploit_rejected() {
+    let program_id = Pubkey::new_unique();
+    let admin = Keypair::new();
+    let attacker = Keypair::new();
+
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Pre-populate AdminConfig
+    program_test.add_account(
+        admin_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&AdminConfig {
+                discriminator: AdminConfig::DISCRIMINATOR,
+                is_initialized: true,
+                admin: admin.pubkey(),
+                oracle_authority: admin.pubkey(),
+            })
+            .unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Pre-populate Treasury with 5 SOL
+    program_test.add_account(
+        treasury_pda,
+        Account {
+            lamports: 5_000_000_000,
+            data: vec![],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    program_test.add_account(
+        admin.pubkey(),
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        attacker.pubkey(),
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Attacker attempts to withdraw from Treasury
+    let attacker_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new_readonly(admin_pda, false),
+            AccountMeta::new(treasury_pda, false),
+            AccountMeta::new(attacker.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::WithdrawTreasury {
+            amount: 1_000_000_000,
+        })
+        .unwrap(),
+    };
+
+    let mut tx_attacker = Transaction::new_with_payer(&[attacker_ix], Some(&payer.pubkey()));
+    tx_attacker.sign(&[&payer, &attacker], recent_blockhash);
+    let res_attacker = banks_client.process_transaction(tx_attacker).await;
+    assert!(res_attacker.is_err(), "Non-admin MUST NOT withdraw treasury funds!");
+    match res_attacker.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32);
+        }
+        err => panic!("Unexpected error: {:?}", err),
+    }
+
+    // 2. Legitimate admin withdraws 1 SOL from Treasury
+    let admin_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(admin_pda, false),
+            AccountMeta::new(treasury_pda, false),
+            AccountMeta::new(admin.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::WithdrawTreasury {
+            amount: 1_000_000_000,
+        })
+        .unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_admin = Transaction::new_with_payer(&[admin_ix], Some(&payer.pubkey()));
+    tx_admin.sign(&[&payer, &admin], blockhash);
+    let res_admin = banks_client.process_transaction(tx_admin).await;
+    assert!(res_admin.is_ok(), "Admin withdrawing treasury funds MUST succeed! Result: {:?}", res_admin);
+
+    let treasury_acc = banks_client.get_account(treasury_pda).await.unwrap().unwrap();
+    assert_eq!(treasury_acc.lamports, 4_000_000_000);
+}
+
+#[tokio::test]
+async fn test_bank_type_confusion_loan_as_p2p_offer_rejected() {
+    // C-1 & H-1: Passing a LoanOrder account into FundP2POffer MUST fail closed
+    let program_id = Pubkey::new_unique();
+    let funder = Keypair::new();
+    let borrower = Keypair::new();
+    let authority = Keypair::new();
+
+    let pool_id: u64 = 1;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let loan_id: u64 = 999;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Pre-populate legitimate LoanOrder (which has LoanOrder::DISCRIMINATOR)
+    let loan_state = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
+        is_active: true,
+        loan_id,
+        borrower: borrower.pubkey(),
+        pool: pool_pda,
+        principal_amount: 100_000_000,
+        collateral_mint: Pubkey::default(),
+        collateral_amount: 1_000_000_000,
+        interest_due: 1_000_000,
+        origination_time: 1000,
+        due_time: 2000,
+        grace_period_expires: 0,
+        status: LoanStatus::Active,
+        locked_skr: 0,
+    };
+    program_test.add_account(
+        loan_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&loan_state).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    program_test.add_account(
+        funder.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // Attacker passes loan_pda as p2p_offer_account to FundP2POffer
+    let fund_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(funder.pubkey(), true),
+            AccountMeta::new(loan_pda, false), // <--- TYPE CONFUSION ATTEMPT
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(borrower.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::FundP2POffer).unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[fund_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &funder], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Passing LoanOrder to FundP2POffer MUST fail closed!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert!(
+                code == ClockLendError::InvalidAccountData as u32
+                    || code == ClockLendError::InvalidSeeds as u32
+            );
+        }
+        err => panic!("Unexpected error: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_p2p_offer_already_active_rejected() {
+    // C-2: Overwriting an already active P2P offer PDA MUST be rejected
+    let program_id = Pubkey::new_unique();
+    let creator = Keypair::new();
+    let offer_id: u64 = 42;
+
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, creator.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(
+        &[b"p2p_escrow", offer_pda.as_ref()],
+        &program_id,
+    );
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Pre-populate active P2POffer
+    use clock_lend::state::{OfferStatus, P2POffer};
+    let active_offer = P2POffer {
+        discriminator: P2POffer::DISCRIMINATOR,
+        is_initialized: true,
+        offer_id,
+        creator: creator.pubkey(),
+        funder: Pubkey::default(),
+        collateral_mint: Pubkey::default(),
+        collateral_amount: 1_000_000_000,
+        requested_amount: 100_000_000,
+        interest_offered: 5_000_000,
+        duration_seconds: 86400 * 7,
+        created_at: 1000,
+        due_time: 0,
+        grace_period_expires: 0,
+        status: OfferStatus::Open,
+    };
+    program_test.add_account(
+        offer_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&active_offer).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        creator.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // Creator or attacker attempts to call CreateP2POffer reusing active offer_pda
+    let create_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new(creator.pubkey(), false),
+            AccountMeta::new_readonly(Pubkey::default(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::CreateP2POffer {
+            offer_id,
+            collateral_amount: 1_000_000_000,
+            requested_amount: 100_000_000,
+            interest_offered: 5_000_000,
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[create_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &creator], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Re-initializing active offer MUST fail!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::OfferAlreadyActive as u32, "Error must be OfferAlreadyActive");
+        }
+        err => panic!("Unexpected error: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_p2p_offer_lifecycle_create_fund_repay() {
+    let program_id = Pubkey::new_unique();
+    let usdc_mint = Pubkey::new_unique();
+    let creator = Keypair::new();
+    let funder = Keypair::new();
+    let offer_id: u64 = 55;
+
+    let (offer_pda, _) = Pubkey::find_program_address(
+        &[P2P_SEED, creator.pubkey().as_ref(), &offer_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(
+        &[ESCROW_SEED, offer_pda.as_ref()],
+        &program_id,
+    );
+
+    let creator_usdc = Pubkey::new_unique();
+    let funder_usdc = Pubkey::new_unique();
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Creator has 10 SOL
+    program_test.add_account(
+        creator.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    // Funder has 10 SOL
+    program_test.add_account(
+        funder.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Creator USDC account (starts with 200 USDC)
+    program_test.add_account(
+        creator_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, creator.pubkey(), 200_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    // Funder USDC account (starts with 500 USDC)
+    program_test.add_account(
+        funder_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, funder.pubkey(), 500_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Create P2P Offer: 1 SOL collateral for 100 USDC requested, 5 USDC interest, 7 days
+    let create_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(Pubkey::default(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::CreateP2POffer {
+            offer_id,
+            collateral_amount: 1_000_000_000,
+            requested_amount: 100_000_000,
+            interest_offered: 5_000_000,
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let mut tx_create = Transaction::new_with_payer(&[create_ix], Some(&payer.pubkey()));
+    tx_create.sign(&[&payer, &creator], recent_blockhash);
+    let res_create = banks_client.process_transaction(tx_create).await;
+    assert!(res_create.is_ok(), "CreateP2POffer MUST succeed! Result: {:?}", res_create);
+
+    // 2. Fund P2P Offer: Funder provides 100 USDC
+    let fund_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(funder.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(funder_usdc, false),
+            AccountMeta::new(creator_usdc, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(creator.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::FundP2POffer).unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_fund = Transaction::new_with_payer(&[fund_ix], Some(&payer.pubkey()));
+    tx_fund.sign(&[&payer, &funder], blockhash);
+    let res_fund = banks_client.process_transaction(tx_fund).await;
+    assert!(res_fund.is_ok(), "FundP2POffer MUST succeed! Result: {:?}", res_fund);
+
+    // 3. Repay P2P Loan: Creator repays 105 USDC (100 requested + 5 interest)
+    let repay_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(offer_pda, false),
+            AccountMeta::new(creator_usdc, false),
+            AccountMeta::new(funder_usdc, false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new(creator.pubkey(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::RepayLoan {
+            repay_amount: 105_000_000,
+        })
+        .unwrap(),
+    };
+
+    let blockhash2 = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_repay = Transaction::new_with_payer(&[repay_ix], Some(&payer.pubkey()));
+    tx_repay.sign(&[&payer, &creator], blockhash2);
+    let res_repay = banks_client.process_transaction(tx_repay).await;
+    assert!(res_repay.is_ok(), "Repaying P2P offer MUST succeed! Result: {:?}", res_repay);
+
+    // Verify offer status is Repaid
+    let offer_acc = banks_client.get_account(offer_pda).await.unwrap().unwrap();
+    use clock_lend::state::{OfferStatus, P2POffer};
+    let offer_data = P2POffer::unpack_from_slice(&offer_acc.data).unwrap();
+    assert_eq!(offer_data.status, OfferStatus::Repaid);
+}
+
+
 
 
 

@@ -16,6 +16,41 @@ pub const ADMIN_SEED: &[u8] = b"admin";
 pub const SKR_MINT: Pubkey = solana_program::pubkey!("SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3");
 pub const USDC_DEVNET_MINT: Pubkey = solana_program::pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
+pub const DISCRIMINATOR_POOL: [u8; 8] = *b"CLK_POOL";
+pub const DISCRIMINATOR_LOAN: [u8; 8] = *b"CLK_LOAN";
+pub const DISCRIMINATOR_OFFER: [u8; 8] = *b"CLK_PAWN";
+pub const DISCRIMINATOR_PROFILE: [u8; 8] = *b"CLK_PROF";
+pub const DISCRIMINATOR_FEED: [u8; 8] = *b"CLK_FEED";
+pub const DISCRIMINATOR_ADMIN: [u8; 8] = *b"CLK_ADMN";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountKind {
+    LendingPool,
+    LoanOrder,
+    P2POffer,
+    UserProfile,
+    PriceFeed,
+    AdminConfig,
+    Unknown,
+}
+
+impl AccountKind {
+    pub fn from_slice(src: &[u8]) -> Self {
+        if src.len() < 8 {
+            return AccountKind::Unknown;
+        }
+        match &src[0..8] {
+            b"CLK_POOL" => AccountKind::LendingPool,
+            b"CLK_LOAN" => AccountKind::LoanOrder,
+            b"CLK_PAWN" => AccountKind::P2POffer,
+            b"CLK_PROF" => AccountKind::UserProfile,
+            b"CLK_FEED" => AccountKind::PriceFeed,
+            b"CLK_ADMN" => AccountKind::AdminConfig,
+            _ => AccountKind::Unknown,
+        }
+    }
+}
+
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]
 pub enum PoolType {
     Individual,
@@ -42,7 +77,9 @@ pub enum OfferStatus {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct LendingPool {
+    pub discriminator: [u8; 8],
     pub is_initialized: bool,
+    pub pool_id: u64,
     pub pool_type: PoolType,
     pub authority: Pubkey,
     pub liquidity_mint: Pubkey,
@@ -58,111 +95,34 @@ pub struct LendingPool {
     pub loans_repaid: u32,
     pub name: [u8; 32],
     pub is_oracle_free: bool,
+    pub has_custom_oracle: bool,
 }
 
 impl LendingPool {
-    pub const LEN: usize = 1 + 1 + 32 + 32 + 32 + 8 + 8 + 8 + 2 + 2 + 8 + 8 + 4 + 4 + 32 + 1; // 183 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_POOL;
+    pub const LEN: usize = 8 + 1 + 8 + 1 + 32 + 32 + 32 + 8 + 8 + 8 + 2 + 2 + 8 + 8 + 4 + 4 + 32 + 1 + 1; // 200 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        if src.len() >= Self::LEN {
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
             BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
-        } else if src.len() >= 182 {
-            #[derive(BorshDeserialize)]
-            struct LegacyLendingPool {
-                is_initialized: bool,
-                pool_type: PoolType,
-                authority: Pubkey,
-                liquidity_mint: Pubkey,
-                vault_pda: Pubkey,
-                total_liquidity: u64,
-                total_borrowed: u64,
-                staked_skr_amount: u64,
-                interest_rate_bps: u16,
-                max_ltv_bps: u16,
-                min_duration: i64,
-                max_duration: i64,
-                loans_originated: u32,
-                loans_repaid: u32,
-                name: [u8; 32],
-            }
-            let legacy = LegacyLendingPool::try_from_slice(&src[..182])
-                .map_err(|_| ProgramError::InvalidAccountData)?;
-            let is_oracle_free = legacy.name.starts_with(b"ORACLE_FREE") || legacy.name.starts_with(b"oracle_free");
-            Ok(Self {
-                is_initialized: legacy.is_initialized,
-                pool_type: legacy.pool_type,
-                authority: legacy.authority,
-                liquidity_mint: legacy.liquidity_mint,
-                vault_pda: legacy.vault_pda,
-                total_liquidity: legacy.total_liquidity,
-                total_borrowed: legacy.total_borrowed,
-                staked_skr_amount: legacy.staked_skr_amount,
-                interest_rate_bps: legacy.interest_rate_bps,
-                max_ltv_bps: legacy.max_ltv_bps,
-                min_duration: legacy.min_duration,
-                max_duration: legacy.max_duration,
-                loans_originated: legacy.loans_originated,
-                loans_repaid: legacy.loans_repaid,
-                name: legacy.name,
-                is_oracle_free,
-            })
         } else {
             Err(ProgramError::InvalidAccountData)
         }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() >= serialized.len() {
-            dst[..serialized.len()].copy_from_slice(&serialized);
-            Ok(())
-        } else if dst.len() >= 182 {
-            #[derive(BorshSerialize)]
-            struct LegacyLendingPool {
-                is_initialized: bool,
-                pool_type: PoolType,
-                authority: Pubkey,
-                liquidity_mint: Pubkey,
-                vault_pda: Pubkey,
-                total_liquidity: u64,
-                total_borrowed: u64,
-                staked_skr_amount: u64,
-                interest_rate_bps: u16,
-                max_ltv_bps: u16,
-                min_duration: i64,
-                max_duration: i64,
-                loans_originated: u32,
-                loans_repaid: u32,
-                name: [u8; 32],
-            }
-            let legacy = LegacyLendingPool {
-                is_initialized: self.is_initialized,
-                pool_type: self.pool_type,
-                authority: self.authority,
-                liquidity_mint: self.liquidity_mint,
-                vault_pda: self.vault_pda,
-                total_liquidity: self.total_liquidity,
-                total_borrowed: self.total_borrowed,
-                staked_skr_amount: self.staked_skr_amount,
-                interest_rate_bps: self.interest_rate_bps,
-                max_ltv_bps: self.max_ltv_bps,
-                min_duration: self.min_duration,
-                max_duration: self.max_duration,
-                loans_originated: self.loans_originated,
-                loans_repaid: self.loans_repaid,
-                name: self.name,
-            };
-            let legacy_bytes = borsh::to_vec(&legacy).map_err(|_| ProgramError::InvalidAccountData)?;
-            dst[..legacy_bytes.len()].copy_from_slice(&legacy_bytes);
-            Ok(())
-        } else {
-            Err(ProgramError::AccountDataTooSmall)
+        if dst.len() < Self::LEN {
+            return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
     }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct LoanOrder {
+    pub discriminator: [u8; 8],
     pub is_active: bool,
     pub loan_id: u64,
     pub borrower: Pubkey,
@@ -179,95 +139,30 @@ pub struct LoanOrder {
 }
 
 impl LoanOrder {
-    pub const LEN: usize = 1 + 8 + 32 + 32 + 8 + 32 + 8 + 8 + 8 + 8 + 8 + 1 + 8; // 162 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_LOAN;
+    pub const LEN: usize = 8 + 1 + 8 + 32 + 32 + 8 + 32 + 8 + 8 + 8 + 8 + 8 + 1 + 8; // 170 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        if src.len() >= Self::LEN {
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
             BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
-        } else if src.len() >= 154 {
-            #[derive(BorshDeserialize)]
-            struct LegacyLoanOrder {
-                is_active: bool,
-                loan_id: u64,
-                borrower: Pubkey,
-                pool: Pubkey,
-                principal_amount: u64,
-                collateral_mint: Pubkey,
-                collateral_amount: u64,
-                interest_due: u64,
-                origination_time: i64,
-                due_time: i64,
-                grace_period_expires: i64,
-                status: LoanStatus,
-            }
-            let legacy = LegacyLoanOrder::try_from_slice(&src[..154])
-                .map_err(|_| ProgramError::InvalidAccountData)?;
-            Ok(Self {
-                is_active: legacy.is_active,
-                loan_id: legacy.loan_id,
-                borrower: legacy.borrower,
-                pool: legacy.pool,
-                principal_amount: legacy.principal_amount,
-                collateral_mint: legacy.collateral_mint,
-                collateral_amount: legacy.collateral_amount,
-                interest_due: legacy.interest_due,
-                origination_time: legacy.origination_time,
-                due_time: legacy.due_time,
-                grace_period_expires: legacy.grace_period_expires,
-                status: legacy.status,
-                locked_skr: 0,
-            })
         } else {
             Err(ProgramError::InvalidAccountData)
         }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() >= serialized.len() {
-            dst[..serialized.len()].copy_from_slice(&serialized);
-            Ok(())
-        } else if dst.len() >= 154 {
-            #[derive(BorshSerialize)]
-            struct LegacyLoanOrder {
-                is_active: bool,
-                loan_id: u64,
-                borrower: Pubkey,
-                pool: Pubkey,
-                principal_amount: u64,
-                collateral_mint: Pubkey,
-                collateral_amount: u64,
-                interest_due: u64,
-                origination_time: i64,
-                due_time: i64,
-                grace_period_expires: i64,
-                status: LoanStatus,
-            }
-            let legacy = LegacyLoanOrder {
-                is_active: self.is_active,
-                loan_id: self.loan_id,
-                borrower: self.borrower,
-                pool: self.pool,
-                principal_amount: self.principal_amount,
-                collateral_mint: self.collateral_mint,
-                collateral_amount: self.collateral_amount,
-                interest_due: self.interest_due,
-                origination_time: self.origination_time,
-                due_time: self.due_time,
-                grace_period_expires: self.grace_period_expires,
-                status: self.status,
-            };
-            let legacy_bytes = borsh::to_vec(&legacy).map_err(|_| ProgramError::InvalidAccountData)?;
-            dst[..legacy_bytes.len()].copy_from_slice(&legacy_bytes);
-            Ok(())
-        } else {
-            Err(ProgramError::AccountDataTooSmall)
+        if dst.len() < Self::LEN {
+            return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
     }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct P2POffer {
+    pub discriminator: [u8; 8],
     pub is_initialized: bool,
     pub offer_id: u64,
     pub creator: Pubkey,
@@ -284,17 +179,22 @@ pub struct P2POffer {
 }
 
 impl P2POffer {
-    pub const LEN: usize = 1 + 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 8 + 1; // 160 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_OFFER;
+    pub const LEN: usize = 8 + 1 + 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 8 + 1; // 168 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        BorshDeserialize::try_from_slice(src).map_err(|_| ProgramError::InvalidAccountData)
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
+            BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else {
+            Err(ProgramError::InvalidAccountData)
+        }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() < serialized.len() {
+        if dst.len() < Self::LEN {
             return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
         dst[..serialized.len()].copy_from_slice(&serialized);
         Ok(())
     }
@@ -302,6 +202,7 @@ impl P2POffer {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct UserProfile {
+    pub discriminator: [u8; 8],
     pub is_initialized: bool,
     pub user: Pubkey,
     pub staked_skr: u64,
@@ -312,91 +213,56 @@ pub struct UserProfile {
 }
 
 impl UserProfile {
-    pub const LEN: usize = 1 + 32 + 8 + 4 + 4 + 2 + 8; // 59 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_PROFILE;
+    pub const LEN: usize = 8 + 1 + 32 + 8 + 4 + 4 + 2 + 8; // 67 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        if src.len() >= Self::LEN {
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
             BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
-        } else if src.len() >= 51 {
-            #[derive(BorshDeserialize)]
-            struct LegacyUserProfile {
-                is_initialized: bool,
-                user: Pubkey,
-                staked_skr: u64,
-                total_loans_completed: u32,
-                total_loans_defaulted: u32,
-                reputation_score: u16,
-            }
-            let legacy = LegacyUserProfile::try_from_slice(&src[..51])
-                .map_err(|_| ProgramError::InvalidAccountData)?;
-            Ok(Self {
-                is_initialized: legacy.is_initialized,
-                user: legacy.user,
-                staked_skr: legacy.staked_skr,
-                total_loans_completed: legacy.total_loans_completed,
-                total_loans_defaulted: legacy.total_loans_defaulted,
-                reputation_score: legacy.reputation_score,
-                locked_skr: 0,
-            })
         } else {
             Err(ProgramError::InvalidAccountData)
         }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() >= serialized.len() {
-            dst[..serialized.len()].copy_from_slice(&serialized);
-            Ok(())
-        } else if dst.len() >= 51 {
-            #[derive(BorshSerialize)]
-            struct LegacyUserProfile {
-                is_initialized: bool,
-                user: Pubkey,
-                staked_skr: u64,
-                total_loans_completed: u32,
-                total_loans_defaulted: u32,
-                reputation_score: u16,
-            }
-            let legacy = LegacyUserProfile {
-                is_initialized: self.is_initialized,
-                user: self.user,
-                staked_skr: self.staked_skr,
-                total_loans_completed: self.total_loans_completed,
-                total_loans_defaulted: self.total_loans_defaulted,
-                reputation_score: self.reputation_score,
-            };
-            let legacy_bytes = borsh::to_vec(&legacy).map_err(|_| ProgramError::InvalidAccountData)?;
-            dst[..legacy_bytes.len()].copy_from_slice(&legacy_bytes);
-            Ok(())
-        } else {
-            Err(ProgramError::AccountDataTooSmall)
+        if dst.len() < Self::LEN {
+            return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
     }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct PriceFeed {
+    pub discriminator: [u8; 8],
     pub is_initialized: bool,
     pub mint: Pubkey,
     pub price_micro_usd: u64, // Price in micro-USD (6 decimals: 1_000_000 = $1.00)
     pub decimals: u8,          // Token decimals (e.g. 9 for SOL, 6 for SKR, 6 for USDC)
     pub last_updated_at: i64,  // Unix timestamp of last keeper update
     pub authority: Pubkey,     // Oracle keeper or admin authority
+    pub max_staleness_seconds: i64,
 }
 
 impl PriceFeed {
-    pub const LEN: usize = 1 + 32 + 8 + 1 + 8 + 32; // 82 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_FEED;
+    pub const LEN: usize = 8 + 1 + 32 + 8 + 1 + 8 + 32 + 8; // 98 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        BorshDeserialize::try_from_slice(src).map_err(|_| ProgramError::InvalidAccountData)
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
+            BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else {
+            Err(ProgramError::InvalidAccountData)
+        }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() < serialized.len() {
+        if dst.len() < Self::LEN {
             return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
         dst[..serialized.len()].copy_from_slice(&serialized);
         Ok(())
     }
@@ -404,22 +270,29 @@ impl PriceFeed {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub struct AdminConfig {
+    pub discriminator: [u8; 8],
     pub is_initialized: bool,
     pub admin: Pubkey,
+    pub oracle_authority: Pubkey,
 }
 
 impl AdminConfig {
-    pub const LEN: usize = 1 + 32; // 33 bytes
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_ADMIN;
+    pub const LEN: usize = 8 + 1 + 32 + 32; // 73 bytes
 
     pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-        BorshDeserialize::try_from_slice(src).map_err(|_| ProgramError::InvalidAccountData)
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
+            BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else {
+            Err(ProgramError::InvalidAccountData)
+        }
     }
 
     pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
-        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
-        if dst.len() < serialized.len() {
+        if dst.len() < Self::LEN {
             return Err(ProgramError::AccountDataTooSmall);
         }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
         dst[..serialized.len()].copy_from_slice(&serialized);
         Ok(())
     }

@@ -14,7 +14,9 @@ fn test_lending_pool_serialization() {
     name[..name_bytes.len()].copy_from_slice(name_bytes);
 
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
+        pool_id: 1,
         pool_type: PoolType::Circle,
         authority: Pubkey::new_unique(),
         liquidity_mint: Pubkey::new_unique(),
@@ -30,6 +32,7 @@ fn test_lending_pool_serialization() {
         loans_repaid: 11,
         name,
         is_oracle_free: false,
+        has_custom_oracle: false,
     };
 
     let mut buffer = [0u8; LendingPool::LEN];
@@ -48,6 +51,7 @@ fn test_lending_pool_serialization() {
 #[test]
 fn test_loan_order_serialization() {
     let loan = LoanOrder {
+        discriminator: LoanOrder::DISCRIMINATOR,
         is_active: true,
         loan_id: 101,
         borrower: Pubkey::new_unique(),
@@ -75,6 +79,7 @@ fn test_loan_order_serialization() {
 #[test]
 fn test_p2p_offer_serialization() {
     let offer = P2POffer {
+        discriminator: P2POffer::DISCRIMINATOR,
         is_initialized: true,
         offer_id: 42,
         creator: Pubkey::new_unique(),
@@ -102,6 +107,7 @@ fn test_p2p_offer_serialization() {
 #[test]
 fn test_user_profile_serialization() {
     let profile = UserProfile {
+        discriminator: UserProfile::DISCRIMINATOR,
         is_initialized: true,
         user: Pubkey::new_unique(),
         staked_skr: 5_000_000_000,
@@ -161,7 +167,9 @@ fn test_institutional_pool_type_serialization() {
     name[..name_bytes.len()].copy_from_slice(name_bytes);
 
     let pool = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
         is_initialized: true,
+        pool_id: 2,
         pool_type: PoolType::Institutional,
         authority: Pubkey::new_unique(),
         liquidity_mint: Pubkey::new_unique(),
@@ -177,6 +185,7 @@ fn test_institutional_pool_type_serialization() {
         loans_repaid: 45,
         name,
         is_oracle_free: false,
+        has_custom_oracle: false,
     };
 
     let mut buffer = [0u8; LendingPool::LEN];
@@ -192,8 +201,10 @@ fn test_institutional_pool_type_serialization() {
 fn test_admin_config_serialization() {
     let admin = Pubkey::new_unique();
     let config = AdminConfig {
+        discriminator: AdminConfig::DISCRIMINATOR,
         is_initialized: true,
         admin,
+        oracle_authority: admin,
     };
 
     let mut buffer = [0u8; AdminConfig::LEN];
@@ -227,12 +238,14 @@ fn test_price_feed_serialization() {
     let mint = Pubkey::new_unique();
     let authority = Pubkey::new_unique();
     let feed = PriceFeed {
+        discriminator: PriceFeed::DISCRIMINATOR,
         is_initialized: true,
         mint,
         price_micro_usd: 185_500_000, // $185.50
         decimals: 9,
         last_updated_at: 1720000000,
         authority,
+        max_staleness_seconds: 3600,
     };
 
     let mut buffer = [0u8; PriceFeed::LEN];
@@ -258,5 +271,17 @@ fn test_set_price_feed_instruction_serialization() {
         ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
     assert_eq!(ix, deserialized);
 }
+
+#[test]
+fn test_withdraw_treasury_instruction_serialization() {
+    let ix = ClockLendInstruction::WithdrawTreasury {
+        amount: 1_000_000,
+    };
+    let serialized = borsh::to_vec(&ix).expect("Serialization failed");
+    let deserialized =
+        ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
+    assert_eq!(ix, deserialized);
+}
+
 
 

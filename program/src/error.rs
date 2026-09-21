@@ -66,6 +66,16 @@ pub enum ClockLendError {
     StaleOraclePrice,
     #[error("Staked SKR is locked by active loans")]
     StakeLocked,
+    #[error("Invalid Account Data or Discriminator")]
+    InvalidAccountData,
+    #[error("Invalid Duration Bounds")]
+    InvalidDuration,
+    #[error("Invalid Interest Rate Bounds")]
+    InvalidInterestRate,
+    #[error("Offer Already Active or ID In Use")]
+    OfferAlreadyActive,
+    #[error("Invalid Profile Account")]
+    InvalidProfileAccount,
 }
 
 impl From<ClockLendError> for ProgramError {

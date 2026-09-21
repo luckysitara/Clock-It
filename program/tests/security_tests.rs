@@ -166,6 +166,7 @@ fn test_security_cancel_p2p_offer_invariant() {
     let attacker = Pubkey::new_unique();
 
     let open_offer = P2POffer {
+        discriminator: P2POffer::DISCRIMINATOR,
         is_initialized: true,
         offer_id: 101,
         creator,

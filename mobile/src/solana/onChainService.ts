@@ -148,29 +148,32 @@ function decodeName(bytes: Uint8Array): string {
 }
 
 function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | null {
-  if (data.length !== 182) return null;
-  const isInitialized = data.readUInt8(0) === 1;
+  if (data.length !== 200 && data.length !== 182) return null;
+  const isV2 = data.length === 200;
+  const offset = isV2 ? 8 : 0;
+  const isInitialized = data.readUInt8(offset) === 1;
   if (!isInitialized) return null;
 
-  const poolTypeByte = data.readUInt8(1);
+  const poolId = isV2 ? Number(data.readBigUInt64LE(9)) : id;
+  const poolTypeByte = data.readUInt8(isV2 ? 17 : 1);
   const poolType: PoolType = poolTypeByte === 2 ? 'Institutional' : poolTypeByte === 1 ? 'Circle' : 'Individual';
-  const authority = new PublicKey(data.subarray(2, 34)).toBase58();
-  const liquidityMint = new PublicKey(data.subarray(34, 66)).toBase58();
-  const totalLiquidity = Number(data.readBigUInt64LE(98));
-  const totalBorrowed = Number(data.readBigUInt64LE(106));
-  const stakedSkrAmount = Number(data.readBigUInt64LE(114));
-  const interestRateBps = data.readUInt16LE(122);
-  const maxLtvBps = data.readUInt16LE(124);
-  const minDurationDays = Math.round(Number(data.readBigInt64LE(126)) / 86400);
-  const maxDurationDays = Math.round(Number(data.readBigInt64LE(134)) / 86400);
-  const loansOriginated = data.readUInt32LE(142);
-  const loansRepaid = data.readUInt32LE(146);
-  const name = decodeName(data.subarray(150, 182));
+  const authority = new PublicKey(data.subarray(isV2 ? 18 : 2, isV2 ? 50 : 34)).toBase58();
+  const liquidityMint = new PublicKey(data.subarray(isV2 ? 50 : 34, isV2 ? 82 : 66)).toBase58();
+  const totalLiquidity = Number(data.readBigUInt64LE(isV2 ? 114 : 98));
+  const totalBorrowed = Number(data.readBigUInt64LE(isV2 ? 122 : 106));
+  const stakedSkrAmount = Number(data.readBigUInt64LE(isV2 ? 130 : 114));
+  const interestRateBps = data.readUInt16LE(isV2 ? 138 : 122);
+  const maxLtvBps = data.readUInt16LE(isV2 ? 140 : 124);
+  const minDurationDays = Math.round(Number(data.readBigInt64LE(isV2 ? 142 : 126)) / 86400);
+  const maxDurationDays = Math.round(Number(data.readBigInt64LE(isV2 ? 150 : 134)) / 86400);
+  const loansOriginated = data.readUInt32LE(isV2 ? 158 : 142);
+  const loansRepaid = data.readUInt32LE(isV2 ? 162 : 146);
+  const name = decodeName(data.subarray(isV2 ? 166 : 150, isV2 ? 198 : 182));
 
   const successRate = loansOriginated > 0 ? (loansRepaid / loansOriginated) * 100 : 100;
 
   return {
-    id,
+    id: poolId,
     poolType,
     authority,
     name,
@@ -210,7 +213,7 @@ export async function fetchLivePools(): Promise<LendingPool[]> {
   try {
     const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
     for (const acc of accounts) {
-      if (acc.account.data.length === 182) {
+      if (acc.account.data.length === 200 || acc.account.data.length === 182) {
         const pubkeyStr = acc.pubkey.toBase58();
         if (!poolsMap.has(pubkeyStr)) {
           const pool = parsePoolData(pubkeyStr, Buffer.from(acc.account.data), poolsMap.size + 1);
@@ -242,24 +245,25 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
   try {
     const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
     for (const acc of accounts) {
-      if (acc.account.data.length === 154) {
+      if (acc.account.data.length === 170 || acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
-        const isActive = data.readUInt8(0) === 1;
+        const isV2 = data.length === 170;
+        const isActive = data.readUInt8(isV2 ? 8 : 0) === 1;
         if (!isActive) continue;
 
-        const borrowerOnChain = new PublicKey(data.subarray(9, 41));
+        const borrowerOnChain = new PublicKey(data.subarray(isV2 ? 17 : 9, isV2 ? 49 : 41));
         if (!borrowerOnChain.equals(borrower)) continue;
 
-        const loanId = Number(data.readBigUInt64LE(1));
-        const poolPubkey = new PublicKey(data.subarray(41, 73));
-        const principalAmount = Number(data.readBigUInt64LE(73)) / 1_000_000;
-        const collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
-        const collateralAmount = Number(data.readBigUInt64LE(113)) / 1_000_000_000;
-        const interestDue = Number(data.readBigUInt64LE(121)) / 1_000_000;
-        const originationTime = Number(data.readBigInt64LE(129));
-        const dueTime = Number(data.readBigInt64LE(137));
-        const gracePeriodExpires = Number(data.readBigInt64LE(145));
-        const statusByte = data.readUInt8(153);
+        const loanId = Number(data.readBigUInt64LE(isV2 ? 9 : 1));
+        const poolPubkey = new PublicKey(data.subarray(isV2 ? 49 : 41, isV2 ? 81 : 73));
+        const principalAmount = Number(data.readBigUInt64LE(isV2 ? 81 : 73)) / 1_000_000;
+        const collateralMint = new PublicKey(data.subarray(isV2 ? 89 : 81, isV2 ? 121 : 113)).toBase58();
+        const collateralAmount = Number(data.readBigUInt64LE(isV2 ? 121 : 113)) / 1_000_000_000;
+        const interestDue = Number(data.readBigUInt64LE(isV2 ? 129 : 121)) / 1_000_000;
+        const originationTime = Number(data.readBigInt64LE(isV2 ? 137 : 129));
+        const dueTime = Number(data.readBigInt64LE(isV2 ? 145 : 137));
+        const gracePeriodExpires = Number(data.readBigInt64LE(isV2 ? 153 : 145));
+        const statusByte = data.readUInt8(isV2 ? 161 : 153);
 
         let status: LoanStatus = 'Active';
         if (statusByte === 1) status = 'InGracePeriod';
@@ -461,22 +465,23 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
     const offers: P2POffer[] = [];
 
     for (const acc of accounts) {
-      if (acc.account.data.length === 162) {
+      if (acc.account.data.length === 170 || acc.account.data.length === 168 || acc.account.data.length === 162) {
         const data = Buffer.from(acc.account.data);
-        const isListed = data.readUInt8(0) === 1;
+        const isV2 = data.length >= 168;
+        const isListed = data.readUInt8(isV2 ? 8 : 0) === 1;
         if (!isListed) continue;
 
-        const offerId = Number(data.readBigUInt64LE(1));
-        const creator = new PublicKey(data.subarray(9, 41)).toBase58();
-        const funder = new PublicKey(data.subarray(41, 73)).toBase58();
-        const collateralMint = new PublicKey(data.subarray(73, 105)).toBase58();
-        const collateralLamports = Number(data.readBigUInt64LE(105));
-        const requestedLamports = Number(data.readBigUInt64LE(113));
-        const interestLamports = Number(data.readBigUInt64LE(121));
-        const durationSeconds = Number(data.readBigInt64LE(129));
-        const createdAt = Number(data.readBigInt64LE(137));
-        const dueTime = Number(data.readBigInt64LE(145));
-        const statusByte = data.readUInt8(161);
+        const offerId = Number(data.readBigUInt64LE(isV2 ? 9 : 1));
+        const creator = new PublicKey(data.subarray(isV2 ? 17 : 9, isV2 ? 49 : 41)).toBase58();
+        const funder = new PublicKey(data.subarray(isV2 ? 49 : 41, isV2 ? 81 : 73)).toBase58();
+        const collateralMint = new PublicKey(data.subarray(isV2 ? 81 : 73, isV2 ? 113 : 105)).toBase58();
+        const collateralLamports = Number(data.readBigUInt64LE(isV2 ? 113 : 105));
+        const requestedLamports = Number(data.readBigUInt64LE(isV2 ? 121 : 113));
+        const interestLamports = Number(data.readBigUInt64LE(isV2 ? 129 : 121));
+        const durationSeconds = Number(data.readBigInt64LE(isV2 ? 137 : 129));
+        const createdAt = Number(data.readBigInt64LE(isV2 ? 145 : 137));
+        const dueTime = Number(data.readBigInt64LE(isV2 ? 153 : 145));
+        const statusByte = data.readUInt8(isV2 ? (data.length === 170 ? 169 : 167) : 161);
 
         const requestedAmount = requestedLamports / 1_000_000;
         const interestOffered = interestLamports / 1_000_000;
@@ -523,15 +528,16 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
     const [profilePDA] = getProfilePDA(userPubkey);
     const accountInfo = await devnetConnection.getAccountInfo(profilePDA);
 
-    if (accountInfo && accountInfo.data.length >= 51) {
+    if (accountInfo && (accountInfo.data.length === 67 || accountInfo.data.length >= 51)) {
       const data = Buffer.from(accountInfo.data);
-      const isInitialized = data.readUInt8(0) === 1;
+      const isV2 = data.length === 67;
+      const isInitialized = data.readUInt8(isV2 ? 8 : 0) === 1;
 
       if (isInitialized) {
-        const stakedSkr = Number(data.readBigUInt64LE(33)) / 1_000_000;
-        const totalLoansCompleted = data.readUInt32LE(41);
-        const totalLoansDefaulted = data.readUInt32LE(45);
-        const reputationScore = data.readUInt16LE(49);
+        const stakedSkr = Number(data.readBigUInt64LE(isV2 ? 41 : 33)) / 1_000_000;
+        const totalLoansCompleted = data.readUInt32LE(isV2 ? 49 : 41);
+        const totalLoansDefaulted = data.readUInt32LE(isV2 ? 53 : 45);
+        const reputationScore = data.readUInt16LE(isV2 ? 57 : 49);
 
         let tier: 'Diamond' | 'Gold' | 'Silver' | 'Standard' = 'Standard';
         let aprDiscount = 0;
@@ -1429,6 +1435,58 @@ export async function buildUnstakeSkrTx(
 
   return { tx, profilePDA, escrowPDA };
 }
+
+// Build Withdraw Treasury Transaction instruction (Admin only - H-2)
+export async function buildWithdrawTreasuryTx(
+  admin: PublicKey,
+  amountLamports: bigint,
+  destination: PublicKey,
+  isSpl: boolean = false,
+  mint?: PublicKey
+): Promise<Transaction> {
+  const [adminPDA] = getAdminPDA();
+  const [treasuryPDA] = getTreasuryPDA();
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+
+  // Variant 14: WithdrawTreasury { amount: u64 } -> 1 byte tag (14) + 8 bytes = 9 bytes
+  const data = Buffer.alloc(9);
+  data.writeUInt8(14, 0);
+  writeU64LE(amountLamports).copy(data, 1);
+
+  const keys = [
+    { pubkey: admin, isSigner: true, isWritable: true },
+    { pubkey: adminPDA, isSigner: false, isWritable: false },
+    { pubkey: treasuryPDA, isSigner: false, isWritable: true },
+    { pubkey: destination, isSigner: false, isWritable: true },
+  ];
+
+  if (isSpl && mint) {
+    const treasuryTokenAcc = getAssociatedTokenAddress(mint, treasuryPDA);
+    keys.push(
+      { pubkey: treasuryTokenAcc, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+    );
+  } else {
+    keys.push(
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+    );
+  }
+
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys,
+      data,
+    })
+  );
+
+  return tx;
+}
+
 
 
 

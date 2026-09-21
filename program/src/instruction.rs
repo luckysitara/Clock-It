@@ -181,8 +181,21 @@ pub enum ClockLendInstruction {
     },
     /// 13. Initialize global protocol admin config (one-time deploy-time initialization)
     /// Accounts:
-    /// 0. `[signer]` Initial Admin
+    /// 0. `[signer]` Initial Admin (Must match upgrade authority)
     /// 1. `[writable]` AdminConfig PDA `[b"admin"]`
     /// 2. `[]` System Program
+    /// 3. `[optional]` ProgramData account (for on-chain upgrade authority verification)
     InitializeAdmin,
+    /// 14. Withdraw accumulated protocol fees from treasury (Admin only)
+    /// Accounts:
+    /// 0. `[signer]` Admin
+    /// 1. `[]` AdminConfig PDA `[b"admin"]`
+    /// 2. `[writable]` Treasury PDA `[b"treasury"]`
+    /// 3. `[writable]` Destination Account (Wallet for SOL, Token Account for SPL)
+    /// 4. `[writable, optional]` Treasury Token Account (if SPL token withdrawal)
+    /// 5. `[optional]` Token Program (if SPL token withdrawal)
+    /// 6. `[]` System Program
+    WithdrawTreasury {
+        amount: u64,
+    },
 }
