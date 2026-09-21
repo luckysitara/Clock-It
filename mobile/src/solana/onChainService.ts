@@ -196,12 +196,13 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
 }
 
 // Fetch all live Lending Pools from the deployed Devnet contract
-export async function fetchLivePools(): Promise<LendingPool[]> {
+export async function fetchLivePools(network: SolanaNetwork = 'devnet'): Promise<LendingPool[]> {
   const poolsMap = new Map<string, LendingPool>();
+  const rpcConn = getConnection(network);
 
   // 1. Fast path: load known seeded pools via getMultipleAccountsInfo (~300ms)
   try {
-    const accounts = await devnetConnection.getMultipleAccountsInfo(SEEDED_POOLS);
+    const accounts = await rpcConn.getMultipleAccountsInfo(SEEDED_POOLS);
     accounts.forEach((acc, idx) => {
       if (acc && acc.data) {
         const pool = parsePoolData(SEEDED_POOLS[idx].toBase58(), Buffer.from(acc.data), poolsMap.size + 1);
@@ -214,7 +215,7 @@ export async function fetchLivePools(): Promise<LendingPool[]> {
 
   // 2. Full scan to find any additional pools created by individuals
   try {
-    const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
+    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
     for (const acc of accounts) {
       if (acc.account.data.length === 200 || acc.account.data.length === 182) {
         const pubkeyStr = acc.pubkey.toBase58();
@@ -232,7 +233,8 @@ export async function fetchLivePools(): Promise<LendingPool[]> {
 }
 
 // Fetch live user loan orders directly from Solana Devnet contract & on-chain state
-export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrder[]> {
+export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNetwork = 'devnet'): Promise<LoanOrder[]> {
+  const rpcConn = getConnection(network);
   const borrowerPubkey = borrower.toBase58();
   const cachedOrders = await getCachedOrders(borrowerPubkey);
   const cachedBySig = new Map<string, LoanOrder>();
@@ -246,7 +248,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
 
   // 1. Scan on-chain PDA accounts first (for liquid pool PDA loans)
   try {
-    const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
+    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
     for (const acc of accounts) {
       if (acc.account.data.length === 170 || acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
@@ -305,7 +307,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
 
   // 2. Scan Solana Devnet blockchain transactions & memos for ground-truth borrow/repay history
   try {
-    const signatures = await devnetConnection.getSignaturesForAddress(borrower, { limit: 60 });
+    const signatures = await rpcConn.getSignaturesForAddress(borrower, { limit: 60 });
     const memos = signatures
       .filter((s) => Boolean(s.memo))
       .map((s) => ({
@@ -468,9 +470,10 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
 }
 
 // Fetch live P2P pawn offers directly from Devnet contract
-export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
+export async function fetchLiveP2POffers(network: SolanaNetwork = 'devnet'): Promise<P2POffer[]> {
+  const rpcConn = getConnection(network);
   try {
-    const accounts = await devnetConnection.getProgramAccounts(PROGRAM_ID);
+    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
     const offers: P2POffer[] = [];
 
     for (const acc of accounts) {
@@ -584,10 +587,11 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
 }
 
 // Fetch live UserProfile PDA from Devnet contract
-export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: string): Promise<UserProfile> {
+export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: string, network: SolanaNetwork = 'devnet'): Promise<UserProfile> {
+  const rpcConn = getConnection(network);
   try {
     const [profilePDA] = getProfilePDA(userPubkey);
-    const accountInfo = await devnetConnection.getAccountInfo(profilePDA);
+    const accountInfo = await rpcConn.getAccountInfo(profilePDA);
 
     if (accountInfo && (accountInfo.data.length === 67 || accountInfo.data.length >= 51)) {
       const data = Buffer.from(accountInfo.data);
@@ -634,7 +638,7 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
     stakedSkr: 0,
     totalLoansCompleted: 0,
     totalLoansDefaulted: 0,
-    reputationScore: 10000,
+    reputationScore: 0,
     tier: 'Standard',
     aprDiscount: 0,
   };
@@ -838,7 +842,7 @@ export async function fetchLiveWalletAssets(
     usdcBalance,
     skrBalance,
     bonkBalance,
-    hasSeekerGenesisToken: hasSeekerGenesisToken || true,
+    hasSeekerGenesisToken,
     totalUsdValue,
     tokenList,
   };
@@ -853,7 +857,8 @@ export async function buildBorrowTx(
   collateralAmountLamports: number,
   durationDays: number,
   collateralName: string = 'SOL',
-  isPoolLiquid: boolean = true
+  isPoolLiquid: boolean = true,
+  liquidityMint: PublicKey = USDC_DEVNET_MINT
 ): Promise<{ tx: Transaction; escrowPDA: PublicKey; loanId: number }> {
   const [poolPDA] = getPoolPDA(poolAuthority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
@@ -874,7 +879,7 @@ export async function buildBorrowTx(
   writeU64LE(BigInt(collateralAmountLamports)).copy(data, 17);
   writeU64LE(BigInt(durationDays * 86400)).copy(data, 25);
 
-  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  const borrowerUsdcAccount = getAssociatedTokenAddress(liquidityMint, borrower);
   const isNativeSol = collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
     ? borrower
@@ -884,7 +889,7 @@ export async function buildBorrowTx(
     : SKR_DEVNET_MINT;
 
   const [treasuryPDA] = getTreasuryPDA();
-  const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
+  const treasuryUsdcAccount = getAssociatedTokenAddress(liquidityMint, treasuryPDA);
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
@@ -997,7 +1002,8 @@ export async function buildRepayTx(
   repayAmountUsdc: number,
   isPoolLiquid: boolean = true,
   collateralName: string = 'SOL',
-  poolPubkeyOverride?: PublicKey
+  poolPubkeyOverride?: PublicKey,
+  liquidityMint: PublicKey = USDC_DEVNET_MINT
 ): Promise<Transaction> {
   // NEW-2: bind repayment to the loan's actual pool pubkey (read from the loan
   // PDA) instead of re-deriving the pool PDA from a menu-driven (authority, id).
@@ -1008,9 +1014,9 @@ export async function buildRepayTx(
   const [loanPDA] = getLoanPDA(poolPDA, borrower, orderId);
   const [escrowPDA] = getEscrowPDA(loanPDA);
   const [profilePDA] = getProfilePDA(borrower);
-  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
+  const borrowerUsdcAccount = getAssociatedTokenAddress(liquidityMint, borrower);
   const [treasuryPDA] = getTreasuryPDA();
-  const treasuryUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, treasuryPDA);
+  const treasuryUsdcAccount = getAssociatedTokenAddress(liquidityMint, treasuryPDA);
 
   const isNativeSol = collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
@@ -1208,8 +1214,9 @@ export async function buildFundP2POfferTx(
 ): Promise<Transaction> {
   const creator = new PublicKey(offer.creator);
   const [offerPDA] = getP2POfferPDA(creator, offer.id);
-  const funderUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, funder);
-  const creatorUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, creator);
+  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_DEVNET_MINT;
+  const funderUsdcAccount = getAssociatedTokenAddress(offerMint, funder);
+  const creatorUsdcAccount = getAssociatedTokenAddress(offerMint, creator);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
@@ -1255,8 +1262,9 @@ export async function buildRepayPawnOfferTx(
   const [offerPDA] = getP2POfferPDA(borrower, offer.id);
   const [escrowPDA] = getEscrowPDA(offerPDA);
   const funder = new PublicKey(offer.funder);
-  const borrowerUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, borrower);
-  const funderUsdcAccount = getAssociatedTokenAddress(USDC_DEVNET_MINT, funder);
+  const offerMint = offer.liquidityMint ? new PublicKey(offer.liquidityMint) : USDC_DEVNET_MINT;
+  const borrowerUsdcAccount = getAssociatedTokenAddress(offerMint, borrower);
+  const funderUsdcAccount = getAssociatedTokenAddress(offerMint, funder);
 
   const isNativeSol = offer.collateralName.toUpperCase().includes('SOL');
   const borrowerCollateralAccount = isNativeSol
