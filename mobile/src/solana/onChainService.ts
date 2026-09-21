@@ -151,6 +151,8 @@ function decodeName(bytes: Uint8Array): string {
 function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | null {
   if (data.length !== 200 && data.length !== 182) return null;
   const isV2 = data.length === 200;
+  // NEW-4: discriminator-gated parsing — never parse a non-pool account as a pool
+  if (isV2 && data.subarray(0, 8).toString() !== 'CLK_POOL') return null;
   const offset = isV2 ? 8 : 0;
   const isInitialized = data.readUInt8(offset) === 1;
   if (!isInitialized) return null;
@@ -249,6 +251,8 @@ export async function fetchLiveUserOrders(borrower: PublicKey): Promise<LoanOrde
       if (acc.account.data.length === 170 || acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
         const isV2 = data.length === 170;
+        // NEW-4: discriminator-gated parsing — never parse a non-loan account as a loan
+        if (isV2 && data.subarray(0, 8).toString() !== 'CLK_LOAN') continue;
         const isActive = data.readUInt8(isV2 ? 8 : 0) === 1;
         if (!isActive) continue;
 
@@ -486,7 +490,9 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
         let dueTime = 0;
         let statusByte = 0;
 
-        if (data.length >= 200) {
+        // NEW-4: discriminator-gated parsing — only CLK_PAWN accounts are offers
+        const kind = data.subarray(0, 8).toString();
+        if (data.length >= 200 && kind === 'CLK_PAWN') {
           isInitialized = data.readUInt8(8) === 1;
           offerId = Number(data.readBigUInt64LE(9));
           creator = new PublicKey(data.subarray(17, 49)).toBase58();
@@ -500,7 +506,7 @@ export async function fetchLiveP2POffers(): Promise<P2POffer[]> {
           createdAt = Number(data.readBigInt64LE(177));
           dueTime = Number(data.readBigInt64LE(185));
           statusByte = data.readUInt8(data.length >= 202 ? 201 : data.length - 1);
-        } else if (data.length >= 168) {
+        } else if (data.length >= 168 && kind === 'CLK_PAWN') {
           isInitialized = data.readUInt8(8) === 1;
           offerId = Number(data.readBigUInt64LE(9));
           creator = new PublicKey(data.subarray(17, 49)).toBase58();
@@ -990,9 +996,14 @@ export async function buildRepayTx(
   orderId: number,
   repayAmountUsdc: number,
   isPoolLiquid: boolean = true,
-  collateralName: string = 'SOL'
+  collateralName: string = 'SOL',
+  poolPubkeyOverride?: PublicKey
 ): Promise<Transaction> {
-  const [poolPDA] = getPoolPDA(poolAuthority, poolId);
+  // NEW-2: bind repayment to the loan's actual pool pubkey (read from the loan
+  // PDA) instead of re-deriving the pool PDA from a menu-driven (authority, id).
+  const [poolPDA] = poolPubkeyOverride
+    ? [poolPubkeyOverride]
+    : getPoolPDA(poolAuthority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
   const [loanPDA] = getLoanPDA(poolPDA, borrower, orderId);
   const [escrowPDA] = getEscrowPDA(loanPDA);
@@ -1014,13 +1025,15 @@ export async function buildRepayTx(
   let exactRepayLamports = BigInt(Math.round(repayAmountUsdc * 1_000_000));
   try {
     const loanInfo = await devnetConnection.getAccountInfo(loanPDA);
-    if (loanInfo && loanInfo.data.length === 170) {
-      const principal = loanInfo.data.readBigUInt64LE(81);
-      const interest = loanInfo.data.readBigUInt64LE(129);
+    const loanData = loanInfo?.data;
+    // NEW-4: discriminator-gated read of the loan PDA for the exact amount
+    if (loanData && loanData.length === 170 && loanData.subarray(0, 8).toString() === 'CLK_LOAN') {
+      const principal = loanData.readBigUInt64LE(81);
+      const interest = loanData.readBigUInt64LE(129);
       exactRepayLamports = BigInt(principal.toString()) + BigInt(interest.toString());
-    } else if (loanInfo && loanInfo.data.length === 154) {
-      const principal = loanInfo.data.readBigUInt64LE(73);
-      const interest = loanInfo.data.readBigUInt64LE(121);
+    } else if (loanData && loanData.length === 154) {
+      const principal = loanData.readBigUInt64LE(73);
+      const interest = loanData.readBigUInt64LE(121);
       exactRepayLamports = BigInt(principal.toString()) + BigInt(interest.toString());
     }
   } catch {
@@ -1258,10 +1271,20 @@ export async function buildRepayPawnOfferTx(
   let exactRepayLamports = BigInt(Math.round(totalDue * 1_000_000));
   try {
     const offerInfo = await devnetConnection.getAccountInfo(offerPDA);
-    if (offerInfo && offerInfo.data.length >= 170) {
-      const requested = offerInfo.data.readBigUInt64LE(121);
-      const interest = offerInfo.data.readBigUInt64LE(129);
-      exactRepayLamports = BigInt(requested.toString()) + BigInt(interest.toString());
+    const data = offerInfo?.data;
+    // NEW-1: read the CURRENT (202-byte) offer layout — requested_amount @153,
+    // interest_offered @161 — with the discriminator gate. The legacy 170-byte
+    // layout (121/129) is only used for pre-v3 offers.
+    if (data && data.subarray(0, 8).toString() === 'CLK_PAWN') {
+      if (data.length >= 200) {
+        const requested = data.readBigUInt64LE(153);
+        const interest = data.readBigUInt64LE(161);
+        exactRepayLamports = BigInt(requested.toString()) + BigInt(interest.toString());
+      } else if (data.length >= 168) {
+        const requested = data.readBigUInt64LE(121);
+        const interest = data.readBigUInt64LE(129);
+        exactRepayLamports = BigInt(requested.toString()) + BigInt(interest.toString());
+      }
     }
   } catch {
     // fallback to caller-supplied amount

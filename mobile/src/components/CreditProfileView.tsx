@@ -18,6 +18,7 @@ interface CreditProfileViewProps {
   skrHandle: string;
   walletAssets?: WalletAssets;
   onStakeSkr: (amount: number) => void;
+  onUnstakeSkr?: (amount: number) => void;
   onOpenAssetsModal?: () => void;
   onDisconnectWallet: () => void;
   onLockApp?: () => void;
@@ -30,6 +31,7 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
   skrHandle,
   walletAssets,
   onStakeSkr,
+  onUnstakeSkr,
   onOpenAssetsModal,
   onDisconnectWallet,
   onLockApp,
@@ -137,6 +139,18 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
             </TouchableOpacity>
           ))}
         </View>
+
+        {onUnstakeSkr && userProfile.stakedSkr > 0 && (
+          <TouchableOpacity
+            style={[styles.stakePresetBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder, marginTop: 10 }]}
+            onPress={() => onUnstakeSkr(userProfile.stakedSkr)}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.stakePresetText, { color: '#ff6b6b' }]}>
+              ↩ Unstake {userProfile.stakedSkr.toLocaleString()} SKR
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Wallet Assets & Holdings */}
