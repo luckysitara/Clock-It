@@ -42,6 +42,7 @@ import {
   buildCancelPawnOfferTx,
   buildCreatePoolTx,
   buildStakeSkrTx,
+  buildUnstakeSkrTx,
   getCachedOrders,
   setCachedOrders,
 } from './src/solana/onChainService';
@@ -484,8 +485,12 @@ function MainApp() {
   const handleRepay = async (order: LoanOrder) => {
     if (!session) return;
 
-    const matchingPool = pools.find((p) => p.id === order.poolId);
-    if (!matchingPool) {
+    // NEW-2: prefer the loan's actual pool pubkey (parsed from the loan PDA);
+    // only fall back to the menu-driven (authority, poolId) lookup for legacy
+    // cached orders that predate the poolPubkey field.
+    const poolPubkeyOverride = order.poolPubkey ? new PublicKey(order.poolPubkey) : undefined;
+    const matchingPool = poolPubkeyOverride ? undefined : pools.find((p) => p.id === order.poolId);
+    if (!poolPubkeyOverride && !matchingPool) {
       setTransactionNotice({
         type: 'error',
         title: 'Pool Authority Not Found',
@@ -494,7 +499,7 @@ function MainApp() {
       });
       return;
     }
-    const poolAuthority = new PublicKey(matchingPool.authority);
+    const poolAuthority = matchingPool ? new PublicKey(matchingPool.authority) : PublicKey.default;
     const totalDue = parseFloat((order.principalAmount + order.interestDue).toFixed(2));
 
     try {
@@ -505,7 +510,8 @@ function MainApp() {
         order.id,
         totalDue,
         true,
-        order.collateralName
+        order.collateralName,
+        poolPubkeyOverride
       );
 
       const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
@@ -1144,6 +1150,73 @@ function MainApp() {
     }
   };
 
+  // NEW-3: Execute real on-chain Unstake SKR transaction (exit path for the bond)
+  const handleUnstakeSkr = async (amount: number) => {
+    if (!session) return;
+
+    if (selectedNetwork === 'mainnet-beta') {
+      Alert.alert(
+        'Devnet Testing Mode',
+        'ClockLend smart contracts and reputation escrows are running on Solana Devnet.\n\nSwitch to Devnet to unstake your SKR bond.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Switch to Devnet', onPress: () => setSelectedNetwork('devnet') },
+        ]
+      );
+      return;
+    }
+
+    try {
+      const { tx, escrowPDA } = await buildUnstakeSkrTx(session.publicKey, amount);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      console.log('SKR unstaked on-chain:', sig);
+      const solscanUrl = `https://solscan.io/tx/${sig}?cluster=devnet`;
+
+      // Credit the returned SKR back to the wallet
+      setWalletAssets((prev) => {
+        const newSkr = prev.skrBalance + amount;
+        return {
+          ...prev,
+          skrBalance: newSkr,
+          totalUsdValue: parseFloat((prev.solBalance * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
+        };
+      });
+
+      setUserProfile((prev) =>
+        prev ? { ...prev, stakedSkr: Math.max(0, prev.stakedSkr - amount) } : prev
+      );
+
+      setTransactionNotice({
+        type: 'repay',
+        title: '↩️ SKR Unstaked!',
+        subtitle: `${amount.toLocaleString()} SKR returned to your wallet from the reputation escrow (${escrowPDA.toBase58().slice(0, 8)}...).`,
+        amount: `${amount.toLocaleString()} SKR`,
+        txSignature: sig,
+        escrowAddress: escrowPDA.toBase58(),
+        solscanUrl,
+        primaryBtnText: 'View on Solscan ↗',
+        secondaryBtnText: 'Done',
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Cancellation') || err?.name?.includes('Cancellation')) {
+        setTransactionNotice({
+          type: 'error',
+          title: 'Unstake Cancelled',
+          subtitle: 'Transaction was cancelled in your wallet.',
+          primaryBtnText: 'Dismiss',
+        });
+        return;
+      }
+      console.warn('Unstake SKR failed:', err);
+      setTransactionNotice({
+        type: 'error',
+        title: 'Unstake Notice',
+        subtitle: err?.message || 'Could not unstake SKR on-chain. Note: SKR locked by active loans cannot be unstaked.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
   // 0. Hardware & Environment Integrity Lockdown (Anti-Emulator, Anti-Root, Anti-Frida)
   if (integrity && !integrity.isSecure) {
     return <SecurityLockdownView integrity={integrity} />;
@@ -1276,6 +1349,7 @@ function MainApp() {
             skrHandle={session.skrHandle}
             walletAssets={walletAssets}
             onStakeSkr={handleStakeSkr}
+            onUnstakeSkr={handleUnstakeSkr}
             onOpenAssetsModal={() => setShowAssetsModal(true)}
             onDisconnectWallet={handleDisconnect}
             onLockApp={() => {
