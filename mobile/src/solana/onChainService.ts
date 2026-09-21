@@ -44,7 +44,10 @@ export const DEVNET_RPCS = [
   'https://api.devnet.solana.com',
 ];
 
+const HELIUS_API_KEY = process.env.EXPO_PUBLIC_HELIUS_API_KEY;
 export const MAINNET_RPCS = [
+  ...(HELIUS_API_KEY ? [`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`] : []),
+  'https://solana-rpc.publicnode.com',
   'https://api.mainnet-beta.solana.com',
 ];
 
@@ -200,7 +203,7 @@ export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): P
 
   // 1. Fast path: load known seeded pools via getMultipleAccountsInfo (~300ms)
   try {
-    const accounts = await rpcConn.getMultipleAccountsInfo(SEEDED_POOLS);
+    const accounts = await queryRpcWithFallback(network, (c) => c.getMultipleAccountsInfo(SEEDED_POOLS));
     accounts.forEach((acc, idx) => {
       if (acc && acc.data) {
         const pool = parsePoolData(SEEDED_POOLS[idx].toBase58(), Buffer.from(acc.data), poolsMap.size + 1);
@@ -213,7 +216,7 @@ export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): P
 
   // 2. Full scan to find any additional pools created by individuals
   try {
-    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
+    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
     for (const acc of accounts) {
       if (acc.account.data.length === 200 || acc.account.data.length === 182) {
         const pubkeyStr = acc.pubkey.toBase58();
@@ -246,7 +249,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
 
   // 1. Scan on-chain PDA accounts first (for liquid pool PDA loans)
   try {
-    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
+    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
     for (const acc of accounts) {
       if (acc.account.data.length === 170 || acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
@@ -305,7 +308,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
 
   // 2. Scan blockchain transactions & memos for ground-truth borrow/repay history
   try {
-    const signatures = await rpcConn.getSignaturesForAddress(borrower, { limit: 60 });
+    const signatures = await queryRpcWithFallback(network, (c) => c.getSignaturesForAddress(borrower, { limit: 60 }));
     const memos = signatures
       .filter((s) => Boolean(s.memo))
       .map((s) => ({
@@ -471,7 +474,7 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
 export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'): Promise<P2POffer[]> {
   const rpcConn = getConnection(network);
   try {
-    const accounts = await rpcConn.getProgramAccounts(PROGRAM_ID);
+    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
     const offers: P2POffer[] = [];
 
     for (const acc of accounts) {
@@ -589,7 +592,7 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
   const rpcConn = getConnection(network);
   try {
     const [profilePDA] = getProfilePDA(userPubkey);
-    const accountInfo = await rpcConn.getAccountInfo(profilePDA);
+    const accountInfo = await queryRpcWithFallback(network, (c) => c.getAccountInfo(profilePDA));
 
     if (accountInfo && (accountInfo.data.length === 67 || accountInfo.data.length >= 51)) {
       const data = Buffer.from(accountInfo.data);
