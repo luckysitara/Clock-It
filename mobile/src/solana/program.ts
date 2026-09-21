@@ -13,6 +13,7 @@ export const PROFILE_SEED = Buffer.from('profile');
 export const TREASURY_SEED = Buffer.from('treasury');
 export const SKR_ESCROW_SEED = Buffer.from('skr_escrow');
 export const ORACLE_SEED = Buffer.from('oracle');
+export const ADMIN_SEED = Buffer.from('admin');
 
 export function writeU64LE(val: number | bigint): Buffer {
   const buf = Buffer.alloc(8);
@@ -59,6 +60,14 @@ export function getSkrEscrowPDA(user: PublicKey): [PublicKey, number] {
 
 export function getOraclePDA(mint: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([ORACLE_SEED, mint.toBuffer()], PROGRAM_ID);
+}
+
+export function getPoolOraclePDA(poolPDA: PublicKey, mint: PublicKey): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([ORACLE_SEED, poolPDA.toBuffer(), mint.toBuffer()], PROGRAM_ID);
+}
+
+export function getAdminPDA(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);
 }
 
 export const connection = new Connection(DEVNET_RPC, 'confirmed');

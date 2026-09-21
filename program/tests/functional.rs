@@ -2,7 +2,7 @@ use borsh::BorshDeserialize;
 use clock_lend::{
     instruction::ClockLendInstruction,
     state::{
-        LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
+        AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
     },
 };
 use solana_program::pubkey::Pubkey;
@@ -29,6 +29,7 @@ fn test_lending_pool_serialization() {
         loans_originated: 12,
         loans_repaid: 11,
         name,
+        is_oracle_free: false,
     };
 
     let mut buffer = [0u8; LendingPool::LEN];
@@ -41,6 +42,7 @@ fn test_lending_pool_serialization() {
     assert_eq!(unpacked.interest_rate_bps, 400);
     assert_eq!(unpacked.max_ltv_bps, 9000);
     assert_eq!(unpacked.name, name);
+    assert_eq!(unpacked.is_oracle_free, false);
 }
 
 #[test]
@@ -174,6 +176,7 @@ fn test_institutional_pool_type_serialization() {
         loans_originated: 45,
         loans_repaid: 45,
         name,
+        is_oracle_free: false,
     };
 
     let mut buffer = [0u8; LendingPool::LEN];
@@ -183,6 +186,22 @@ fn test_institutional_pool_type_serialization() {
     assert_eq!(unpacked.pool_type, PoolType::Institutional);
     assert_eq!(unpacked.total_liquidity, 500_000_000_000);
     assert_eq!(unpacked.interest_rate_bps, 350);
+}
+
+#[test]
+fn test_admin_config_serialization() {
+    let admin = Pubkey::new_unique();
+    let config = AdminConfig {
+        is_initialized: true,
+        admin,
+    };
+
+    let mut buffer = [0u8; AdminConfig::LEN];
+    config.pack_into_slice(&mut buffer).expect("Pack failed");
+
+    let unpacked = AdminConfig::unpack_from_slice(&buffer).expect("Unpack failed");
+    assert_eq!(unpacked.is_initialized, true);
+    assert_eq!(unpacked.admin, admin);
 }
 
 #[test]

@@ -9,7 +9,7 @@ use solana_program::{
     program_pack::Pack,
     pubkey::Pubkey,
     rent::Rent,
-    sysvar::Sysvar,
+    sysvar::{self, Sysvar},
 };
 #[allow(deprecated)]
 use solana_program::system_instruction;
@@ -18,8 +18,8 @@ use crate::{
     error::ClockLendError,
     instruction::ClockLendInstruction,
     state::{
-        LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
-        ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
+        AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
+        ADMIN_SEED, ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
         SKR_MINT,
     },
 };
@@ -247,17 +247,23 @@ pub fn process_instruction(
             min_duration,
             max_duration,
             name,
-        } => process_initialize_pool(
-            program_id,
-            accounts,
-            pool_id,
-            pool_type,
-            interest_rate_bps,
-            max_ltv_bps,
-            min_duration,
-            max_duration,
-            name,
-        ),
+        } => {
+            let is_oracle_free = name.starts_with(b"ORACLE_FREE")
+                || name.starts_with(b"oracle_free")
+                || (instruction_data.len() > 62 && instruction_data[62] != 0);
+            process_initialize_pool(
+                program_id,
+                accounts,
+                pool_id,
+                pool_type,
+                interest_rate_bps,
+                max_ltv_bps,
+                min_duration,
+                max_duration,
+                name,
+                is_oracle_free,
+            )
+        }
         ClockLendInstruction::DepositLiquidity { amount } => {
             process_deposit_liquidity(program_id, accounts, amount)
         }
@@ -313,6 +319,7 @@ pub fn process_instruction(
             price_micro_usd,
             decimals,
         } => process_set_price_feed(program_id, accounts, price_micro_usd, decimals),
+        ClockLendInstruction::InitializeAdmin => process_initialize_admin(program_id, accounts),
     }
 }
 
@@ -326,6 +333,7 @@ pub fn process_initialize_pool(
     min_duration: i64,
     max_duration: i64,
     name: [u8; 32],
+    is_oracle_free: bool,
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let authority = next_account_info(account_info_iter)?;
@@ -337,15 +345,6 @@ pub fn process_initialize_pool(
 
     assert_signer(authority)?;
     assert_system_program(system_program)?;
-
-    if max_ltv_bps > 10000
-        || interest_rate_bps > 10000
-        || max_duration < min_duration
-        || min_duration <= 0
-        || max_duration > 365 * 86400
-    {
-        return Err(ClockLendError::InvalidInstruction.into());
-    }
 
     let pool_id_bytes = pool_id.to_le_bytes();
     let (expected_pool_pda, pool_bump) = Pubkey::find_program_address(
@@ -420,10 +419,11 @@ pub fn process_initialize_pool(
         loans_originated: 0,
         loans_repaid: 0,
         name,
+        is_oracle_free,
     };
 
     pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
-    msg!("ClockLend: Lending Pool #{} initialized successfully (type: {:?})", pool_id, pool_type);
+    msg!("ClockLend: Lending Pool #{} initialized successfully (type: {:?}, oracle_free: {})", pool_id, pool_type, is_oracle_free);
     Ok(())
 }
 
@@ -506,7 +506,7 @@ pub fn process_stake_skr(
 
     // Dynamically distinguish if optional pool account is present
     let next_acc = next_account_info(account_info_iter)?;
-    let (pool_account_opt, user_skr_account) = if next_acc.owner == program_id && next_acc.data_len() == LendingPool::LEN {
+    let (pool_account_opt, user_skr_account) = if next_acc.owner == program_id && (next_acc.data_len() == LendingPool::LEN || next_acc.data_len() == 182) {
         (Some(next_acc), next_account_info(account_info_iter)?)
     } else {
         (None, next_acc)
@@ -726,6 +726,50 @@ pub fn process_unstake_skr(
     Ok(())
 }
 
+pub fn process_initialize_admin(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let authority = next_account_info(account_info_iter)?;
+    let admin_account = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+
+    assert_signer(authority)?;
+    assert_system_program(system_program)?;
+
+    let (expected_admin_pda, bump) = Pubkey::find_program_address(&[ADMIN_SEED], program_id);
+    if expected_admin_pda != *admin_account.key {
+        return Err(ClockLendError::InvalidSeeds.into());
+    }
+
+    if admin_account.owner == program_id && !admin_account.data_is_empty() {
+        if let Ok(existing) = AdminConfig::unpack_from_slice(&admin_account.try_borrow_data()?) {
+            if existing.is_initialized {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+        }
+    }
+
+    create_or_allocate_pda(
+        program_id,
+        authority,
+        admin_account,
+        system_program,
+        AdminConfig::LEN,
+        &[ADMIN_SEED, &[bump]],
+    )?;
+
+    let config = AdminConfig {
+        is_initialized: true,
+        admin: *authority.key,
+    };
+    config.pack_into_slice(&mut admin_account.try_borrow_mut_data()?)?;
+
+    msg!("ClockLend: AdminConfig initialized with admin: {}", authority.key);
+    Ok(())
+}
+
 pub fn process_set_price_feed(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -737,7 +781,6 @@ pub fn process_set_price_feed(
     let oracle_account = next_account_info(account_info_iter)?;
     let mint_account = next_account_info(account_info_iter)?;
     let system_program = next_account_info(account_info_iter)?;
-    let clock_sysvar_opt = next_account_info(account_info_iter).ok();
 
     assert_signer(authority)?;
     assert_system_program(system_program)?;
@@ -746,50 +789,108 @@ pub fn process_set_price_feed(
         return Err(ClockLendError::InvalidInstruction.into());
     }
 
-    let (expected_oracle_pda, bump) =
+    let (expected_admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], program_id);
+    let (expected_global_oracle_pda, global_bump) =
         Pubkey::find_program_address(&[ORACLE_SEED, mint_account.key.as_ref()], program_id);
-    if expected_oracle_pda != *oracle_account.key {
-        return Err(ClockLendError::InvalidSeeds.into());
+
+    let mut clock_sysvar_opt: Option<&AccountInfo> = None;
+    let mut admin_account_opt: Option<&AccountInfo> = None;
+    let mut pool_account_opt: Option<&AccountInfo> = None;
+
+    while let Ok(acc) = next_account_info(account_info_iter) {
+        if *acc.key == sysvar::clock::id() {
+            clock_sysvar_opt = Some(acc);
+        } else if *acc.key == expected_admin_pda {
+            admin_account_opt = Some(acc);
+        } else if acc.owner == program_id && (acc.data_len() == LendingPool::LEN || acc.data_len() == 182) {
+            pool_account_opt = Some(acc);
+        }
     }
 
-    create_or_allocate_pda(
-        program_id,
-        authority,
-        oracle_account,
-        system_program,
-        PriceFeed::LEN,
-        &[ORACLE_SEED, mint_account.key.as_ref(), &[bump]],
-    )?;
+    let (is_pool_oracle, _bump, pda_seeds): (bool, u8, Vec<Vec<u8>>) = if let Some(pool_acc) = pool_account_opt {
+        let (expected_pool_oracle, pool_oracle_bump) = Pubkey::find_program_address(
+            &[ORACLE_SEED, pool_acc.key.as_ref(), mint_account.key.as_ref()],
+            program_id,
+        );
+        if expected_pool_oracle == *oracle_account.key {
+            (true, pool_oracle_bump, vec![
+                ORACLE_SEED.to_vec(),
+                pool_acc.key.as_ref().to_vec(),
+                mint_account.key.as_ref().to_vec(),
+                vec![pool_oracle_bump],
+            ])
+        } else if expected_global_oracle_pda == *oracle_account.key {
+            (false, global_bump, vec![
+                ORACLE_SEED.to_vec(),
+                mint_account.key.as_ref().to_vec(),
+                vec![global_bump],
+            ])
+        } else {
+            return Err(ClockLendError::InvalidSeeds.into());
+        }
+    } else {
+        if expected_global_oracle_pda != *oracle_account.key {
+            return Err(ClockLendError::InvalidSeeds.into());
+        }
+        (false, global_bump, vec![
+            ORACLE_SEED.to_vec(),
+            mint_account.key.as_ref().to_vec(),
+            vec![global_bump],
+        ])
+    };
 
-    let mut feed = if !oracle_account.data_is_empty() {
+    let mut feed = if !oracle_account.data_is_empty() && oracle_account.owner == program_id {
         if let Ok(existing) = PriceFeed::unpack_from_slice(&oracle_account.try_borrow_data()?) {
             if existing.is_initialized {
+                // If feed already initialized, signer MUST be existing.authority
                 if existing.authority != *authority.key {
                     return Err(ClockLendError::Unauthorized.into());
                 }
                 existing
             } else {
-                PriceFeed {
-                    is_initialized: true,
-                    mint: *mint_account.key,
-                    price_micro_usd: 0,
-                    decimals: 0,
-                    last_updated_at: 0,
-                    authority: *authority.key,
-                }
+                return Err(ClockLendError::InvalidOracleAccount.into());
             }
         } else {
-            PriceFeed {
-                is_initialized: true,
-                mint: *mint_account.key,
-                price_micro_usd: 0,
-                decimals: 0,
-                last_updated_at: 0,
-                authority: *authority.key,
-            }
+            return Err(ClockLendError::InvalidOracleAccount.into());
         }
     } else {
-        return Err(ClockLendError::InvalidOracleAccount.into());
+        // Feed does not exist yet: First-time initialization must be authorized!
+        if is_pool_oracle {
+            let pool_acc = pool_account_opt.ok_or(ClockLendError::Unauthorized)?;
+            let pool = LendingPool::unpack_from_slice(&pool_acc.try_borrow_data()?)?;
+            if pool.authority != *authority.key {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+        } else {
+            // Global oracle feed: caller MUST be AdminConfig.admin!
+            let admin_acc = admin_account_opt.ok_or(ClockLendError::Unauthorized)?;
+            if admin_acc.owner != program_id || admin_acc.data_is_empty() {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+            let admin_config = AdminConfig::unpack_from_slice(&admin_acc.try_borrow_data()?)?;
+            if !admin_config.is_initialized || admin_config.admin != *authority.key {
+                return Err(ClockLendError::Unauthorized.into());
+            }
+        }
+
+        let signers_seeds: Vec<&[u8]> = pda_seeds.iter().map(|s| s.as_slice()).collect();
+        create_or_allocate_pda(
+            program_id,
+            authority,
+            oracle_account,
+            system_program,
+            PriceFeed::LEN,
+            &signers_seeds,
+        )?;
+
+        PriceFeed {
+            is_initialized: true,
+            mint: *mint_account.key,
+            price_micro_usd: 0,
+            decimals: 0,
+            last_updated_at: 0,
+            authority: *authority.key,
+        }
     };
 
     let unix_timestamp = if let Some(clock_acc) = clock_sysvar_opt {
@@ -910,14 +1011,24 @@ pub fn process_borrow_from_pool(
         Pubkey::find_program_address(&[PROFILE_SEED, borrower.key.as_ref()], program_id);
     let (expected_treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], program_id);
 
-    let (expected_collateral_oracle1, _) =
+    let (expected_pool_collateral_oracle1, _) =
+        Pubkey::find_program_address(&[ORACLE_SEED, pool_account.key.as_ref(), collateral_mint.key.as_ref()], program_id);
+    let (expected_pool_collateral_oracle2, _) =
+        Pubkey::find_program_address(&[ORACLE_SEED, pool_account.key.as_ref(), canonical_collateral_mint.as_ref()], program_id);
+
+    let (expected_global_collateral_oracle1, _) =
         Pubkey::find_program_address(&[ORACLE_SEED, collateral_mint.key.as_ref()], program_id);
-    let (expected_collateral_oracle2, _) =
+    let (expected_global_collateral_oracle2, _) =
         Pubkey::find_program_address(&[ORACLE_SEED, canonical_collateral_mint.as_ref()], program_id);
 
-    let (expected_pool_oracle1, _) =
+    let (expected_pool_liq_oracle1, _) =
+        Pubkey::find_program_address(&[ORACLE_SEED, pool_account.key.as_ref(), pool.liquidity_mint.as_ref()], program_id);
+    let (expected_pool_liq_oracle2, _) =
+        Pubkey::find_program_address(&[ORACLE_SEED, pool_account.key.as_ref(), canonical_pool_mint.as_ref()], program_id);
+
+    let (expected_global_pool_oracle1, _) =
         Pubkey::find_program_address(&[ORACLE_SEED, pool.liquidity_mint.as_ref()], program_id);
-    let (expected_pool_oracle2, _) =
+    let (expected_global_pool_oracle2, _) =
         Pubkey::find_program_address(&[ORACLE_SEED, canonical_pool_mint.as_ref()], program_id);
 
     let mut user_profile_opt: Option<&AccountInfo> = None;
@@ -931,10 +1042,18 @@ pub fn process_borrow_from_pool(
             user_profile_opt = Some(acc);
         } else if *acc.key == expected_treasury_pda {
             treasury_account_opt = Some(acc);
-        } else if *acc.key == expected_collateral_oracle1 || *acc.key == expected_collateral_oracle2 {
+        } else if *acc.key == expected_pool_collateral_oracle1 || *acc.key == expected_pool_collateral_oracle2 {
             collateral_oracle_opt = Some(acc);
-        } else if *acc.key == expected_pool_oracle1 || *acc.key == expected_pool_oracle2 {
+        } else if *acc.key == expected_global_collateral_oracle1 || *acc.key == expected_global_collateral_oracle2 {
+            if collateral_oracle_opt.is_none() {
+                collateral_oracle_opt = Some(acc);
+            }
+        } else if *acc.key == expected_pool_liq_oracle1 || *acc.key == expected_pool_liq_oracle2 {
             pool_oracle_opt = Some(acc);
+        } else if *acc.key == expected_global_pool_oracle1 || *acc.key == expected_global_pool_oracle2 {
+            if pool_oracle_opt.is_none() {
+                pool_oracle_opt = Some(acc);
+            }
         } else if acc.owner == token_program.key {
             if let Ok(tok) = spl_token::state::Account::unpack(&acc.try_borrow_data()?) {
                 if tok.owner == expected_treasury_pda && tok.mint == pool.liquidity_mint {
@@ -947,7 +1066,7 @@ pub fn process_borrow_from_pool(
     const MAX_ORACLE_STALENESS_SECONDS: i64 = 86400; // 24 hours
     let current_time = Clock::get()?.unix_timestamp;
 
-    // Resolve dynamic collateral price & decimals (with safe fallback to baseline)
+    // Resolve dynamic collateral price & decimals (mandatory unless pool.is_oracle_free)
     let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(oracle_acc) = collateral_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
@@ -962,24 +1081,33 @@ pub fn process_borrow_from_pool(
             }
             (feed.price_micro_usd, feed.decimals)
         } else if oracle_acc.owner == &solana_program::system_program::id() && oracle_acc.data_is_empty() {
-            // Unprovisioned PDA: graceful baseline fallback
-            if is_native_sol {
-                (150_000_000, 9)
+            // Unprovisioned PDA: ONLY permitted if pool is explicitly oracle-free!
+            if pool.is_oracle_free {
+                if is_native_sol {
+                    (150_000_000, 9)
+                } else {
+                    (20_000, 6)
+                }
             } else {
-                (20_000, 6)
+                return Err(ClockLendError::InvalidOracleAccount.into());
             }
         } else {
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
     } else {
-        if is_native_sol {
-            (150_000_000, 9) // Baseline $150.00 / SOL (9 decimals)
+        // Oracle omitted: ONLY permitted if pool is explicitly oracle-free!
+        if pool.is_oracle_free {
+            if is_native_sol {
+                (150_000_000, 9) // Baseline $150.00 / SOL (9 decimals)
+            } else {
+                (20_000, 6)      // Baseline $0.02 / SKR (6 decimals)
+            }
         } else {
-            (20_000, 6)      // Baseline $0.02 / SKR (6 decimals)
+            return Err(ClockLendError::InvalidOracleAccount.into());
         }
     };
 
-    // Resolve dynamic pool liquidity price & decimals (with safe fallback to baseline)
+    // Resolve dynamic pool liquidity price & decimals (mandatory for non-USD unless pool.is_oracle_free)
     let (pool_price_micro_usd, pool_decimals): (u64, u8) = if let Some(oracle_acc) = pool_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
@@ -994,20 +1122,27 @@ pub fn process_borrow_from_pool(
             }
             (feed.price_micro_usd, feed.decimals)
         } else if oracle_acc.owner == &solana_program::system_program::id() && oracle_acc.data_is_empty() {
-            // Unprovisioned PDA: graceful baseline fallback
-            if is_pool_native_sol {
-                (150_000_000, 9)
+            if pool.is_oracle_free || !is_pool_native_sol {
+                if is_pool_native_sol {
+                    (150_000_000, 9)
+                } else {
+                    (1_000_000, 6)
+                }
             } else {
-                (1_000_000, 6)
+                return Err(ClockLendError::InvalidOracleAccount.into());
             }
         } else {
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
     } else {
-        if is_pool_native_sol {
-            (150_000_000, 9) // Baseline $150.00 / SOL (9 decimals)
+        if pool.is_oracle_free || !is_pool_native_sol {
+            if is_pool_native_sol {
+                (150_000_000, 9) // Baseline $150.00 / SOL (9 decimals)
+            } else {
+                (1_000_000, 6)   // Baseline $1.00 / USDC (6 decimals)
+            }
         } else {
-            (1_000_000, 6)   // Baseline $1.00 / USDC (6 decimals)
+            return Err(ClockLendError::InvalidOracleAccount.into());
         }
     };
 
@@ -1619,7 +1754,7 @@ pub fn process_repay_loan(
             token_program_opt = Some(acc);
         } else if *acc.key == solana_program::system_program::id() {
             system_program_opt = Some(acc);
-        } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
+        } else if acc.owner == program_id && (acc.data_len() == LendingPool::LEN || acc.data_len() == 182) {
             pool_account_opt = Some(acc);
         } else if acc.owner == program_id && (acc.data_len() == UserProfile::LEN || acc.data_len() == 51) {
             user_profile_opt = Some(acc);
@@ -2085,7 +2220,7 @@ pub fn process_claim_default(
             token_program_opt = Some(acc);
         } else if *acc.key == solana_program::system_program::id() {
             system_program_opt = Some(acc);
-        } else if acc.owner == program_id && acc.data_len() == LendingPool::LEN {
+        } else if acc.owner == program_id && (acc.data_len() == LendingPool::LEN || acc.data_len() == 182) {
             pool_account_opt = Some(acc);
         } else if acc.owner == program_id && (acc.data_len() == UserProfile::LEN || acc.data_len() == 51) {
             user_profile_opt = Some(acc);

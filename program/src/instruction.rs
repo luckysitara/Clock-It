@@ -173,8 +173,16 @@ pub enum ClockLendInstruction {
     /// 2. `[]` Asset Mint
     /// 3. `[]` System Program
     /// 4. `[optional]` Clock Sysvar
+    /// 5. `[optional]` AdminConfig PDA `[b"admin"]` (required if initializing global feed)
+    /// 6. `[optional]` LendingPool PDA (required if initializing pool-scoped feed)
     SetPriceFeed {
         price_micro_usd: u64,
         decimals: u8,
     },
+    /// 13. Initialize global protocol admin config (one-time deploy-time initialization)
+    /// Accounts:
+    /// 0. `[signer]` Initial Admin
+    /// 1. `[writable]` AdminConfig PDA `[b"admin"]`
+    /// 2. `[]` System Program
+    InitializeAdmin,
 }

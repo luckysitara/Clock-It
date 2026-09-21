@@ -24,6 +24,8 @@ import {
   getSkrEscrowPDA,
   getTreasuryPDA,
   getOraclePDA,
+  getPoolOraclePDA,
+  getAdminPDA,
 } from './program';
 import {
   PoolType,
@@ -852,14 +854,38 @@ export async function buildBorrowTx(
   return { tx, escrowPDA, loanId };
 }
 
+// Build Initialize Admin Transaction instruction (ClockLend Instruction 13)
+export async function buildInitializeAdminTx(
+  admin: PublicKey
+): Promise<Transaction> {
+  const [adminPDA] = getAdminPDA();
+  const tx = new Transaction();
+  const data = Buffer.alloc(1);
+  data.writeUInt8(13, 0); // Instruction 13: InitializeAdmin
+
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: admin, isSigner: true, isWritable: true },
+      { pubkey: adminPDA, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  tx.add(ix);
+  return tx;
+}
+
 // Build Set Price Feed Transaction instruction (ClockLend Instruction 12)
 export async function buildSetPriceFeedTx(
   authority: PublicKey,
   mint: PublicKey,
   priceMicroUsd: number | bigint,
-  decimals: number
+  decimals: number,
+  poolPDA?: PublicKey
 ): Promise<Transaction> {
-  const [oraclePDA] = getOraclePDA(mint);
+  const [oraclePDA] = poolPDA ? getPoolOraclePDA(poolPDA, mint) : getOraclePDA(mint);
+  const [adminPDA] = getAdminPDA();
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
@@ -870,15 +896,22 @@ export async function buildSetPriceFeedTx(
   writeU64LE(BigInt(priceMicroUsd)).copy(data, 1);
   data.writeUInt8(decimals, 9);
 
+  const keys = [
+    { pubkey: authority, isSigner: true, isWritable: true },
+    { pubkey: oraclePDA, isSigner: false, isWritable: true },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+  ];
+  if (poolPDA) {
+    keys.push({ pubkey: poolPDA, isSigner: false, isWritable: false });
+  } else {
+    keys.push({ pubkey: adminPDA, isSigner: false, isWritable: false });
+  }
+
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
-    keys: [
-      { pubkey: authority, isSigner: true, isWritable: true },
-      { pubkey: oraclePDA, isSigner: false, isWritable: true },
-      { pubkey: mint, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
-    ],
+    keys,
     data,
   });
   tx.add(ix);

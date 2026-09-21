@@ -3,7 +3,7 @@ use clock_lend::{
     instruction::ClockLendInstruction,
     processor::process_instruction,
     state::{
-        LendingPool, LoanOrder, LoanStatus, PoolType, PriceFeed, UserProfile, ESCROW_SEED, LOAN_SEED,
+        AdminConfig, LendingPool, LoanOrder, LoanStatus, PoolType, PriceFeed, UserProfile, ADMIN_SEED, ESCROW_SEED, LOAN_SEED,
         ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, SKR_MINT, TREASURY_SEED, VAULT_SEED,
     },
 };
@@ -298,6 +298,7 @@ async fn test_bank_borrow_rejects_unauthorized_collateral_mint() {
         loans_originated: 0,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -425,6 +426,7 @@ async fn test_bank_borrow_requires_treasury_when_origination_fee_positive() {
         loans_originated: 0,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -553,6 +555,7 @@ async fn test_bank_borrow_rejects_overwriting_defaulted_loan() {
         loans_originated: 1,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -688,6 +691,7 @@ async fn test_bank_claim_default_sol_loan_requires_skr_slash_destination() {
         max_duration: 86400 * 30,
         loans_originated: 1,
         loans_repaid: 0,
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -878,6 +882,7 @@ async fn test_bank_claim_default_sol_loan_with_skr_slash_success() {
         max_duration: 86400 * 30,
         loans_originated: 1,
         loans_repaid: 0,
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -1076,6 +1081,7 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
         loans_originated: 0,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
 
     program_test.add_account(
@@ -1159,6 +1165,22 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
         },
     );
 
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    program_test.add_account(
+        admin_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&AdminConfig {
+                is_initialized: true,
+                admin: oracle_authority.pubkey(),
+            })
+            .unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
     let (banks_client, payer, recent_blockhash) = program_test.start().await;
 
     // 1. Set Oracle price feed for SKR to $0.05 (50,000 micro-USD) instead of baseline $0.02
@@ -1170,6 +1192,7 @@ async fn test_bank_set_price_feed_and_borrow_dynamic_oracle_success() {
             AccountMeta::new_readonly(SKR_MINT, false),
             AccountMeta::new_readonly(solana_program::system_program::id(), false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new_readonly(admin_pda, false),
         ],
         data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
             price_micro_usd: 50_000, // $0.05
@@ -1283,6 +1306,7 @@ async fn test_bank_borrow_rejects_stale_oracle_price() {
         loans_originated: 0,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: false,
     };
 
     program_test.add_account(
@@ -1509,6 +1533,7 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         loans_originated: 0,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
 
     program_test.add_account(
@@ -1788,6 +1813,7 @@ async fn test_bank_claim_default_slashes_locked_bond() {
         loans_originated: 1,
         loans_repaid: 0,
         name: [0u8; 32],
+        is_oracle_free: true,
     };
     program_test.add_account(
         pool_pda,
@@ -2018,7 +2044,7 @@ async fn test_bank_initialize_pool_rejects_raw_native_sol_liquidity_mint() {
 async fn test_bank_create_p2p_offer_rejects_unreasonable_ltv() {
     let program_id = Pubkey::new_unique();
 
-    let mut program_test = ProgramTest::new(
+    let program_test = ProgramTest::new(
         "clock_lend",
         program_id,
         processor!(process_instruction),
@@ -2099,5 +2125,738 @@ async fn test_bank_create_p2p_offer_rejects_unreasonable_ltv() {
     let res_valid = banks_client.process_transaction(tx_valid).await;
     assert!(res_valid.is_ok(), "P2P offer with reasonable LTV MUST succeed!");
 }
+
+#[tokio::test]
+async fn test_bank_oracle_permissionless_claim_rejected_v2() {
+    let program_id = Pubkey::new_unique();
+    let admin_authority = Keypair::new();
+    let attacker = Keypair::new();
+    let sol_mint = spl_token::native_mint::id();
+
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    let (oracle_pda, _) = Pubkey::find_program_address(&[ORACLE_SEED, sol_mint.as_ref()], &program_id);
+
+    let program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let mut program_test = program_test;
+    program_test.add_account(
+        admin_authority.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        attacker.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Attacker attempts to claim uninitialized global oracle feed without AdminConfig
+    let attacker_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 1_000_000_000_000, // Attacker tries to set SOL = $1,000,000!
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[attacker_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &attacker], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "Attacker MUST NOT be able to claim uninitialized oracle feed without admin authorization!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // 2. Legitimate admin initializes AdminConfig via InitializeAdmin
+    let init_admin_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin_authority.pubkey(), true),
+            AccountMeta::new(admin_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_admin = Transaction::new_with_payer(&[init_admin_ix], Some(&payer.pubkey()));
+    tx_admin.sign(&[&payer, &admin_authority], blockhash);
+    let res_admin = banks_client.process_transaction(tx_admin).await;
+    assert!(res_admin.is_ok(), "AdminConfig initialization MUST succeed!");
+
+    // 3. Attacker tries to call SetPriceFeed supplying AdminConfig PDA but signing as attacker
+    let attacker_ix_with_admin = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(admin_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 1_000_000_000_000,
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_attacker2 = Transaction::new_with_payer(&[attacker_ix_with_admin], Some(&payer.pubkey()));
+    tx_attacker2.sign(&[&payer, &attacker], blockhash);
+    let res_attacker2 = banks_client.process_transaction(tx_attacker2).await;
+    assert!(res_attacker2.is_err(), "Attacker MUST NOT initialize feed using AdminConfig!");
+    match res_attacker2.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // 4. Authorized admin initializes the price feed
+    let valid_feed_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin_authority.pubkey(), true),
+            AccountMeta::new(oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(admin_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 150_000_000, // $150.00 / SOL
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_valid = Transaction::new_with_payer(&[valid_feed_ix], Some(&payer.pubkey()));
+    tx_valid.sign(&[&payer, &admin_authority], blockhash);
+    let res_valid = banks_client.process_transaction(tx_valid).await;
+    assert!(res_valid.is_ok(), "Admin initializing price feed MUST succeed!");
+
+    // 5. Attacker tries to overwrite initialized price feed
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_overwrite = Transaction::new_with_payer(&[
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(oracle_pda, false),
+                AccountMeta::new_readonly(sol_mint, false),
+                AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            ],
+            data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+                price_micro_usd: 1_000_000_000_000,
+                decimals: 9,
+            })
+            .unwrap(),
+        }
+    ], Some(&payer.pubkey()));
+    tx_overwrite.sign(&[&payer, &attacker], blockhash);
+    let res_overwrite = banks_client.process_transaction(tx_overwrite).await;
+    assert!(res_overwrite.is_err(), "Attacker MUST NOT overwrite existing price feed!");
+    match res_overwrite.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_oracle_optionality_exploit_rejected_v3() {
+    let program_id = Pubkey::new_unique();
+    let usdc_mint = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let admin = Keypair::new();
+    let sol_mint = spl_token::native_mint::id();
+
+    let pool_id: u64 = 901;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    let (oracle_pda, _) = Pubkey::find_program_address(&[ORACLE_SEED, sol_mint.as_ref()], &program_id);
+
+    let treasury_usdc = Pubkey::new_unique();
+    let borrower_usdc = Pubkey::new_unique();
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Dynamic pool: is_oracle_free is FALSE, max LTV is 75%
+    let pool_state = LendingPool {
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        liquidity_mint: usdc_mint,
+        vault_pda,
+        total_liquidity: 10_000_000_000,
+        total_borrowed: 0,
+        staked_skr_amount: 0,
+        interest_rate_bps: 800,
+        max_ltv_bps: 7500, // 75% max LTV
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 0,
+        loans_repaid: 0,
+        name: [0u8; 32],
+        is_oracle_free: false,
+    };
+
+    program_test.add_account(
+        pool_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&pool_state).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        vault_pda,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, vault_pda, 10_000_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        treasury_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, treasury_pda, 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        borrower_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, borrower.pubkey(), 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        admin_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&AdminConfig {
+                is_initialized: true,
+                admin: admin.pubkey(),
+            })
+            .unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        admin.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        borrower.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // Admin provisions live oracle for SOL at $50.00 / SOL (50,000,000 micro-USD)
+    let set_price_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new_readonly(admin_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 50_000_000, // $50.00 / SOL
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+    let mut tx_set = Transaction::new_with_payer(&[set_price_ix], Some(&payer.pubkey()));
+    tx_set.sign(&[&payer, &admin], recent_blockhash);
+    banks_client.process_transaction(tx_set).await.unwrap();
+
+    // Borrower wants 100 USDC against 1 SOL collateral.
+    // Baseline ($150) would allow: 1 SOL * 75% = $112.50 >= $100.
+    // Live price ($50) allows: 1 SOL * 75% = $37.50 < $100 (REJECT).
+
+    // Exploit Attempt A: Borrower omits the oracle account to force baseline fallback
+    let loan_id_1: u64 = 101;
+    let (loan_pda_1, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id_1.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda_1, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda_1.as_ref()], &program_id);
+
+    let exploit_ix_omit_oracle = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(loan_pda_1, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(borrower_usdc, false),
+            AccountMeta::new(borrower.pubkey(), true), // native SOL collateral source
+            AccountMeta::new(escrow_pda_1, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(treasury_usdc, false),
+            // Oracle account intentionally omitted!
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id: loan_id_1,
+            borrow_amount: 100_000_000, // 100 USDC
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_exploit1 = Transaction::new_with_payer(&[exploit_ix_omit_oracle], Some(&payer.pubkey()));
+    tx_exploit1.sign(&[&payer, &borrower], blockhash);
+    let res_exploit1 = banks_client.process_transaction(tx_exploit1).await;
+    assert!(res_exploit1.is_err(), "Omitting oracle on dynamic pool MUST fail with InvalidOracleAccount!");
+    match res_exploit1.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidOracleAccount as u32, "Error must be InvalidOracleAccount");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // Exploit Attempt B: Borrower supplies an uninitialized dummy account as oracle
+    let dummy_oracle = Keypair::new();
+    let exploit_ix_uninit_oracle = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(loan_pda_1, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(borrower_usdc, false),
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(escrow_pda_1, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(treasury_usdc, false),
+            AccountMeta::new_readonly(dummy_oracle.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id: loan_id_1,
+            borrow_amount: 100_000_000,
+            collateral_amount: 1_000_000_000,
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_exploit2 = Transaction::new_with_payer(&[exploit_ix_uninit_oracle], Some(&payer.pubkey()));
+    tx_exploit2.sign(&[&payer, &borrower], blockhash);
+    let res_exploit2 = banks_client.process_transaction(tx_exploit2).await;
+    assert!(res_exploit2.is_err(), "Passing uninitialized oracle on dynamic pool MUST fail with InvalidOracleAccount!");
+    match res_exploit2.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidOracleAccount as u32, "Error must be InvalidOracleAccount");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // Attempt C: Borrower supplies live $50 oracle feed with 100 USDC borrow (exceeds 75% LTV at $50/SOL)
+    let borrow_ix_with_oracle = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(loan_pda_1, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(borrower_usdc, false),
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(escrow_pda_1, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(treasury_usdc, false),
+            AccountMeta::new_readonly(oracle_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id: loan_id_1,
+            borrow_amount: 100_000_000, // 100 USDC
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_fail_ltv = Transaction::new_with_payer(&[borrow_ix_with_oracle], Some(&payer.pubkey()));
+    tx_fail_ltv.sign(&[&payer, &borrower], blockhash);
+    let res_fail_ltv = banks_client.process_transaction(tx_fail_ltv).await;
+    assert!(res_fail_ltv.is_err(), "100 USDC borrow against 1 SOL at $50 MUST fail InvalidCollateralRatio!");
+    match res_fail_ltv.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidCollateralRatio as u32, "Error must be InvalidCollateralRatio");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // Legitimate Path: Borrower requests 30 USDC (<= 37.50 USDC allowed) with live $50 oracle feed
+    let valid_borrow_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(loan_pda_1, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(borrower_usdc, false),
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(escrow_pda_1, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(treasury_usdc, false),
+            AccountMeta::new_readonly(oracle_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id: loan_id_1,
+            borrow_amount: 30_000_000, // 30 USDC (well within 75% LTV of $50)
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx_valid = Transaction::new_with_payer(&[valid_borrow_ix], Some(&payer.pubkey()));
+    tx_valid.sign(&[&payer, &borrower], blockhash);
+    let res_valid = banks_client.process_transaction(tx_valid).await;
+    assert!(res_valid.is_ok(), "Borrowing within live oracle valuation MUST succeed! Result: {:?}", res_valid);
+}
+
+#[tokio::test]
+async fn test_bank_oracle_free_pool_baseline_success() {
+    let program_id = Pubkey::new_unique();
+    let usdc_mint = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let sol_mint = spl_token::native_mint::id();
+
+    let pool_id: u64 = 902;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+
+    let loan_id: u64 = 102;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+
+    let treasury_usdc = Pubkey::new_unique();
+    let borrower_usdc = Pubkey::new_unique();
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    // Pool explicitly configured as oracle-free
+    let pool_state = LendingPool {
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        liquidity_mint: usdc_mint,
+        vault_pda,
+        total_liquidity: 10_000_000_000,
+        total_borrowed: 0,
+        staked_skr_amount: 0,
+        interest_rate_bps: 800,
+        max_ltv_bps: 7500, // 75% max LTV
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 0,
+        loans_repaid: 0,
+        name: [0u8; 32],
+        is_oracle_free: true,
+    };
+
+    program_test.add_account(
+        pool_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&pool_state).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        vault_pda,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, vault_pda, 10_000_000_000),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        treasury_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, treasury_pda, 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        borrower_usdc,
+        Account {
+            lamports: 10_000_000,
+            data: token_acct_data(usdc_mint, borrower.pubkey(), 0),
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        borrower.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // Borrow 100 USDC against 1 SOL collateral with NO oracle account provided
+    // In oracle-free pool, baseline $150/SOL is used: 1 SOL * 75% = $112.50 >= 100 USDC -> OK!
+    let borrow_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(borrower_usdc, false),
+            AccountMeta::new(borrower.pubkey(), true),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(treasury_usdc, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 100_000_000, // 100 USDC
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        })
+        .unwrap(),
+    };
+
+    let mut tx = Transaction::new_with_payer(&[borrow_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Borrow on oracle-free pool using baseline price MUST succeed! Result: {:?}", res);
+}
+
+#[tokio::test]
+async fn test_bank_pool_specific_oracle_gating() {
+    let program_id = Pubkey::new_unique();
+    let pool_authority = Keypair::new();
+    let attacker = Keypair::new();
+    let sol_mint = spl_token::native_mint::id();
+
+    let pool_id: u64 = 903;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, pool_authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+    let (pool_oracle_pda, _) = Pubkey::find_program_address(
+        &[ORACLE_SEED, pool_pda.as_ref(), sol_mint.as_ref()],
+        &program_id,
+    );
+
+    let mut program_test = ProgramTest::new(
+        "clock_lend",
+        program_id,
+        processor!(process_instruction),
+    );
+
+    let pool_state = LendingPool {
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: pool_authority.pubkey(),
+        liquidity_mint: Pubkey::new_unique(),
+        vault_pda,
+        total_liquidity: 1_000_000_000,
+        total_borrowed: 0,
+        staked_skr_amount: 0,
+        interest_rate_bps: 800,
+        max_ltv_bps: 7500,
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 0,
+        loans_repaid: 0,
+        name: [0u8; 32],
+        is_oracle_free: false,
+    };
+
+    program_test.add_account(
+        pool_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&pool_state).unwrap(),
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        pool_authority.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        attacker.pubkey(),
+        Account {
+            lamports: 10_000_000_000,
+            data: vec![],
+            owner: solana_program::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+
+    // 1. Attacker attempts to initialize pool-specific oracle
+    let attacker_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(pool_oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(pool_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 999_999_999,
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+
+    let mut tx_attacker = Transaction::new_with_payer(&[attacker_ix], Some(&payer.pubkey()));
+    tx_attacker.sign(&[&payer, &attacker], recent_blockhash);
+    let res_attacker = banks_client.process_transaction(tx_attacker).await;
+    assert!(res_attacker.is_err(), "Non-pool authority MUST NOT initialize pool-specific oracle!");
+    match res_attacker.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::Unauthorized as u32, "Error must be Unauthorized");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+
+    // 2. Legitimate pool authority initializes pool-specific oracle
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let auth_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(pool_authority.pubkey(), true),
+            AccountMeta::new(pool_oracle_pda, false),
+            AccountMeta::new_readonly(sol_mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(pool_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 140_000_000,
+            decimals: 9,
+        })
+        .unwrap(),
+    };
+
+    let mut tx_auth = Transaction::new_with_payer(&[auth_ix], Some(&payer.pubkey()));
+    tx_auth.sign(&[&payer, &pool_authority], blockhash);
+    let res_auth = banks_client.process_transaction(tx_auth).await;
+    assert!(res_auth.is_ok(), "Pool authority initializing pool-specific oracle MUST succeed!");
+}
+
 
 

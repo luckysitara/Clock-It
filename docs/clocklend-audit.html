@@ -1525,7 +1525,14 @@ export const SKR_DEVNET_MINT  = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2
         <li><strong>🟠 Informational 2 — Native SOL Liquidity Pools:</strong> <code>process_initialize_pool</code> explicitly rejects raw Native SOL mints (<code>Pubkey::default()</code> and <code>system_program::ID</code>) with <code>UnsupportedCollateralMint</code>, mandating Wrapped SOL (<code>spl_token::native_mint::id()</code>) and properly creating token vault PDAs for all SPL/WSOL pools.</li>
         <li><strong>🟠 Informational 3 — P2P LTV Sanity Cap:</strong> <code>process_create_p2p_offer</code> now calculates dynamic collateral valuation and enforces a 150% maximum LTV ceiling before account allocation, rejecting uncollateralized spam offers (e.g. 1 lamport asking for 1,000,000 USDC) with <code>InvalidCollateralRatio</code>.</li>
       </ul>
-      <p>All 49 unit, integration, and security tests pass deterministically with zero warnings and zero errors.</p>
+
+      <h3>7. Re-Audit (704b943) Defense: Permissionless Oracle Claim (V2) &amp; Borrower Price Optionality (V3) (54/54 Tests Passing)</h3>
+      <ul class="tight">
+        <li><strong>🔴 Critical — Permissionless SetPriceFeed / Oracle Takeover (V2):</strong> Initial oracle feed creation is strictly gated. Global price feeds (<code>[b"oracle", mint]</code>) require authorization by protocol admin via <code>AdminConfig</code> PDA (<code>[b"admin"]</code>, initialized via new <code>InitializeAdmin</code> instruction #13). Pool-scoped price feeds (<code>[b"oracle", pool, mint]</code>) require authorization by the pool's designated authority. Subsequent price updates strictly require signature from the existing feed authority. First-come permissionless claims by arbitrary callers fail with <code>ClockLendError::Unauthorized</code>.</li>
+        <li><strong>🟠 High — Caller-Optional Oracle / Borrower Picks the Price (V3):</strong> Added <code>is_oracle_free: bool</code> to <code>LendingPool</code> (with full backwards-compatible pack/unpack support). Dynamic pools default to <code>is_oracle_free = false</code>. In dynamic pools, <code>BorrowFromPool</code> strictly mandates a provisioned, initialized, and non-stale oracle account. Omitting the oracle feed or passing an uninitialized dummy account reverts immediately with <code>ClockLendError::InvalidOracleAccount</code>, preventing borrowers from bypassing live market declines (e.g. $50/SOL) to claim the hardcoded $150 baseline. Baseline pricing is strictly reserved for pools explicitly initialized as <code>is_oracle_free = true</code>.</li>
+        <li><strong>Adversarial Test Verification:</strong> Added SVM integration tests in <code>program/tests/bank_integration.rs</code>: <code>test_bank_oracle_permissionless_claim_rejected_v2</code>, <code>test_bank_oracle_optionality_exploit_rejected_v3</code>, <code>test_bank_oracle_free_pool_baseline_success</code>, and <code>test_bank_pool_specific_oracle_gating</code>.</li>
+      </ul>
+      <p>All 54 unit, integration, and security tests pass deterministically with zero compiler warnings and zero errors.</p>
     </div>
   </section>
 
