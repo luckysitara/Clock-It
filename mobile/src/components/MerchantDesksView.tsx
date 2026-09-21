@@ -32,6 +32,7 @@ interface MerchantDesksViewProps {
     maxDays: number,
     initialLiquidity: number
   ) => void;
+  onDepositLiquidity?: (pool: LendingPool, amount: number) => void;
   onNfcBumpCircle: () => void;
 }
 
@@ -45,12 +46,14 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
   onRepayPawnOffer,
   onCancelPawnOffer,
   onCreatePool,
+  onDepositLiquidity,
   onNfcBumpCircle,
 }) => {
   const { colors } = useTheme();
   const [subTab, setSubTab] = useState<'POOLS' | 'PAWNS'>('POOLS');
   const [nfcModal, setNfcModal] = useState<boolean>(false);
   const [isNfcActive, setIsNfcActive] = useState<boolean>(false);
+  const [fundAmount, setFundAmount] = useState<string>('500');
 
   // New desk / pool modal state
   const [createPoolModal, setCreatePoolModal] = useState<boolean>(false);
@@ -337,6 +340,34 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                   >
                     <Text style={[styles.borrowDeskBtnText, { color: colors.text }]}>Borrow from this Desk →</Text>
                   </TouchableOpacity>
+
+                  {onDepositLiquidity && userPubkey && pool.authority === userPubkey && (
+                    <View style={[styles.fundRow, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
+                      <View style={styles.fundInputGroup}>
+                        <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>DEPOSIT USDC</Text>
+                        <TextInput
+                          style={[styles.inputBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder, color: colors.text }]}
+                          value={fundAmount}
+                          onChangeText={setFundAmount}
+                          keyboardType="decimal-pad"
+                          placeholder="500"
+                          placeholderTextColor={colors.textMuted}
+                        />
+                      </View>
+                      <TouchableOpacity
+                        style={[styles.fundDeskBtn, { backgroundColor: colors.primary }]}
+                        onPress={() => {
+                          const amt = parseFloat(fundAmount);
+                          if (!isNaN(amt) && amt > 0) {
+                            onDepositLiquidity(pool, amt);
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.fundDeskBtnText}>Fund Desk</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               );
             })
@@ -1170,6 +1201,31 @@ const styles = StyleSheet.create({
   borrowDeskBtnText: {
     fontSize: 13,
     fontWeight: '700',
+  },
+  fundRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 10,
+    marginTop: 10,
+  },
+  fundInputGroup: {
+    flex: 1,
+  },
+  fundDeskBtn: {
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+  },
+  fundDeskBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#ffffff',
   },
   pawnCard: {
     borderRadius: 20,
