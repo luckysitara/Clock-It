@@ -1,18 +1,3 @@
-// ClockLend — mainnet bootstrap
-// Deploys the program, initializes the admin (ProgramData proof), creates the
-// treasury USDC token account, publishes the SOL (and optionally SKR) price
-// feeds, and optionally creates the first lending desk.
-//
-// PREREQUISITES (see docs/MAINNET_RUNBOOK.md):
-//   1. The deployer wallet holds ~3.5 SOL on mainnet-beta.
-//   2. Set DEPLOYER_KEY env var to the keypair JSON path if it is not
-//      ~/.config/solana/id.json. RECOMMENDED: use a fresh mainnet keypair.
-//
-// Usage:
-//   node scripts/deploy-mainnet.mjs [--skr-price 0.02] [--create-pool]
-//     --skr-price    publish the global SKR feed at this USD price
-//     --create-pool  also create "Seeker Genesis Circle" desk (mainnet USDC)
-//
 import fs from 'fs';
 import {
   Connection, Keypair, PublicKey, Transaction, TransactionInstruction,
@@ -24,6 +9,21 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
 } from '@solana/spl-token';
 import { execSync } from 'child_process';
+
+// Load the repo-root .env (no external deps) so server-side scripts can use
+// SOLANA_RPC_URL / HELIUS_RPC_URL without exporting them manually.
+function loadEnv() {
+  const envPath = new URL('../.env', import.meta.url).pathname;
+  try {
+    for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+      if (m && !(m[1] in process.env)) {
+        process.env[m[1]] = m[2].trim().replace(/^['"]|['"]$/g, '');
+      }
+    }
+  } catch (_e) { /* optional */ }
+}
+loadEnv();
 
 const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -38,7 +38,7 @@ const VAULT_SEED = Buffer.from('vault');
 const ADMIN_SEED = Buffer.from('admin');
 const TREASURY_SEED = Buffer.from('treasury');
 
-const RPC = process.env.MAINNET_RPC || 'https://api.mainnet-beta.solana.com';
+const RPC = process.env.MAINNET_RPC || process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/id.json`;
 const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
 const conn = new Connection(RPC, 'confirmed');

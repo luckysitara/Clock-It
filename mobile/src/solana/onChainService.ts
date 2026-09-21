@@ -44,9 +44,11 @@ export const DEVNET_RPCS = [
   'https://api.devnet.solana.com',
 ];
 
-const HELIUS_API_KEY = process.env.EXPO_PUBLIC_HELIUS_API_KEY;
+const GATEKEEPER_RPC = process.env.EXPO_PUBLIC_HELIUS_GATEKEEPER_RPC_URL;
+const SOLANA_RPC = process.env.EXPO_PUBLIC_SOLANA_RPC_URL;
 export const MAINNET_RPCS = [
-  ...(HELIUS_API_KEY ? [`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`] : []),
+  ...(GATEKEEPER_RPC ? [GATEKEEPER_RPC] : []),
+  ...(SOLANA_RPC ? [SOLANA_RPC] : []),
   'https://solana-rpc.publicnode.com',
   'https://api.mainnet-beta.solana.com',
 ];
@@ -657,6 +659,54 @@ export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usd
   const now = Date.now();
   if (now - lastPriceFetchTime < 120_000) {
     return livePrices;
+  }
+  // Jupiter price API first (configured via EXPO_PUBLIC_JUPITER_API_URL),
+  // CoinGecko as the fallback source.
+  const JUPITER_API_URL = process.env.EXPO_PUBLIC_JUPITER_API_URL;
+  const JUPITER_API_KEY = process.env.EXPO_PUBLIC_JUPITER_API_KEY;
+  const mintIds = [
+    'So11111111111111111111111111111111111111112', // SOL
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', // SKR
+  ].join(',');
+  // Candidate URL shapes: the configured URL may be a bare host, the price
+  // endpoint itself, or a gateway route — try each, take the first success.
+  const vsToken = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const candidates = JUPITER_API_URL
+    ? [
+        `${JUPITER_API_URL.replace(/\/+$/, '')}/price/v2?ids=${mintIds}&vsToken=${vsToken}`,
+        `${JUPITER_API_URL.replace(/\/+$/, '')}?ids=${mintIds}&vsToken=${vsToken}`,
+        `${JUPITER_API_URL.replace(/\/+$/, '')}/price?ids=${mintIds}&vsToken=${vsToken}`,
+      ]
+    : [`https://api.jup.ag/price/v2?ids=${mintIds}&vsToken=${vsToken}`];
+  try {
+    let jupRes: Response | null = null;
+    for (const url of candidates) {
+      const r = await fetch(url, {
+        headers: JUPITER_API_KEY ? { 'x-api-key': JUPITER_API_KEY } : undefined,
+      });
+      if (r.ok) { jupRes = r; break; }
+    }
+    if (jupRes && jupRes.ok) {
+      const data = await jupRes.json();
+      const byId: Record<string, number> = {};
+      for (const [k, v] of Object.entries(data?.data || {})) {
+        byId[k] = Number((v as any)?.price);
+      }
+      if (byId['So11111111111111111111111111111111111111112']) {
+        livePrices.sol = byId['So11111111111111111111111111111111111111112'];
+      }
+      if (byId['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v']) {
+        livePrices.usdc = byId['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'];
+      }
+      if (byId['SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3']) {
+        livePrices.skr = byId['SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3'];
+      }
+      lastPriceFetchTime = now;
+      return livePrices;
+    }
+  } catch (err) {
+    // fall through to CoinGecko
   }
   try {
     const res = await fetch(

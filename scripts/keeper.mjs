@@ -1,19 +1,23 @@
-// ClockLend — price-feed keeper
-// Updates the global SOL (and optionally SKR) PriceFeed PDAs so the 3600-second
-// staleness window never lapses. Run on a schedule (e.g. cron every 15 minutes):
-//
-//   */15 * * * * cd /path/to/lend && node scripts/keeper.mjs --network mainnet-beta >> keeper.log 2>&1
-//
-// Usage:
-//   node scripts/keeper.mjs [--network devnet|mainnet-beta] [--skr-price 0.02] [--sol-price 150.00]
-//     --skr-price   also update the SKR feed at this USD price (skips if omitted)
-//     --sol-price   override the CoinGecko SOL price
-//
 import fs from 'fs';
 import {
   Connection, Keypair, PublicKey, Transaction, TransactionInstruction,
   SystemProgram, SYSVAR_CLOCK_PUBKEY, sendAndConfirmTransaction,
 } from '@solana/web3.js';
+
+// Load the repo-root .env (no external deps) so server-side scripts can use
+// SOLANA_RPC_URL / HELIUS_RPC_URL without exporting them manually.
+function loadEnv() {
+  const envPath = new URL('../.env', import.meta.url).pathname;
+  try {
+    for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+      if (m && !(m[1] in process.env)) {
+        process.env[m[1]] = m[2].trim().replace(/^['"]|['"]$/g, '');
+      }
+    }
+  } catch (_e) { /* optional */ }
+}
+loadEnv();
 
 const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
 const SKR_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
@@ -26,7 +30,9 @@ const network = args.includes('--network') ? args[args.indexOf('--network') + 1]
 const skrPrice = parseFloat(args.includes('--skr-price') ? args[args.indexOf('--skr-price') + 1] : '0');
 const solPriceOverride = parseFloat(args.includes('--sol-price') ? args[args.indexOf('--sol-price') + 1] : '0');
 
-const RPC = network === 'devnet' ? 'https://api.devnet.solana.com' : 'https://api.mainnet-beta.solana.com';
+const RPC = network === 'devnet'
+  ? 'https://api.devnet.solana.com'
+  : process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/id.json`;
 const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
 const conn = new Connection(RPC, 'confirmed');
