@@ -1,16 +1,32 @@
 // Pyth pull-oracle client: fetches verified price updates from Hermes and
-// builds the receiver postUpdate instructions that the program consumes.
-// The program falls back to the admin feed if this fails, so the app degrades
-// gracefully (borrow still works while the keeper feed is fresh).
-import { PublicKey, Keypair, TransactionInstruction, Connection } from '@solana/web3.js';
-import { PythSolanaReceiver } from '@pythnetwork/pyth-solana-receiver';
+// hand-builds the receiver postUpdateAtomic instruction — deliberately WITHOUT
+// the @pythnetwork/pyth-solana-receiver package, whose @coral-xyz/anchor
+// dependency breaks Metro bundling on React Native.
+//
+// Layout sources (verified against the Rust receiver + SDK):
+//   - instruction discriminator sha256("global:post_update_atomic")[..8]
+//   - data = borsh({ vaa: Vec<u8>, merkle_price_update: { message: Vec<u8>,
+//             proof: Vec<[u8;20]> }, treasury_id: u8 })
+//   - accounts = [payer(s,w), guardianSet(r), config(r), treasury(w),
+//             priceUpdateAccount(w), systemProgram(r), writeAuthority(s)]
+//   - PDA seeds: config ["config"], guardian set ["GuardianSet", u32BE(idx)]
+//     (wormhole program), treasury ["treasury", u8 id] (receiver program)
+//
+import { PublicKey, Keypair, TransactionInstruction, Connection, SystemProgram } from '@solana/web3.js';
+import { parseAccumulatorUpdateData } from '@pythnetwork/price-service-sdk';
+import { Buffer } from 'buffer';
 
 export const PYTH_RECEIVER_ID = new PublicKey('rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ');
-export const WORMHOLE_CORE_BRIDGE_ID = new PublicKey('worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth');
+export const WORMHOLE_CORE_BRIDGE_ID = new PublicKey('HDwcJBJXjL9FpJ7UBsYBtaDjsBUhuLCUYoz3zr8SWWaQ');
 
 // Canonical PythNet feed ids (must match the program's pyth.rs constants).
 export const SOL_USD_FEED_ID = '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d';
 export const SKR_USD_FEED_ID = '0x38846ec4d0dbe808091817f5c0d6ab8058e25422348ddf97db52b6c378a93bf9';
+
+const POST_UPDATE_ATOMIC_DISCRIMINATOR = Buffer.from([0x31, 0xac, 0x54, 0xc0, 0xaf, 0xb4, 0x34, 0xea]);
+const POST_UPDATE_ATOMIC_COMPUTE_BUDGET = 170_000;
+const REDUCED_GUARDIAN_SET_SIZE = 5;
+const TREASURY_ID = 0;
 
 export interface PythAttachment {
   instructions: TransactionInstruction[];
@@ -28,60 +44,6 @@ export interface PythAttachment {
 export const PYTH_CANONICAL_SOL_UPDATE_ACCOUNT = new PublicKey(
   '7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE'
 );
-
-/**
- * Fetch fully-verified price updates (base64 VAAs) from the public Hermes
- * endpoint. No API key required.
- */
-export async function fetchPythPriceUpdates(feedIds: string[]): Promise<string[]> {
-  const q = feedIds.map((id) => `ids[]=${encodeURIComponent(id)}`).join('&');
-  const res = await fetch(
-    `https://hermes.pyth.network/v2/updates/price/latest?${q}&encoding=base64`
-  );
-  if (!res.ok) throw new Error(`Pyth Hermes fetch failed: ${res.status}`);
-  const j = await res.json();
-  return j?.binary?.data ?? [];
-}
-
-/**
- * Build the receiver postUpdate instructions for one feed, plus the ephemeral
- * price-update account keypair. The returned account is what the program
- * verifies against the canonical feed id.
- */
-export async function buildPythAttachment(
-  connection: Connection,
-  payer: PublicKey,
-  feedId: string
-): Promise<PythAttachment> {
-  const [vaa] = await fetchPythPriceUpdates([feedId]);
-  if (!vaa) throw new Error('Pyth: no price update returned for feed');
-
-  // The builder wants an Anchor Wallet for rent/treasury accounting; the real
-  // signing happens later via MWA, so a payer shim with no-op signers is fine.
-  const walletShim = {
-    publicKey: payer,
-    signTransaction: async (tx: any) => tx,
-    signAllTransactions: async (txs: any[]) => txs,
-  } as any;
-
-  const receiver = new PythSolanaReceiver({
-    connection,
-    wallet: walletShim,
-    receiverProgramId: PYTH_RECEIVER_ID,
-  });
-  const builder = receiver.newTransactionBuilder({ closeUpdateAccounts: true });
-  await builder.addPostPriceUpdates([vaa]);
-
-  const chunk = builder.transactionInstructions[0];
-  if (!chunk) throw new Error('Pyth: builder produced no instructions');
-
-  return {
-    instructions: chunk.instructions,
-    signers: chunk.signers as Keypair[],
-    priceUpdateAccount: builder.getPriceUpdateAccount(feedId),
-    computeUnits: chunk.computeUnits,
-  };
-}
 
 /** Feed id for a collateral name (program allowlist: SOL or SKR only). */
 export function pythFeedIdForCollateral(collateralName: string): string {
@@ -104,4 +66,124 @@ export async function tryCanonicalSolUpdateAccount(
     // fall through
   }
   return undefined;
+}
+
+/**
+ * Fetch fully-verified price updates (base64 VAAs) from the public Hermes
+ * endpoint. No API key required.
+ */
+export async function fetchPythPriceUpdates(feedIds: string[]): Promise<string[]> {
+  const q = feedIds.map((id) => `ids[]=${encodeURIComponent(id)}`).join('&');
+  const res = await fetch(
+    `https://hermes.pyth.network/v2/updates/price/latest?${q}&encoding=base64`
+  );
+  if (!res.ok) throw new Error(`Pyth Hermes fetch failed: ${res.status}`);
+  const j = await res.json();
+  return j?.binary?.data ?? [];
+}
+
+/** Keep the first n guardian signatures of a wormhole VAA (tx-size limit). */
+function trimSignatures(vaa: Buffer, n: number): Buffer {
+  const current = vaa[5];
+  if (n > current) throw new Error('VAA has fewer signatures than requested');
+  const trimmed = Buffer.concat([
+    vaa.subarray(0, 6 + n * 66),
+    vaa.subarray(6 + current * 66),
+  ]);
+  trimmed[5] = n;
+  return trimmed;
+}
+
+function pdaConfig(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from('config')], PYTH_RECEIVER_ID);
+}
+
+function pdaTreasury(treasuryId: number): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('treasury'), Buffer.from([treasuryId])],
+    PYTH_RECEIVER_ID
+  );
+}
+
+function pdaGuardianSet(index: number): [PublicKey, number] {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32BE(index, 0);
+  return PublicKey.findProgramAddressSync([Buffer.from('GuardianSet'), buf], WORMHOLE_CORE_BRIDGE_ID);
+}
+
+function borshBytes(value: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(value.length, 0);
+  return Buffer.concat([len, value]);
+}
+
+function borshU16Prefixed(value: Buffer): Buffer {
+  const len = Buffer.alloc(2);
+  len.writeUInt16LE(value.length, 0);
+  return Buffer.concat([len, value]);
+}
+
+function borshU16Prefixed20s(items: number[][]): Buffer {
+  const count = Buffer.alloc(2);
+  count.writeUInt16LE(items.length, 0);
+  const body = Buffer.concat(items.map((it) => Buffer.from(it)));
+  return Buffer.concat([count, body]);
+}
+
+/**
+ * Build the receiver postUpdateAtomic instruction for one feed, plus the
+ * ephemeral price-update account keypair. Metro-safe: no anchor imports.
+ */
+export async function buildPythAttachment(
+  _connection: Connection,
+  payer: PublicKey,
+  feedId: string
+): Promise<PythAttachment> {
+  const [vaaB64] = await fetchPythPriceUpdates([feedId]);
+  if (!vaaB64) throw new Error('Pyth: no price update returned for feed');
+
+  const payload = Buffer.from(vaaB64, 'base64');
+  const parsed = parseAccumulatorUpdateData(payload);
+  const innerVaa = Buffer.from(parsed.vaa);
+  const trimmedVaa = trimSignatures(innerVaa, REDUCED_GUARDIAN_SET_SIZE);
+  const update = parsed.updates[0];
+  if (!update) throw new Error('Pyth: no update in accumulator message');
+
+  const guardianSetIndex = trimmedVaa.readUInt32BE(1);
+  const [configPda] = pdaConfig();
+  const [treasuryPda] = pdaTreasury(TREASURY_ID);
+  const [guardianSetPda] = pdaGuardianSet(guardianSetIndex);
+
+  const merkle = Buffer.concat([
+    borshU16Prefixed(Buffer.from(update.message)),
+    borshU16Prefixed20s(update.proof),
+  ]);
+  const data = Buffer.concat([
+    POST_UPDATE_ATOMIC_DISCRIMINATOR,
+    borshBytes(trimmedVaa),
+    merkle,
+    Buffer.from([TREASURY_ID]),
+  ]);
+
+  const priceUpdateKeypair = Keypair.generate();
+  const ix = new TransactionInstruction({
+    programId: PYTH_RECEIVER_ID,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: guardianSetPda, isSigner: false, isWritable: false },
+      { pubkey: configPda, isSigner: false, isWritable: false },
+      { pubkey: treasuryPda, isSigner: false, isWritable: true },
+      { pubkey: priceUpdateKeypair.publicKey, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: priceUpdateKeypair.publicKey, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+
+  return {
+    instructions: [ix],
+    signers: [priceUpdateKeypair],
+    priceUpdateAccount: priceUpdateKeypair.publicKey,
+    computeUnits: POST_UPDATE_ATOMIC_COMPUTE_BUDGET,
+  };
 }
