@@ -17,7 +17,7 @@ use solana_program::system_instruction;
 use crate::{
     error::ClockLendError,
     instruction::ClockLendInstruction,
-    pyth::{try_verify_pyth_price, PythPrice, PYTH_RECEIVER_ID, SKR_MAX_AGE_SECS, SKR_USD_FEED_ID_HEX, SOL_MAX_AGE_SECS, SOL_USD_FEED_ID_HEX},
+    pyth::{try_verify_pyth_price, PythPrice, PYTH_RECEIVER_ID, SKR_MAX_AGE_SECS, SKR_USD_FEED_ID, SOL_MAX_AGE_SECS, SOL_USD_FEED_ID},
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
         ADMIN_SEED, ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
@@ -1203,14 +1203,14 @@ pub fn process_borrow_from_pool(
             // receiver-owned account is validated against the canonical feed
             // id here; a bad account fails the whole instruction.
             if pyth_collateral_price_opt.is_none() {
-                let (feed_hex, max_age) = if is_native_sol {
-                    (SOL_USD_FEED_ID_HEX, SOL_MAX_AGE_SECS)
+                let (feed_id, max_age) = if is_native_sol {
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
                 } else if is_skr {
-                    (SKR_USD_FEED_ID_HEX, SKR_MAX_AGE_SECS)
+                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
                 } else {
-                    (SOL_USD_FEED_ID_HEX, SOL_MAX_AGE_SECS) // unreachable (allowlist)
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS) // unreachable (allowlist)
                 };
-                pyth_collateral_price_opt = Some(try_verify_pyth_price(acc, feed_hex, max_age)?);
+                pyth_collateral_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
             }
         }
     }
@@ -1739,12 +1739,12 @@ pub fn process_create_p2p_offer(
         } else if acc.owner == &PYTH_RECEIVER_ID {
             // Pyth pull-oracle price account for the collateral mint.
             if pyth_price_opt.is_none() {
-                let (feed_hex, max_age) = if is_native_sol {
-                    (SOL_USD_FEED_ID_HEX, SOL_MAX_AGE_SECS)
+                let (feed_id, max_age) = if is_native_sol {
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
                 } else {
-                    (SKR_USD_FEED_ID_HEX, SKR_MAX_AGE_SECS)
+                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
                 };
-                pyth_price_opt = Some(try_verify_pyth_price(acc, feed_hex, max_age)?);
+                pyth_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
             }
         } else if oracle_feed_opt.is_none() && (acc.owner == program_id || acc.data_len() == PriceFeed::LEN) {
             oracle_feed_opt = Some(acc);

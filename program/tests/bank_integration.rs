@@ -4969,14 +4969,6 @@ fn pyth_update_bytes(feed_id: [u8; 32], price: i64, exponent: i32, publish_time:
     v
 }
 
-fn hex_decode_32(hex: &str, out: &mut [u8; 32]) {
-    let s = hex.trim_start_matches("0x");
-    let bytes: Vec<u8> = (0..s.len()).step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect();
-    out.copy_from_slice(&bytes);
-}
-
 struct PythBorrowFixture {
     borrower: Keypair,
     pool_pda: Pubkey,
@@ -5075,11 +5067,9 @@ async fn setup_pyth_borrow(program_id: Pubkey, feed_id: [u8; 32], publish_time: 
 #[tokio::test]
 async fn test_bank_borrow_with_pyth_price_success() {
     // No admin feed is supplied at all: Pyth alone must price the collateral.
-    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
 
     let program_id = Pubkey::new_unique();
-    let mut feed_id = [0u8; 32];
-    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+    let feed_id = clock_lend::pyth::SOL_USD_FEED_ID;
 
     let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, i64::MAX / 2).await;
     let (banks_client, payer, recent_blockhash) = pt.start().await;
@@ -5131,11 +5121,9 @@ async fn test_bank_borrow_with_pyth_price_success() {
 
 #[tokio::test]
 async fn test_bank_borrow_rejects_stale_pyth_price() {
-    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
 
     let program_id = Pubkey::new_unique();
-    let mut feed_id = [0u8; 32];
-    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+    let feed_id = clock_lend::pyth::SOL_USD_FEED_ID;
 
     let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, 0).await; // ancient publish_time
     let (banks_client, payer, recent_blockhash) = pt.start().await;
@@ -5237,11 +5225,9 @@ async fn test_bank_borrow_pyth_enforces_correct_sol_ltv_boundary() {
     // C-1 regression: 1 SOL ($200 via Pyth, 65% LTV => $130 cap). A $130.01
     // borrow must FAIL — the pre-fix scale error (lamports read as 6-decimal
     // units) would have allowed it, so this test pins the lamport scale.
-    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
 
     let program_id = Pubkey::new_unique();
-    let mut feed_id = [0u8; 32];
-    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+    let feed_id = clock_lend::pyth::SOL_USD_FEED_ID;
 
     let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, i64::MAX / 2).await;
     let (banks_client, payer, recent_blockhash) = pt.start().await;
