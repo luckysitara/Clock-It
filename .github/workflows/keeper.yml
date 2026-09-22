@@ -1,0 +1,53 @@
+# ClockLend price keeper — refreshes the on-chain SOL + SKR PriceFeeds from
+# Jupiter so the 3600s staleness window never lapses. No backend required.
+#
+# Required GitHub secrets (Settings -> Secrets and variables -> Actions):
+#   KEEPER_KEYPAIR_B64  base64 of ~/.config/solana/mainnet-keeper.json
+#                      (`base64 -w0 ~/.config/solana/mainnet-keeper.json`)
+#   SOLANA_RPC_URL      mainnet RPC endpoint
+#   JUPITER_API_URL     Jupiter API base (e.g. https://api.jup.ag)
+#   JUPITER_API_KEY     Jupiter API key
+#
+# Notes: scheduled runs are approximate (usually within minutes of the mark)
+# and GitHub pauses schedules after 60 days of repo inactivity.
+
+name: price-keeper
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  keeper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Write keeper keypair
+        env:
+          KEEPER_KEYPAIR_B64: ${{ secrets.KEEPER_KEYPAIR_B64 }}
+        run: |
+          mkdir -p ~/.config/solana
+          echo "$KEEPER_KEYPAIR_B64" | base64 -d > ~/.config/solana/mainnet-keeper.json
+          chmod 600 ~/.config/solana/mainnet-keeper.json
+
+      - name: Write .env (server-side RPC + Jupiter)
+        env:
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          JUPITER_API_URL: ${{ secrets.JUPITER_API_URL }}
+          JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
+        run: |
+          printf 'SOLANA_RPC_URL=%s\nJUPITER_API_URL=%s\nJUPITER_API_KEY=%s\n' \
+            "$SOLANA_RPC_URL" "$JUPITER_API_URL" "$JUPITER_API_KEY" > .env
+
+      - name: Run keeper
+        run: node mobile/scripts/keeper.mjs --network mainnet-beta
