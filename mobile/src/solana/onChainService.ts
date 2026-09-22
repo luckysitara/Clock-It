@@ -1454,7 +1454,13 @@ export async function buildCreatePoolTx(
   // min_duration: i64 (8 bytes)
   // max_duration: i64 (8 bytes)
   // name: [u8; 32]
-  const data = Buffer.alloc(1 + 8 + 1 + 2 + 2 + 8 + 8 + 32);
+  // is_oracle_free: bool (1 byte)
+  //
+  // Explicit, not inferred from `name`. Keep false so the pool requires a live
+  // price feed; true prices collateral from hardcoded baselines and should only
+  // be used for a deliberate oracle-free (devnet / test) pool.
+  const isOracleFree = false;
+  const data = Buffer.alloc(1 + 8 + 1 + 2 + 2 + 8 + 8 + 32 + 1);
   let offset = 0;
   data.writeUInt8(0, offset); offset += 1;
   writeU64LE(BigInt(poolId)).copy(data, offset); offset += 8;
@@ -1466,7 +1472,8 @@ export async function buildCreatePoolTx(
 
   const nameBuf = Buffer.alloc(32);
   Buffer.from(name.slice(0, 32), 'utf-8').copy(nameBuf);
-  nameBuf.copy(data, offset);
+  nameBuf.copy(data, offset); offset += 32;
+  data.writeUInt8(isOracleFree ? 1 : 0, offset);
 
   const liquidityMint = USDC_DEVNET_MINT;
 

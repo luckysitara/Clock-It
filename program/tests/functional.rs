@@ -141,6 +141,7 @@ fn test_instruction_serialization() {
         min_duration: 86400,
         max_duration: 86400 * 30,
         name,
+        is_oracle_free: false,
     };
 
     let serialized = borsh::to_vec(&ix).expect("Serialization failed");

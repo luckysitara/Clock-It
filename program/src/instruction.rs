@@ -20,6 +20,11 @@ pub enum ClockLendInstruction {
         min_duration: i64,
         max_duration: i64,
         name: [u8; 32],
+        /// Whether this pool may price collateral from hardcoded baselines
+        /// instead of requiring a live oracle. Explicit and typed: this is a
+        /// security-relevant policy switch, so it belongs in the instruction
+        /// rather than being inferred from the free-text `name`.
+        is_oracle_free: bool,
     },
 
     /// 1. Deposit liquidity into pool vault
