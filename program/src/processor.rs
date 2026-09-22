@@ -260,12 +260,12 @@ pub fn process_instruction(
             min_duration,
             max_duration,
             name,
+            is_oracle_free,
         } => {
-            // F7: is_oracle_free is an explicit name-prefix convention only —
-            // the hidden trailing-byte channel was dead code (borsh rejects
-            // trailing bytes) and is removed.
-            let is_oracle_free = name.starts_with(b"ORACLE_FREE")
-                || name.starts_with(b"oracle_free");
+            // F7: is_oracle_free is now an explicit typed field on the
+            // instruction. The previous name-prefix convention (and the dead
+            // trailing-byte channel before it) silently coupled a security
+            // policy switch to a free-text display string.
             process_initialize_pool(
                 program_id,
                 accounts,

@@ -55,6 +55,7 @@ async fn test_bank_initialize_pool_success() {
         min_duration: 86400,
         max_duration: 86400 * 30,
         name,
+        is_oracle_free: false,
     })
     .expect("Serialization failed");
 
@@ -128,6 +129,7 @@ async fn test_bank_initialize_pool_rejects_unauthorized_signer() {
         min_duration: 86400,
         max_duration: 86400 * 30,
         name,
+        is_oracle_free: false,
     })
     .expect("Serialization failed");
 
@@ -2214,6 +2216,7 @@ async fn test_bank_initialize_pool_rejects_raw_native_sol_liquidity_mint() {
             min_duration: 86400,
             max_duration: 86400 * 30,
             name: [0u8; 32],
+            is_oracle_free: false,
         }).unwrap(),
     };
 
@@ -2254,6 +2257,7 @@ async fn test_bank_initialize_pool_rejects_raw_native_sol_liquidity_mint() {
             min_duration: 86400,
             max_duration: 86400 * 30,
             name: [0u8; 32],
+            is_oracle_free: false,
         }).unwrap(),
     };
 
