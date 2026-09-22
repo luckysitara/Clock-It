@@ -300,7 +300,7 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
       <View style={[styles.routeCard, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
         <View style={styles.routeHeader}>
           <Text style={[styles.routeTitle, { color: colors.text }]}>
-            {isLoadingPools ? 'Discovering Pools...' : (bestPool?.name || 'Primary Lending Pool')}
+            {isLoadingPools ? 'Discovering Pools...' : (bestPool?.name || 'No lending pools available')}
           </Text>
           <View style={[styles.aprPill, { backgroundColor: colors.badgeBg }]}>
             <Text style={[styles.aprPillText, { color: colors.primary }]}>{effectiveApr.toFixed(1)}% APR</Text>

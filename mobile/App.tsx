@@ -70,6 +70,9 @@ function MainApp() {
   const [activeTab, setActiveTab] = useState<Tab>('BORROW');
   const [transactionNotice, setTransactionNotice] = useState<TransactionNoticeData | null>(null);
   const [integrity, setIntegrity] = useState<DeviceIntegrityResult | null>(null);
+  // Suppresses the auto-relock that otherwise fires when the MWA wallet
+  // authorization backgrounds and re-foregrounds the app right after unlock.
+  const lastUnlockAtRef = useRef<number>(0);
 
   // Auto-lock and hardware integrity check on app launch and background resume
   useEffect(() => {
@@ -94,6 +97,9 @@ function MainApp() {
   };
 
   const checkAppResumeLock = async () => {
+    // Skip the relock when the user unlocked within the last 90 seconds
+    // (covers the wallet-authorization background/foreground bounce).
+    if (Date.now() - lastUnlockAtRef.current < 90_000) return;
     const enabled = await isLockEnabled();
     if (enabled) {
       setLockScreenMode('unlock');
@@ -1137,7 +1143,10 @@ function MainApp() {
     return (
       <SecurityLockScreen
         mode={lockScreenMode}
-        onUnlock={() => setIsLocked(false)}
+        onUnlock={() => {
+          lastUnlockAtRef.current = Date.now();
+          setIsLocked(false);
+        }}
         onCancel={lockScreenMode !== 'unlock' ? () => setIsLocked(false) : undefined}
       />
     );
