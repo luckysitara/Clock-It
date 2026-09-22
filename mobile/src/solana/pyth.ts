@@ -16,7 +16,18 @@ export interface PythAttachment {
   instructions: TransactionInstruction[];
   signers: Keypair[];
   priceUpdateAccount: PublicKey;
+  computeUnits: number;
 }
+
+/**
+ * Pyth's canonical, continuously-cranked SOL/USD price UPDATE account. When
+ * Hermes is unreachable, the client can reference this account directly
+ * (no posting needed) — the program re-verifies it on-chain. Ages observed
+ * 17-54s; the program's SOL freshness window is 120s.
+ */
+export const PYTH_CANONICAL_SOL_UPDATE_ACCOUNT = new PublicKey(
+  '7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE'
+);
 
 /**
  * Fetch fully-verified price updates (base64 VAAs) from the public Hermes
@@ -68,10 +79,29 @@ export async function buildPythAttachment(
     instructions: chunk.instructions,
     signers: chunk.signers as Keypair[],
     priceUpdateAccount: builder.getPriceUpdateAccount(feedId),
+    computeUnits: chunk.computeUnits,
   };
 }
 
 /** Feed id for a collateral name (program allowlist: SOL or SKR only). */
 export function pythFeedIdForCollateral(collateralName: string): string {
   return collateralName.toUpperCase().includes('SOL') ? SOL_USD_FEED_ID : SKR_USD_FEED_ID;
+}
+
+/**
+ * Resolve the canonical on-chain SOL price update account if it is currently
+ * receiver-owned (sanity; the program performs the full verification).
+ */
+export async function tryCanonicalSolUpdateAccount(
+  connection: Connection
+): Promise<PublicKey | undefined> {
+  try {
+    const info = await connection.getAccountInfo(PYTH_CANONICAL_SOL_UPDATE_ACCOUNT);
+    if (info && info.owner.equals(PYTH_RECEIVER_ID)) {
+      return PYTH_CANONICAL_SOL_UPDATE_ACCOUNT;
+    }
+  } catch (_e) {
+    // fall through
+  }
+  return undefined;
 }

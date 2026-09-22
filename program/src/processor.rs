@@ -1232,7 +1232,9 @@ pub fn process_borrow_from_pool(
     // Pyth (verified pull oracle) takes precedence; the admin feed remains the
     // fallback for pools that don't pass a Pyth account.
     let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_collateral_price_opt {
-        (pyth_price.price_micro_usd, 6)
+        // C-1: native SOL collateral is denominated in lamports (9 decimals),
+        // SKR in 6 — the scale must match the collateral, not the feed.
+        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
     } else if let Some(oracle_acc) = collateral_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
@@ -1763,7 +1765,8 @@ pub fn process_create_p2p_offer(
     // Price resolution: Pyth (verified pull oracle) takes precedence when
     // present; otherwise the H-3 fail-closed admin feed is required.
     let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_price_opt {
-        (pyth_price.price_micro_usd, 6)
+        // C-1: same lamports-vs-6-decimal scale rule as the borrow path.
+        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
     } else {
         // H-3: Fail closed when canonical price feed is missing or unprovisioned on value-authorizing paths
         let oracle_acc = oracle_feed_opt.ok_or(ClockLendError::InvalidOracleAccount)?;

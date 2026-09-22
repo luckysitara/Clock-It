@@ -5231,3 +5231,62 @@ async fn test_bank_borrow_rejects_wrong_pyth_feed_id() {
     let res = banks_client.process_transaction(tx).await;
     assert!(res.is_err(), "A Pyth account with a non-canonical feed id MUST be rejected!");
 }
+
+#[tokio::test]
+async fn test_bank_borrow_pyth_enforces_correct_sol_ltv_boundary() {
+    // C-1 regression: 1 SOL ($200 via Pyth, 65% LTV => $130 cap). A $130.01
+    // borrow must FAIL — the pre-fix scale error (lamports read as 6-decimal
+    // units) would have allowed it, so this test pins the lamport scale.
+    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
+
+    let program_id = Pubkey::new_unique();
+    let mut feed_id = [0u8; 32];
+    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+
+    let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, i64::MAX / 2).await;
+    let (banks_client, payer, recent_blockhash) = pt.start().await;
+
+    let loan_id: u64 = 504;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (profile_pda, _) = Pubkey::find_program_address(
+        &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(fx.borrower.pubkey(), true),
+            AccountMeta::new(fx.pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(fx.vault_pda, false),
+            AccountMeta::new(fx.borrower_usdc, false),
+            AccountMeta::new(fx.borrower.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(fx.treasury_tok, false),
+            AccountMeta::new_readonly(fx.pyth_account, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 130_010_000, // $130.01 — just above the $130 cap
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A borrow above the correct 65% LTV cap MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::InvalidCollateralRatio as u32, "Error must be InvalidCollateralRatio");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}

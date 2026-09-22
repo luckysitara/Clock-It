@@ -14,6 +14,7 @@ import * as SecureStore from 'expo-secure-store';
 import {
   buildPythAttachment,
   pythFeedIdForCollateral,
+  tryCanonicalSolUpdateAccount,
   SOL_USD_FEED_ID,
   SKR_USD_FEED_ID,
 } from './pyth';
@@ -933,8 +934,6 @@ export async function buildBorrowTx(
   const [profilePDA] = getProfilePDA(borrower);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // Layout: 1 byte tag (3) + 8 bytes loan_id + 8 bytes borrow_amount + 8 bytes collateral_amount + 8 bytes duration_seconds = 33 bytes
   const data = Buffer.alloc(33);
@@ -962,6 +961,7 @@ export async function buildBorrowTx(
   // receiver postUpdate instructions and pass the verified price account. On any
   // failure the program falls back to the admin price feed, so borrowing still
   // works while that feed is fresh.
+  let pythCu = 0;
   let pythAccount: PublicKey | undefined;
   try {
     const att = await buildPythAttachment(
@@ -972,9 +972,23 @@ export async function buildBorrowTx(
     tx.instructions.unshift(...att.instructions);
     if (att.signers.length > 0) tx.partialSign(...att.signers);
     pythAccount = att.priceUpdateAccount;
+    pythCu = att.computeUnits;
   } catch (err) {
-    console.warn('[Pyth] attach skipped, admin feed fallback:', (err as any)?.message || err);
+    console.warn('[Pyth] attach skipped, fallback:', (err as any)?.message || err);
+    // Hermes unreachable: reference Pyth's canonical cranked SOL account
+    // directly (no posting needed) so SOL borrows stay Pyth-priced.
+    if (isNativeSol) {
+      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
+      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
+    }
   }
+
+  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
+  // (~170k CU) plus the program instructions; budget must precede the body.
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
+  );
 
   const keys: any[] = [
     { pubkey: borrower, isSigner: true, isWritable: true },
@@ -1219,8 +1233,6 @@ export async function buildCreateP2POfferTx(
   const [escrowPDA] = getEscrowPDA(offerPDA);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // Check if asset specifies SOL collateral amount (e.g. "0.5 SOL", "1 SOL") or SKR
   const solMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
@@ -1243,6 +1255,7 @@ export async function buildCreateP2POfferTx(
   const [oraclePDA] = getOraclePDA(oracleMint);
 
   // Pyth pull-oracle (best effort) with the admin feed as the program fallback.
+  let pythCu = 0;
   let pythAccount: PublicKey | undefined;
   try {
     const att = await buildPythAttachment(
@@ -1253,9 +1266,21 @@ export async function buildCreateP2POfferTx(
     tx.instructions.unshift(...att.instructions);
     if (att.signers.length > 0) tx.partialSign(...att.signers);
     pythAccount = att.priceUpdateAccount;
+    pythCu = att.computeUnits;
   } catch (err) {
-    console.warn('[Pyth] offer attach skipped, admin feed fallback:', (err as any)?.message || err);
+    console.warn('[Pyth] offer attach skipped, fallback:', (err as any)?.message || err);
+    if (isNativeSol) {
+      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
+      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
+    }
   }
+
+  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
+  // (~170k CU) plus the program instructions; budget must precede the body.
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
+  );
 
   // ClockLendInstruction::CreateP2POffer (Variant 4):
   // 1 byte tag (4) + 8 bytes offer_id + 8 bytes requested_amount + 8 bytes collateral_amount + 8 bytes interest_offered + 8 bytes duration_seconds = 41 bytes

@@ -39,7 +39,7 @@ pub const SKR_USD_FEED_ID_HEX: &str = "0x38846ec4d0dbe808091817f5c0d6ab8058e2542
 
 /// Per-feed freshness windows. SOL updates every slot (~400ms); SKR is a
 /// low-frequency feed, so it gets a wider window.
-pub const SOL_MAX_AGE_SECS: i64 = 60;
+pub const SOL_MAX_AGE_SECS: i64 = 120;
 pub const SKR_MAX_AGE_SECS: i64 = 300;
 
 /// A Pyth-verified price normalized to micro-USD (1_000_000 = $1.00).
@@ -87,12 +87,21 @@ pub fn try_verify_pyth_price(
             &clock,
             max_age_secs as u64,
             &feed_id,
-            VerificationLevel::Partial { num_signatures: 1 },
+            // The receiver's own Config enforces minimum_signatures = 3 before
+            // writing any account, so this floor matches on-chain reality:
+            // every accepted account carries a genuine, guardian-signed Pyth
+            // price (guardian signatures cannot be forged; feed id + freshness
+            // are checked here on top).
+            VerificationLevel::Partial { num_signatures: 3 },
         )
         .map_err(|_| ClockLendError::StaleOraclePrice)?;
 
-    // 5. Sanity bounds on the price itself.
+    // 5. Sanity bounds on the price and its confidence interval.
     if price.price <= 0 {
+        return Err(ClockLendError::InvalidOracleAccount.into());
+    }
+    if price.conf > price.price as u64 {
+        // Confidence wider than the price itself = unusable measurement.
         return Err(ClockLendError::InvalidOracleAccount.into());
     }
 
@@ -100,10 +109,10 @@ pub fn try_verify_pyth_price(
     let exponent = price.exponent as i64;
     let micro = if exponent >= -6 {
         (price.price as u128)
-            .checked_mul(10u128.pow((exponent + 6) as u32))
+            .checked_mul(10u128.checked_pow((exponent + 6) as u32).ok_or(ClockLendError::AmountOverflow)?)
             .ok_or(ClockLendError::AmountOverflow)?
     } else {
-        (price.price as u128) / 10u128.pow((-exponent - 6) as u32)
+        (price.price as u128) / 10u128.checked_pow((-exponent - 6) as u32).ok_or(ClockLendError::AmountOverflow)?
     };
     let micro_u64 = u64::try_from(micro).map_err(|_| ClockLendError::AmountOverflow)?;
     if micro_u64 == 0 || micro_u64 > 1_000_000_000_000 {
