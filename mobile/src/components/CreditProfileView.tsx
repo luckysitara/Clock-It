@@ -208,28 +208,6 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
         )}
       </View>
 
-      {/* App Appearance & Preferences */}
-      <View style={[styles.section, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-        <Text style={[styles.sectionTitle, { color: colors.text }]}>App Settings & Theme</Text>
-        <View style={styles.prefRow}>
-          <View>
-            <Text style={[styles.prefLabel, { color: colors.text }]}>Appearance Mode</Text>
-            <Text style={[styles.prefSub, { color: colors.textSecondary }]}>
-              Current: {mode === 'dark' ? 'Dark Mode' : 'Light Mode'}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.themeSwitchBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
-            onPress={toggleTheme}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.themeSwitchText, { color: colors.text }]}>
-              {mode === 'dark' ? '☀️ Switch to Light' : '🌙 Switch to Dark'}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
       {/* App Lock & Biometrics (Multi-Method Lock: PIN + Fingerprint/Face ID) */}
       <View style={[styles.section, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
         <View style={styles.secHeaderRow}>
