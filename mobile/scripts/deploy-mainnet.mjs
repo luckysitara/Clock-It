@@ -72,6 +72,12 @@ async function main() {
   const buffer = bufOut.match(/Buffer: (\w+)/)[1];
   console.log('Upgrading program...');
   execSync(`solana program deploy --url mainnet-beta --keypair ${keypairPath} --program-id ${PROGRAM_ID.toBase58()} --buffer ${buffer}`, { stdio: 'inherit' });
+  console.log('Closing the buffer to recover its rent...');
+  try {
+    execSync(`solana program close --url mainnet-beta --keypair ${keypairPath} --buffers ${buffer}`, { stdio: 'inherit' });
+  } catch (e) {
+    console.warn('Buffer close failed (recover manually later):', e?.message || e);
+  }
 
   // 2. InitializeAdmin (sole root = on-chain upgrade authority via ProgramData)
   const [adminPda] = PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);

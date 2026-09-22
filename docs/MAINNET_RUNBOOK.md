@@ -6,8 +6,10 @@ executed** (deployer wallet has 0 mainnet SOL). Follow this checklist in order.
 
 ## 0. Pre-flight
 
-- [ ] **Fund the deployer wallet with ~3.5 SOL on mainnet-beta** (program rent ≈ 2.9 SOL +
-      buffers + tx fees). `solana balance -u m` must show ≥ 3.5.
+- [ ] **Fund the deployer wallet with ~2.0 SOL on mainnet-beta.** Breakdown: program rent
+      ~1.57 SOL (308 KB ProgramData — permanent), buffer ~1.57 SOL (refunded automatically
+      when the deploy script closes it), PDAs + feeds + first desk ~0.02 SOL, fees ~0.005.
+      `solana balance -u m` must show ≥ 2.0.
 - [x] **Fresh mainnet keypairs generated** (`~/.config/solana/`, chmod 600):
       - Deployer (upgrade authority / admin): `5avuk58DjBwBsyWkhgp6efC5WbnUKTFA5iLkbS8Aqv29`
       - Keeper (oracle_authority after `--rotate-oracle`): `HtiDpTkcWDDaQeRLSBvYDdw2sRJb5VvkD7EMvr5JWVzJ`
