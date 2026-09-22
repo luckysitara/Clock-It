@@ -17,6 +17,8 @@ unexpected_cfgs = "allow"
 [dependencies]
 solana-program = "2.2.1"
 borsh = { version = "1.5.7", features = ["derive"] }
+anchor-lang = "1.2.0"
+pyth-solana-receiver-sdk = "2.0.0"
 thiserror = "2.0"
 num-derive = "0.4"
 num-traits = "0.2"

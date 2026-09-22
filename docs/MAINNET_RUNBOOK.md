@@ -39,7 +39,22 @@ This, in order: deploys the program (same id `HAjGxuih…`, upgradeable), calls
 owner = treasury PDA), publishes the global SOL and SKR feeds (Jupiter Price API v3,
 CoinGecko fallback for SOL), and creates the first desk.
 
-## 2. Keeper (mandatory — staleness window is 3600 s)
+## 2. Pricing (Pyth pull oracles — keeper retired)
+
+SOL and SKR are priced by **Pyth pull oracles** (feed ids hardcoded in the program:
+SOL/USD `0xef0d8b6f…` and SKR/USD `0x38846ec4…`). The app fetches verified price
+updates from Hermes (`hermes.pyth.network`, keyless) and attaches them to borrow and
+pawn-creation transactions; the program verifies each update against the canonical
+feed id (owner, discriminator, feed id, guardian verification, freshness 60s/300s).
+No keeper, no admin price key, nothing to schedule.
+
+The admin PriceFeed path remains as an **emergency fallback**: if the Hermes fetch
+fails, the app omits the Pyth account and the program prices from the admin feed
+while it is fresh. `mobile/scripts/keeper.mjs` is kept dormant for that scenario —
+run it manually (or re-add the GitHub Actions workflow) only if you ever need the
+admin-feed path kept alive.
+
+**Deprecated — keeper via GitHub Actions (was Option A)**
 
 **Option A (recommended — no backend): GitHub Actions.** The workflow at
 `.github/workflows/keeper.yml` runs the keeper every 15 minutes for free. Configure four

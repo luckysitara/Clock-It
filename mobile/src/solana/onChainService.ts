@@ -12,6 +12,12 @@ import {
 import { Buffer } from 'buffer';
 import * as SecureStore from 'expo-secure-store';
 import {
+  buildPythAttachment,
+  pythFeedIdForCollateral,
+  SOL_USD_FEED_ID,
+  SKR_USD_FEED_ID,
+} from './pyth';
+import {
   PROGRAM_ID,
   DEVNET_RPC,
   writeU64LE,
@@ -952,23 +958,46 @@ export async function buildBorrowTx(
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
+  // Pyth pull-oracle (best effort): when the Hermes fetch succeeds, prepend the
+  // receiver postUpdate instructions and pass the verified price account. On any
+  // failure the program falls back to the admin price feed, so borrowing still
+  // works while that feed is fresh.
+  let pythAccount: PublicKey | undefined;
+  try {
+    const att = await buildPythAttachment(
+      getConnection('mainnet-beta'),
+      borrower,
+      pythFeedIdForCollateral(collateralName)
+    );
+    tx.instructions.unshift(...att.instructions);
+    if (att.signers.length > 0) tx.partialSign(...att.signers);
+    pythAccount = att.priceUpdateAccount;
+  } catch (err) {
+    console.warn('[Pyth] attach skipped, admin feed fallback:', (err as any)?.message || err);
+  }
+
+  const keys: any[] = [
+    { pubkey: borrower, isSigner: true, isWritable: true },
+    { pubkey: poolPDA, isSigner: false, isWritable: true },
+    { pubkey: loanPDA, isSigner: false, isWritable: true },
+    { pubkey: vaultPDA, isSigner: false, isWritable: true },
+    { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+    { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
+    { pubkey: escrowPDA, isSigner: false, isWritable: true },
+    { pubkey: collateralMint, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: profilePDA, isSigner: false, isWritable: true },
+    { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
+    { pubkey: oraclePDA, isSigner: false, isWritable: false },
+  ];
+  if (pythAccount) {
+    keys.push({ pubkey: pythAccount, isSigner: false, isWritable: false });
+  }
+
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
-    keys: [
-      { pubkey: borrower, isSigner: true, isWritable: true },
-      { pubkey: poolPDA, isSigner: false, isWritable: true },
-      { pubkey: loanPDA, isSigner: false, isWritable: true },
-      { pubkey: vaultPDA, isSigner: false, isWritable: true },
-      { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
-      { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
-      { pubkey: escrowPDA, isSigner: false, isWritable: true },
-      { pubkey: collateralMint, isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: profilePDA, isSigner: false, isWritable: true },
-      { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
-      { pubkey: oraclePDA, isSigner: false, isWritable: false },
-    ],
+    keys,
     data,
   });
   tx.add(ix);
@@ -1213,6 +1242,21 @@ export async function buildCreateP2POfferTx(
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
+  // Pyth pull-oracle (best effort) with the admin feed as the program fallback.
+  let pythAccount: PublicKey | undefined;
+  try {
+    const att = await buildPythAttachment(
+      getConnection('mainnet-beta'),
+      creator,
+      isNativeSol ? SOL_USD_FEED_ID : SKR_USD_FEED_ID
+    );
+    tx.instructions.unshift(...att.instructions);
+    if (att.signers.length > 0) tx.partialSign(...att.signers);
+    pythAccount = att.priceUpdateAccount;
+  } catch (err) {
+    console.warn('[Pyth] offer attach skipped, admin feed fallback:', (err as any)?.message || err);
+  }
+
   // ClockLendInstruction::CreateP2POffer (Variant 4):
   // 1 byte tag (4) + 8 bytes offer_id + 8 bytes requested_amount + 8 bytes collateral_amount + 8 bytes interest_offered + 8 bytes duration_seconds = 41 bytes
   const data = Buffer.alloc(41);
@@ -1235,6 +1279,7 @@ export async function buildCreateP2POfferTx(
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: oraclePDA, isSigner: false, isWritable: false },
       { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
+      ...(pythAccount ? [{ pubkey: pythAccount, isSigner: false, isWritable: false }] : []),
     ],
     data,
   });

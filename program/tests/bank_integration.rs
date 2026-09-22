@@ -4945,3 +4945,289 @@ async fn test_bank_p2p_claim_default_after_grace() {
     let offer_state = P2POffer::unpack_from_slice(&offer_acc.data).unwrap();
     assert_eq!(offer_state.status, OfferStatus::Defaulted, "Offer must be Defaulted");
 }
+
+// ============================================================================
+// Pyth pull-oracle integration (borrow path)
+// ============================================================================
+
+fn pyth_update_bytes(feed_id: [u8; 32], price: i64, exponent: i32, publish_time: i64) -> Vec<u8> {
+    // sha256("account:PriceUpdateV2")[..8] + borsh body:
+    // write_authority(32) | verification_level(Full=1) | price_message | posted_slot(u64)
+    let mut v = Vec::new();
+    v.extend_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
+    v.extend_from_slice(&[0u8; 32]);
+    v.push(1u8);
+    v.extend_from_slice(&feed_id);
+    v.extend_from_slice(&price.to_le_bytes());
+    v.extend_from_slice(&0u64.to_le_bytes());
+    v.extend_from_slice(&exponent.to_le_bytes());
+    v.extend_from_slice(&publish_time.to_le_bytes());
+    v.extend_from_slice(&0i64.to_le_bytes());
+    v.extend_from_slice(&price.to_le_bytes());
+    v.extend_from_slice(&0u64.to_le_bytes());
+    v.extend_from_slice(&0u64.to_le_bytes());
+    v
+}
+
+fn hex_decode_32(hex: &str, out: &mut [u8; 32]) {
+    let s = hex.trim_start_matches("0x");
+    let bytes: Vec<u8> = (0..s.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect();
+    out.copy_from_slice(&bytes);
+}
+
+struct PythBorrowFixture {
+    borrower: Keypair,
+    pool_pda: Pubkey,
+    vault_pda: Pubkey,
+    borrower_usdc: Pubkey,
+    treasury_tok: Pubkey,
+    pyth_account: Pubkey,
+}
+
+async fn setup_pyth_borrow(program_id: Pubkey, feed_id: [u8; 32], publish_time: i64) -> (ProgramTest, PythBorrowFixture) {
+    use clock_lend::pyth::PYTH_RECEIVER_ID;
+
+    let authority = Keypair::new();
+    let borrower = Keypair::new();
+    let usdc_mint = Pubkey::new_unique();
+    let pool_id: u64 = 1;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()],
+        &program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+    let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &program_id);
+
+    let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+    let pool_state = LendingPool {
+        discriminator: LendingPool::DISCRIMINATOR,
+        is_initialized: true,
+        pool_type: PoolType::Individual,
+        authority: authority.pubkey(),
+        liquidity_mint: usdc_mint,
+        vault_pda,
+        total_liquidity: 10_000_000_000,
+        total_borrowed: 0,
+        staked_skr_amount: 0,
+        interest_rate_bps: 800,
+        max_ltv_bps: 6500,
+        min_duration: 86400,
+        max_duration: 86400 * 30,
+        loans_originated: 0,
+        loans_repaid: 0,
+        name: [0u8; 32],
+        is_oracle_free: false, // NOT oracle-free: Pyth must price this pool
+        pool_id,
+        has_custom_oracle: false,
+    };
+    pt.add_account(pool_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&pool_state).unwrap(),
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    });
+    pt.add_account(vault_pda, Account {
+        lamports: 10_000_000,
+        data: token_acct_data(usdc_mint, vault_pda, 10_000_000_000),
+        owner: spl_token::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+    let borrower_usdc = Pubkey::new_unique();
+    pt.add_account(borrower_usdc, Account {
+        lamports: 10_000_000,
+        data: token_acct_data(usdc_mint, borrower.pubkey(), 0),
+        owner: spl_token::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+    let treasury_tok = Pubkey::new_unique();
+    pt.add_account(treasury_tok, Account {
+        lamports: 10_000_000,
+        data: token_acct_data(usdc_mint, treasury_pda, 0),
+        owner: spl_token::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+    let pyth_account = Pubkey::new_unique();
+    pt.add_account(pyth_account, Account {
+        lamports: 10_000_000,
+        data: pyth_update_bytes(feed_id, 200_000_000, -6, publish_time), // $200.00
+        owner: PYTH_RECEIVER_ID,
+        executable: false,
+        rent_epoch: 0,
+    });
+    // Borrower wallet needs lamports for the SOL-collateral system transfer.
+    pt.add_account(borrower.pubkey(), Account {
+        lamports: 2_000_000_000,
+        data: vec![],
+        owner: solana_program::system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    });
+
+    (pt, PythBorrowFixture { borrower, pool_pda, vault_pda, borrower_usdc, treasury_tok, pyth_account })
+}
+
+#[tokio::test]
+async fn test_bank_borrow_with_pyth_price_success() {
+    // No admin feed is supplied at all: Pyth alone must price the collateral.
+    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
+
+    let program_id = Pubkey::new_unique();
+    let mut feed_id = [0u8; 32];
+    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+
+    let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, i64::MAX / 2).await;
+    let (banks_client, payer, recent_blockhash) = pt.start().await;
+
+    let loan_id: u64 = 501;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (profile_pda, _) = Pubkey::find_program_address(
+        &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+
+    // 1 SOL ($200 via Pyth, 65% LTV => $130 cap) borrowing $100 must succeed.
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(fx.borrower.pubkey(), true),
+            AccountMeta::new(fx.pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(fx.vault_pda, false),
+            AccountMeta::new(fx.borrower_usdc, false),
+            AccountMeta::new(fx.borrower.pubkey(), false), // SOL collateral source = wallet
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(fx.treasury_tok, false),
+            AccountMeta::new_readonly(fx.pyth_account, false), // Pyth price account
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 100_000_000, // $100
+            collateral_amount: 1_000_000_000, // 1 SOL
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Borrow priced by Pyth ($200 SOL) MUST succeed! Result: {:?}", res);
+
+    let loan_acc = banks_client.get_account(loan_pda).await.unwrap().unwrap();
+    let loan = LoanOrder::unpack_from_slice(&loan_acc.data).unwrap();
+    assert_eq!(loan.principal_amount, 100_000_000);
+    assert_eq!(loan.collateral_amount, 1_000_000_000);
+}
+
+#[tokio::test]
+async fn test_bank_borrow_rejects_stale_pyth_price() {
+    use clock_lend::pyth::SOL_USD_FEED_ID_HEX;
+
+    let program_id = Pubkey::new_unique();
+    let mut feed_id = [0u8; 32];
+    hex_decode_32(SOL_USD_FEED_ID_HEX, &mut feed_id);
+
+    let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, 0).await; // ancient publish_time
+    let (banks_client, payer, recent_blockhash) = pt.start().await;
+
+    let loan_id: u64 = 502;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (profile_pda, _) = Pubkey::find_program_address(
+        &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(fx.borrower.pubkey(), true),
+            AccountMeta::new(fx.pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(fx.vault_pda, false),
+            AccountMeta::new(fx.borrower_usdc, false),
+            AccountMeta::new(fx.borrower.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(fx.treasury_tok, false),
+            AccountMeta::new_readonly(fx.pyth_account, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 100_000_000,
+            collateral_amount: 1_000_000_000,
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A stale Pyth price MUST be rejected!");
+    match res.unwrap_err() {
+        BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            assert_eq!(code, ClockLendError::StaleOraclePrice as u32, "Error must be StaleOraclePrice");
+        }
+        err => panic!("Unexpected error variant: {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_bank_borrow_rejects_wrong_pyth_feed_id() {
+    let program_id = Pubkey::new_unique();
+    let wrong_feed = [7u8; 32]; // not the canonical SOL feed
+
+    let (mut pt, fx) = setup_pyth_borrow(program_id, wrong_feed, i64::MAX / 2).await;
+    let (banks_client, payer, recent_blockhash) = pt.start().await;
+
+    let loan_id: u64 = 503;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (profile_pda, _) = Pubkey::find_program_address(
+        &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(fx.borrower.pubkey(), true),
+            AccountMeta::new(fx.pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(fx.vault_pda, false),
+            AccountMeta::new(fx.borrower_usdc, false),
+            AccountMeta::new(fx.borrower.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(fx.treasury_tok, false),
+            AccountMeta::new_readonly(fx.pyth_account, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 100_000_000,
+            collateral_amount: 1_000_000_000,
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_err(), "A Pyth account with a non-canonical feed id MUST be rejected!");
+}
