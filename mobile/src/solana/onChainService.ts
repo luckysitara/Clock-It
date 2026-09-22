@@ -1234,7 +1234,7 @@ export async function buildCreateP2POfferTx(
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: oraclePDA, isSigner: false, isWritable: false },
-      { pubkey: USDC_DEVNET_MINT, isSigner: false, isWritable: false },
+      { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
     ],
     data,
   });
@@ -1475,7 +1475,7 @@ export async function buildCreatePoolTx(
   nameBuf.copy(data, offset); offset += 32;
   data.writeUInt8(isOracleFree ? 1 : 0, offset);
 
-  const liquidityMint = USDC_DEVNET_MINT;
+  const liquidityMint = USDC_MAINNET_MINT;
 
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -1669,7 +1669,7 @@ export async function buildDepositLiquidityTx(
 ): Promise<Transaction> {
   const [poolPDA] = getPoolPDA(authority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
-  const userTokenAcc = authorityTokenAccount || getAssociatedTokenAddress(USDC_DEVNET_MINT, authority);
+  const userTokenAcc = authorityTokenAccount || getAssociatedTokenAddress(USDC_MAINNET_MINT, authority);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
