@@ -29,6 +29,9 @@ solana-sdk = "2.2.1"
 [profile.release]
 overflow-checks = true
 opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
 
 [profile.dev]
 overflow-checks = true

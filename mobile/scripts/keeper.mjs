@@ -35,7 +35,9 @@ const solPriceOverride = parseFloat(args.includes('--sol-price') ? args[args.ind
 const RPC = network === 'devnet'
   ? 'https://api.devnet.solana.com'
   : process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
-const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/id.json`;
+// After --rotate-oracle, feeds are signed by the keeper key (the rotated
+// oracle_authority), never by the full admin/upgrade key.
+const keypairPath = process.env.KEEPER_KEY || process.env.ORACLE_KEY || `${process.env.HOME}/.config/solana/mainnet-keeper.json`;
 const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
 const conn = new Connection(RPC, 'confirmed');
 

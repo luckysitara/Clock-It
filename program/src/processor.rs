@@ -17,6 +17,7 @@ use solana_program::system_instruction;
 use crate::{
     error::ClockLendError,
     instruction::ClockLendInstruction,
+    pyth::{try_verify_pyth_price, PythPrice, PYTH_RECEIVER_ID, SKR_MAX_AGE_SECS, SKR_USD_FEED_ID, SOL_MAX_AGE_SECS, SOL_USD_FEED_ID},
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
         ADMIN_SEED, ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
@@ -1171,6 +1172,7 @@ pub fn process_borrow_from_pool(
     let mut treasury_account_opt: Option<&AccountInfo> = None;
     let mut collateral_oracle_opt: Option<&AccountInfo> = None;
     let mut pool_oracle_opt: Option<&AccountInfo> = None;
+    let mut pyth_collateral_price_opt: Option<PythPrice> = None;
 
     // Scan trailing optional accounts
     while let Ok(acc) = next_account_info(account_info_iter) {
@@ -1196,6 +1198,20 @@ pub fn process_borrow_from_pool(
                     treasury_account_opt = Some(acc);
                 }
             }
+        } else if acc.owner == &PYTH_RECEIVER_ID {
+            // Pyth pull-oracle price account for the collateral mint. Any
+            // receiver-owned account is validated against the canonical feed
+            // id here; a bad account fails the whole instruction.
+            if pyth_collateral_price_opt.is_none() {
+                let (feed_id, max_age) = if is_native_sol {
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
+                } else if is_skr {
+                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
+                } else {
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS) // unreachable (allowlist)
+                };
+                pyth_collateral_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
+            }
         }
     }
 
@@ -1213,7 +1229,13 @@ pub fn process_borrow_from_pool(
     }
 
     // Resolve dynamic collateral price & decimals (mandatory unless pool.is_oracle_free)
-    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(oracle_acc) = collateral_oracle_opt {
+    // Pyth (verified pull oracle) takes precedence; the admin feed remains the
+    // fallback for pools that don't pass a Pyth account.
+    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_collateral_price_opt {
+        // C-1: native SOL collateral is denominated in lamports (9 decimals),
+        // SKR in 6 — the scale must match the collateral, not the feed.
+        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
+    } else if let Some(oracle_acc) = collateral_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
             if !feed.is_initialized || feed.price_micro_usd == 0 {
@@ -1704,6 +1726,7 @@ pub fn process_create_p2p_offer(
 
     // Optional accounts: oracle feed account and/or liquidity mint account
     let mut oracle_feed_opt: Option<&AccountInfo> = None;
+    let mut pyth_price_opt: Option<PythPrice> = None;
     let mut liquidity_mint = USDC_DEVNET_MINT;
 
     while let Ok(acc) = next_account_info(account_info_iter) {
@@ -1713,6 +1736,16 @@ pub fn process_create_p2p_offer(
             liquidity_mint = *acc.key;
         } else if *acc.key == USDC_DEVNET_MINT {
             liquidity_mint = *acc.key;
+        } else if acc.owner == &PYTH_RECEIVER_ID {
+            // Pyth pull-oracle price account for the collateral mint.
+            if pyth_price_opt.is_none() {
+                let (feed_id, max_age) = if is_native_sol {
+                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
+                } else {
+                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
+                };
+                pyth_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
+            }
         } else if oracle_feed_opt.is_none() && (acc.owner == program_id || acc.data_len() == PriceFeed::LEN) {
             oracle_feed_opt = Some(acc);
         } else if oracle_feed_opt.is_none() {
@@ -1729,25 +1762,32 @@ pub fn process_create_p2p_offer(
         return Err(ClockLendError::InvalidMint.into());
     }
 
-    // H-3: Fail closed when canonical price feed is missing or unprovisioned on value-authorizing paths
-    let oracle_acc = oracle_feed_opt.ok_or(ClockLendError::InvalidOracleAccount)?;
-    if *oracle_acc.key != expected_oracle_pda || oracle_acc.owner != program_id || oracle_acc.data_is_empty() {
-        return Err(ClockLendError::InvalidOracleAccount.into());
-    }
-    let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
-    if !feed.is_initialized || feed.price_micro_usd == 0 {
-        return Err(ClockLendError::InvalidOracleAccount.into());
-    }
-    if feed.mint != canonical_mint && feed.mint != *collateral_mint.key {
-        return Err(ClockLendError::InvalidOracleAccount.into());
-    }
-    if feed.decimals == 0 || feed.decimals > 18 {
-        return Err(ClockLendError::InvalidOracleAccount.into());
-    }
-    if now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds {
-        return Err(ClockLendError::StaleOraclePrice.into());
-    }
-    let (collateral_price_micro_usd, collateral_decimals) = (feed.price_micro_usd, feed.decimals);
+    // Price resolution: Pyth (verified pull oracle) takes precedence when
+    // present; otherwise the H-3 fail-closed admin feed is required.
+    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_price_opt {
+        // C-1: same lamports-vs-6-decimal scale rule as the borrow path.
+        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
+    } else {
+        // H-3: Fail closed when canonical price feed is missing or unprovisioned on value-authorizing paths
+        let oracle_acc = oracle_feed_opt.ok_or(ClockLendError::InvalidOracleAccount)?;
+        if *oracle_acc.key != expected_oracle_pda || oracle_acc.owner != program_id || oracle_acc.data_is_empty() {
+            return Err(ClockLendError::InvalidOracleAccount.into());
+        }
+        let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
+        if !feed.is_initialized || feed.price_micro_usd == 0 {
+            return Err(ClockLendError::InvalidOracleAccount.into());
+        }
+        if feed.mint != canonical_mint && feed.mint != *collateral_mint.key {
+            return Err(ClockLendError::InvalidOracleAccount.into());
+        }
+        if feed.decimals == 0 || feed.decimals > 18 {
+            return Err(ClockLendError::InvalidOracleAccount.into());
+        }
+        if now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds {
+            return Err(ClockLendError::StaleOraclePrice.into());
+        }
+        (feed.price_micro_usd, feed.decimals)
+    };
 
     let col_scale = 10u128.checked_pow(collateral_decimals as u32).ok_or(ClockLendError::AmountOverflow)?;
     let collateral_value_micro_usd = (collateral_amount as u128)

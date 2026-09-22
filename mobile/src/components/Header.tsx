@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { SolanaNetwork } from '../types';
 
@@ -30,14 +31,13 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Left: Seeker ID User Handle */}
       <TouchableOpacity style={styles.profileButton} onPress={onPressProfile} activeOpacity={0.7}>
         <View style={[styles.avatar, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
-          <Ionicons name="shield-checkmark" size={18} color={colors.primary} />
+          <Image source={require('../../assets/logo.png')} style={styles.logoImg} resizeMode="contain" />
         </View>
         <View>
           <View style={styles.handleRow}>
             <Text style={[styles.handleText, { color: colors.text }]}>{skrHandle}</Text>
             <View style={[styles.verifiedDot, { backgroundColor: colors.primary }]} />
           </View>
-          <Text style={[styles.subtext, { color: colors.textSecondary }]}>Seeker Genesis ID</Text>
         </View>
       </TouchableOpacity>
 
@@ -77,6 +77,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+  },
+  logoImg: {
+    width: 22,
+    height: 22,
   },
   avatar: {
     width: 38,

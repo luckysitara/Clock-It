@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Linking, TextInput, Switch } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Linking, TextInput, Switch, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme/ThemeContext';
 import { UserProfile, WalletAssets } from '../types';
@@ -75,7 +75,7 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
       <View style={[styles.passportCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
         <View style={styles.passportHeader}>
           <View style={[styles.passportAvatar, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
-            <Text style={{ fontSize: 24 }}>📱</Text>
+            <Image source={require('../../assets/logo.png')} style={{ width: 24, height: 24 }} resizeMode="contain" />
           </View>
           <View style={{ flex: 1 }}>
             <View style={styles.handleTouchable}>
@@ -140,14 +140,22 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
           ))}
         </View>
 
-        {onUnstakeSkr && userProfile.stakedSkr > 0 && (
+        {onUnstakeSkr && (
           <TouchableOpacity
-            style={[styles.stakePresetBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder, marginTop: 10 }]}
-            onPress={() => onUnstakeSkr(userProfile.stakedSkr)}
+            style={[
+              styles.stakePresetBtn,
+              { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder, marginTop: 10 },
+              userProfile.stakedSkr === 0 && { opacity: 0.45 },
+            ]}
+            onPress={() => {
+              if (userProfile.stakedSkr > 0) onUnstakeSkr(userProfile.stakedSkr);
+            }}
+            disabled={userProfile.stakedSkr === 0}
             activeOpacity={0.7}
           >
             <Text style={[styles.stakePresetText, { color: '#ff6b6b' }]}>
               ↩ Unstake {userProfile.stakedSkr.toLocaleString()} SKR
+              {userProfile.stakedSkr === 0 ? ' (stake first)' : ''}
             </Text>
           </TouchableOpacity>
         )}
@@ -198,28 +206,6 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
             </Text>
           </TouchableOpacity>
         )}
-      </View>
-
-      {/* App Appearance & Preferences */}
-      <View style={[styles.section, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-        <Text style={[styles.sectionTitle, { color: colors.text }]}>App Settings & Theme</Text>
-        <View style={styles.prefRow}>
-          <View>
-            <Text style={[styles.prefLabel, { color: colors.text }]}>Appearance Mode</Text>
-            <Text style={[styles.prefSub, { color: colors.textSecondary }]}>
-              Current: {mode === 'dark' ? 'Dark Mode' : 'Light Mode'}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.themeSwitchBtn, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}
-            onPress={toggleTheme}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.themeSwitchText, { color: colors.text }]}>
-              {mode === 'dark' ? '☀️ Switch to Light' : '🌙 Switch to Dark'}
-            </Text>
-          </TouchableOpacity>
-        </View>
       </View>
 
       {/* App Lock & Biometrics (Multi-Method Lock: PIN + Fingerprint/Face ID) */}

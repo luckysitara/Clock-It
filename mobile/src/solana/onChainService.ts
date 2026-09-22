@@ -12,6 +12,13 @@ import {
 import { Buffer } from 'buffer';
 import * as SecureStore from 'expo-secure-store';
 import {
+  buildPythAttachment,
+  pythFeedIdForCollateral,
+  tryCanonicalSolUpdateAccount,
+  SOL_USD_FEED_ID,
+  SKR_USD_FEED_ID,
+} from './pyth';
+import {
   PROGRAM_ID,
   DEVNET_RPC,
   writeU64LE,
@@ -927,8 +934,6 @@ export async function buildBorrowTx(
   const [profilePDA] = getProfilePDA(borrower);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // Layout: 1 byte tag (3) + 8 bytes loan_id + 8 bytes borrow_amount + 8 bytes collateral_amount + 8 bytes duration_seconds = 33 bytes
   const data = Buffer.alloc(33);
@@ -952,23 +957,61 @@ export async function buildBorrowTx(
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
+  // Pyth pull-oracle (best effort): when the Hermes fetch succeeds, prepend the
+  // receiver postUpdate instructions and pass the verified price account. On any
+  // failure the program falls back to the admin price feed, so borrowing still
+  // works while that feed is fresh.
+  let pythCu = 0;
+  let pythAccount: PublicKey | undefined;
+  try {
+    const att = await buildPythAttachment(
+      getConnection('mainnet-beta'),
+      borrower,
+      pythFeedIdForCollateral(collateralName)
+    );
+    tx.instructions.unshift(...att.instructions);
+    if (att.signers.length > 0) tx.partialSign(...att.signers);
+    pythAccount = att.priceUpdateAccount;
+    pythCu = att.computeUnits;
+  } catch (err) {
+    console.warn('[Pyth] attach skipped, fallback:', (err as any)?.message || err);
+    // Hermes unreachable: reference Pyth's canonical cranked SOL account
+    // directly (no posting needed) so SOL borrows stay Pyth-priced.
+    if (isNativeSol) {
+      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
+      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
+    }
+  }
+
+  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
+  // (~170k CU) plus the program instructions; budget must precede the body.
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
+  );
+
+  const keys: any[] = [
+    { pubkey: borrower, isSigner: true, isWritable: true },
+    { pubkey: poolPDA, isSigner: false, isWritable: true },
+    { pubkey: loanPDA, isSigner: false, isWritable: true },
+    { pubkey: vaultPDA, isSigner: false, isWritable: true },
+    { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
+    { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
+    { pubkey: escrowPDA, isSigner: false, isWritable: true },
+    { pubkey: collateralMint, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: profilePDA, isSigner: false, isWritable: true },
+    { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
+    { pubkey: oraclePDA, isSigner: false, isWritable: false },
+  ];
+  if (pythAccount) {
+    keys.push({ pubkey: pythAccount, isSigner: false, isWritable: false });
+  }
+
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
-    keys: [
-      { pubkey: borrower, isSigner: true, isWritable: true },
-      { pubkey: poolPDA, isSigner: false, isWritable: true },
-      { pubkey: loanPDA, isSigner: false, isWritable: true },
-      { pubkey: vaultPDA, isSigner: false, isWritable: true },
-      { pubkey: borrowerUsdcAccount, isSigner: false, isWritable: true },
-      { pubkey: borrowerCollateralAccount, isSigner: false, isWritable: true },
-      { pubkey: escrowPDA, isSigner: false, isWritable: true },
-      { pubkey: collateralMint, isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: profilePDA, isSigner: false, isWritable: true },
-      { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
-      { pubkey: oraclePDA, isSigner: false, isWritable: false },
-    ],
+    keys,
     data,
   });
   tx.add(ix);
@@ -1190,8 +1233,6 @@ export async function buildCreateP2POfferTx(
   const [escrowPDA] = getEscrowPDA(offerPDA);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // Check if asset specifies SOL collateral amount (e.g. "0.5 SOL", "1 SOL") or SKR
   const solMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
@@ -1212,6 +1253,34 @@ export async function buildCreateP2POfferTx(
 
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
+
+  // Pyth pull-oracle (best effort) with the admin feed as the program fallback.
+  let pythCu = 0;
+  let pythAccount: PublicKey | undefined;
+  try {
+    const att = await buildPythAttachment(
+      getConnection('mainnet-beta'),
+      creator,
+      isNativeSol ? SOL_USD_FEED_ID : SKR_USD_FEED_ID
+    );
+    tx.instructions.unshift(...att.instructions);
+    if (att.signers.length > 0) tx.partialSign(...att.signers);
+    pythAccount = att.priceUpdateAccount;
+    pythCu = att.computeUnits;
+  } catch (err) {
+    console.warn('[Pyth] offer attach skipped, fallback:', (err as any)?.message || err);
+    if (isNativeSol) {
+      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
+      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
+    }
+  }
+
+  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
+  // (~170k CU) plus the program instructions; budget must precede the body.
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
+  );
 
   // ClockLendInstruction::CreateP2POffer (Variant 4):
   // 1 byte tag (4) + 8 bytes offer_id + 8 bytes requested_amount + 8 bytes collateral_amount + 8 bytes interest_offered + 8 bytes duration_seconds = 41 bytes
@@ -1234,7 +1303,8 @@ export async function buildCreateP2POfferTx(
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: oraclePDA, isSigner: false, isWritable: false },
-      { pubkey: USDC_DEVNET_MINT, isSigner: false, isWritable: false },
+      { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
+      ...(pythAccount ? [{ pubkey: pythAccount, isSigner: false, isWritable: false }] : []),
     ],
     data,
   });
@@ -1475,7 +1545,7 @@ export async function buildCreatePoolTx(
   nameBuf.copy(data, offset); offset += 32;
   data.writeUInt8(isOracleFree ? 1 : 0, offset);
 
-  const liquidityMint = USDC_DEVNET_MINT;
+  const liquidityMint = USDC_MAINNET_MINT;
 
   const ix = new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -1669,7 +1739,7 @@ export async function buildDepositLiquidityTx(
 ): Promise<Transaction> {
   const [poolPDA] = getPoolPDA(authority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
-  const userTokenAcc = authorityTokenAccount || getAssociatedTokenAddress(USDC_DEVNET_MINT, authority);
+  const userTokenAcc = authorityTokenAccount || getAssociatedTokenAddress(USDC_MAINNET_MINT, authority);
 
   const tx = new Transaction();
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
