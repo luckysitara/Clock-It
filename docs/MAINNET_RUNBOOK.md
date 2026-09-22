@@ -7,16 +7,15 @@ prepared but **not executed** (deployer wallet has 0 mainnet SOL). Follow this c
 
 - [ ] **Fund the deployer wallet with ~3.5 SOL on mainnet-beta** (program rent ≈ 2.9 SOL +
       buffers + tx fees). `solana balance -u m` must show ≥ 3.5.
-- [ ] **Key hygiene decision.** The devnet upgrade authority key
-      (`BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re`) is embedded in the mobile app source
-      as a legacy pool-lookup fallback. For mainnet, deploy with a **fresh keypair** that has
-      never lived in any repo:
+- [x] **Fresh mainnet keypairs generated** (`~/.config/solana/`, chmod 600):
+      - Deployer (upgrade authority / admin): `5avuk58DjBwBsyWkhgp6efC5WbnUKTFA5iLkbS8Aqv29`
+      - Keeper (oracle_authority after `--rotate-oracle`): `HtiDpTkcWDDaQeRLSBvYDdw2sRJb5VvkD7EMvr5JWVzJ`
       ```bash
-      solana-keygen new --outfile ~/.config/solana/mainnet-deployer.json
       export DEPLOYER_KEY=~/.config/solana/mainnet-deployer.json
+      export ORACLE_KEY=~/.config/solana/mainnet-keeper.json
       ```
       The program derives the admin from the **on-chain upgrade authority** (no hardcoded
-      key since F3), so a fresh key works cleanly.
+      key since F3), so the fresh key works cleanly.
 - [ ] **SKR price source — RESOLVED.** SKR is listed on Jupiter with a real market
       (jup.ag/tokens/SKRbvo6Gf…, ~$0.021 at last check, ~$766K liquidity). The deploy
       script seeds the SKR feed from Jupiter's Price API v3 automatically; the keeper
@@ -29,7 +28,7 @@ prepared but **not executed** (deployer wallet has 0 mainnet SOL). Follow this c
 ```bash
 cd /home/rootkit/lend
 export DEPLOYER_KEY=~/.config/solana/mainnet-deployer.json
-node mobile/scripts/deploy-mainnet.mjs --create-pool
+node mobile/scripts/deploy-mainnet.mjs --create-pool --rotate-oracle
 ```
 
 This, in order: deploys the program (same id `HAjGxuih…`, upgradeable), calls
@@ -41,7 +40,7 @@ optionally the SKR feed, and optionally the first desk.
 
 ```bash
 crontab -e
-# */15 * * * * cd /home/rootkit/lend && DEPLOYER_KEY=~/.config/solana/mainnet-deployer.json node scripts/keeper.mjs --network mainnet-beta --skr-price 0.02 >> keeper.log 2>&1
+# */15 * * * * KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs --network mainnet-beta >> keeper.log 2>&1
 ```
 
 If the keeper stops for >1 h, all borrows revert with `StaleOraclePrice` (fail-closed, no
