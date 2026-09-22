@@ -41,13 +41,21 @@ CoinGecko fallback for SOL), and creates the first desk.
 
 ## 2. Keeper (mandatory — staleness window is 3600 s)
 
+**Option A (recommended — no backend): GitHub Actions.** The workflow at
+`.github/workflows/keeper.yml` runs the keeper every 15 minutes for free. Configure four
+repo secrets (Settings → Secrets and variables → Actions):
+`KEEPER_KEYPAIR_B64` (`base64 -w0 ~/.config/solana/mainnet-keeper.json`), `SOLANA_RPC_URL`,
+`JUPITER_API_URL`, `JUPITER_API_KEY`. Trigger manually once via the Actions tab to verify.
+
+**Option B (server): plain cron** —
 ```bash
 crontab -e
-# */15 * * * * cd /home/rootkit/lend && KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs --network mainnet-beta >> keeper.log 2>&1
+# */15 * * * * KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs --network mainnet-beta >> keeper.log 2>&1
 ```
 
 If the keeper stops for >1 h, all borrows revert with `StaleOraclePrice` (fail-closed, no
-loss). A missing SKR feed blocks SKR-collateral borrows only.
+loss). A missing SKR feed blocks SKR-collateral borrows only. GitHub schedules are
+approximate (usually within minutes) and pause after 60 days of repo inactivity.
 
 ## 3. Verify (after deploy)
 
