@@ -41,7 +41,8 @@ const ADMIN_SEED = Buffer.from('admin');
 const TREASURY_SEED = Buffer.from('treasury');
 
 const RPC = process.env.MAINNET_RPC || process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
-const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/id.json`;
+const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/mainnet-deployer.json`;
+const keeperKeyPath = process.env.ORACLE_KEY || `${process.env.HOME}/.config/solana/mainnet-keeper.json`;
 const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
 const conn = new Connection(RPC, 'confirmed');
 
@@ -53,6 +54,7 @@ async function main() {
   const args = process.argv.slice(2);
   const skrPrice = parseFloat(args[args.indexOf('--skr-price') + 1] || '0');
   const createPool = args.includes('--create-pool');
+  const rotateOracle = args.includes('--rotate-oracle');
 
   const balance = await conn.getBalance(keypair.publicKey);
   console.log(`Deployer ${keypair.publicKey.toBase58()} balance: ${balance / 1e9} SOL`);
@@ -86,6 +88,30 @@ async function main() {
     data: Buffer.from([13]), // InitializeAdmin (tag 13)
   })), [keypair], { commitment: 'confirmed' });
   console.log(`Admin initialized: ${adminPda.toBase58()}`);
+
+  // 2b. Optional: rotate the oracle authority to a separate, lower-privilege
+  // keeper key so the price keeper never needs the full admin/upgrade key.
+  // InitializeAdmin's rotation is authorized by the upgrade-authority proof
+  // above; trailing accounts [new_admin, new_oracle] set the roles.
+  if (rotateOracle) {
+    const keeperPubkey = Keypair.fromSecretKey(
+      new Uint8Array(JSON.parse(fs.readFileSync(keeperKeyPath, 'utf8')))
+    ).publicKey;
+    console.log(`Rotating oracle_authority to keeper key ${keeperPubkey.toBase58()}...`);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: adminPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: programDataPda, isSigner: false, isWritable: false },
+        { pubkey: keypair.publicKey, isSigner: false, isWritable: false }, // keep admin
+        { pubkey: keeperPubkey, isSigner: false, isWritable: false },     // new oracle authority
+      ],
+      data: Buffer.from([13]), // InitializeAdmin (rotation)
+    })), [keypair], { commitment: 'confirmed' });
+    console.log('oracle_authority rotated. Keeper may sign feeds with the keeper key only.');
+  }
 
   // 3. Create the treasury USDC token account (owner = treasury PDA)
   const [treasuryPda] = PublicKey.findProgramAddressSync([TREASURY_SEED], PROGRAM_ID);
