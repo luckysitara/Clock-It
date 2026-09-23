@@ -1,225 +1,213 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ClockLend — Full-Stack Re-Audit v4 (2026-09-21, round-3 remediation)</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClockLend — Round-8 Audit Report (2026-09-23)</title>
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#c9d1d9; --dim:#8b949e;
-          --crit:#ff4d4d; --high:#ff9f43; --med:#f5d76e; --low:#57c8ff; --ok:#3fb950; }
-  * { box-sizing:border-box; }
-  body { background:var(--bg); color:var(--text); font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;
-         margin:0; padding:32px 16px; }
-  .wrap { max-width:980px; margin:0 auto; }
-  h1 { font-size:26px; margin:0 0 4px; }
-  h2 { font-size:19px; margin:34px 0 10px; border-bottom:1px solid var(--border); padding-bottom:6px; }
-  .sub { color:var(--dim); margin-bottom:24px; }
-  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:18px 0; }
-  .score { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px; text-align:center; }
-  .score b { display:block; font-size:28px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:10px 0; }
-  .sev { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.6px; padding:2px 8px;
-         border-radius:10px; margin-right:8px; vertical-align:2px; }
-  .crit { background:#3d0f0f; color:var(--crit); border:1px solid #7a1f1f; }
-  .high { background:#3a2a0f; color:var(--high); border:1px solid #7a5a1f; }
-  .med  { background:#33300f; color:var(--med); border:1px solid #6b651f; }
-  .low  { background:#0f2c3a; color:var(--low); border:1px solid #1f5a7a; }
-  .file { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:var(--dim); }
-  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; background:#1f2530;
-         padding:1px 5px; border-radius:4px; }
-  table { border-collapse:collapse; width:100%; margin:8px 0; font-size:14px; }
-  th, td { border:1px solid var(--border); padding:6px 10px; text-align:left; vertical-align:top; }
-  th { background:#1c2230; }
-  .fix { border-left:3px solid var(--ok); padding-left:10px; margin:8px 0 0; }
-  .fix b { color:var(--ok); }
-  .v-ok { color:var(--ok); font-weight:700; }
-  .v-no { color:var(--crit); font-weight:700; }
-  .v-part { color:var(--high); font-weight:700; }
-  .poc { color:var(--med); font-size:12px; font-weight:700; letter-spacing:.4px; }
+  :root { --bg:#0C1435; --card:#141d47; --text:#e8ecff; --muted:#9aa3cc; --crit:#ff5f6d; --high:#ffb347; --med:#ffd97d; --low:#7fd8ff; --ok:#4ade80; }
+  * { box-sizing: border-box; }
+  body { background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, sans-serif; margin:0; padding:2rem 1rem; line-height:1.5; }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size:1.5rem; margin-bottom:.25rem; }
+  h2 { font-size:1.15rem; margin-top:2rem; border-bottom:1px solid #2a3568; padding-bottom:.4rem; }
+  .sub { color:var(--muted); margin-bottom:1.5rem; }
+  .scores { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+  .score { background:var(--card); border-radius:10px; padding:1rem 1.25rem; min-width:180px; }
+  .score .grade { font-size:2rem; font-weight:700; }
+  .score .label { color:var(--muted); font-size:.85rem; }
+  .badge { display:inline-block; padding:.15rem .6rem; border-radius:999px; font-size:.75rem; font-weight:600; letter-spacing:.03em; }
+  .crit { background:rgba(255,95,109,.15); color:var(--crit); border:1px solid rgba(255,95,109,.4); }
+  .high { background:rgba(255,179,71,.15); color:var(--high); border:1px solid rgba(255,179,71,.4); }
+  .med  { background:rgba(255,217,125,.15); color:var(--med); border:1px solid rgba(255,217,125,.4); }
+  .low  { background:rgba(127,216,255,.15); color:var(--low); border:1px solid rgba(127,216,255,.4); }
+  .ok   { background:rgba(74,222,128,.15); color:var(--ok); border:1px solid rgba(74,222,128,.4); }
+  .finding { background:var(--card); border-radius:10px; padding:1rem 1.25rem; margin:.75rem 0; }
+  .finding h3 { margin:.25rem 0 .4rem; font-size:1rem; }
+  .finding .meta { color:var(--muted); font-size:.8rem; font-family:ui-monospace, monospace; margin-bottom:.4rem; }
+  .finding p { margin:.35rem 0; font-size:.92rem; }
+  .fix { background:#0f1738; border-left:3px solid var(--low); border-radius:6px; padding:.5rem .75rem; font-size:.85rem; }
+  .fix code, .finding code { font-family:ui-monospace, monospace; font-size:.82rem; }
+  .verified { color:var(--ok); font-size:.8rem; }
+  table { border-collapse: collapse; width:100%; font-size:.88rem; }
+  th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid #2a3568; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  code { font-family:ui-monospace, monospace; }
+  a { color:#8fb4ff; }
 </style>
 </head>
 <body>
 <div class="wrap">
+<h1>ClockLend — Round-8 Audit Report</h1>
+<div class="sub">2026-09-23 · post-pull (merge <code>551a2d3</code> + <code>67d2ad7</code> + <code>b0d42fd</code>) · 3 independent fresh-eyes auditors (program / mobile / ops) + main-loop verification · all criticals &amp; highs verified against source, live chain, or local validator</div>
 
-<h1>🔒 ClockLend — Full-Stack Re-Audit v4 (round-3 remediation)</h1>
-<div class="sub">Native Rust program (3,096-line processor, 15 instructions) + React Native app · 2026-09-21 · commit <code>7a26366</code><br>
-Method: line-by-line review + three independent passes (adversarial exploit hunt, formal invariant analysis, mobile re-audit) + ~15 executable solana-program-test probes + live devnet inspection + vendored-runtime source verification.</div>
-
-<div class="grid">
-  <div class="score"><b style="color:var(--med)">C</b>Program security (source)</div>
-  <div class="score"><b style="color:var(--med)">C+</b>Program quality</div>
-  <div class="score"><b style="color:var(--high)">D+</b>Mobile security</div>
-  <div class="score"><b style="color:var(--high)">D+</b>Mobile quality</div>
+<div class="scores">
+  <div class="score"><div class="grade" style="color:var(--high)">B−</div><div class="label">Program security</div></div>
+  <div class="score"><div class="grade" style="color:var(--med)">C+</div><div class="label">Program quality/tests</div></div>
+  <div class="score"><div class="grade" style="color:var(--crit)">D+</div><div class="label">Mobile security</div></div>
+  <div class="score"><div class="grade" style="color:var(--crit)">D+</div><div class="label">Mobile quality</div></div>
+  <div class="score"><div class="grade" style="color:var(--crit)">D</div><div class="label">Deploy tooling</div></div>
+  <div class="score"><div class="grade" style="color:var(--crit)">FALSE</div><div class="label">ready_for_mainnet</div></div>
 </div>
 
-<div class="card">
-  <b>Verdict: the program is now structurally sound — one economic-enforcement break remains. Not mainnet-ready.</b>
-  <ul>
-    <li>The formal pass <b>PROVED</b> with executable probes: type dispatch, the full state machine (including
-    the new repay-in-grace edge), token conservation to the lamport, the complete authorization matrix,
-    arithmetic bounds, all PDA derivations + signer bindings, oracle staleness/mint/bounds on both paths,
-    and cross-instruction timing. The pool-lending core is genuinely solid.</li>
-    <li>All five v3 highs plus C-1 are <b>verified fixed</b>. The remaining program defects are one
-    <b>HIGH</b> (SKR-collateral liquidation is unreachable — the default collateral class is
-    unenforceable, probe-verified by two auditors independently), one dead legacy-offer migration, and a
-    set of mediums (hardcoded admin root, dead ProgramData branch, un-allowlisted P2P mint).</li>
-    <li>Deployment happened again (302 KB ELF live), but the mobile client is still one program revision
-    behind: two byte-offset bugs make every P2P repay and every non-pool-1 loan repay fail, and the live
-    pools' <code>liquidity_mint</code> is mainnet USDC (<code>EPjFWdd5…</code>) while the client
-    hardcodes the devnet mint.</li>
-  </ul>
-</div>
+<h2>Headline</h2>
+<p>The <strong>program survived the merge intact</strong>: all six round-7 fixes are present, 83/83 tests pass, and the hand-rolled PriceUpdateV2 parser was validated byte-exact against a live mainnet account. The hardening in <code>67d2ad7</code> is real (Full-only verification, +60s future-skew bound).</p>
+<p>But <strong>the client oracle path and the mainnet bootstrap are both broken</strong>: the mobile Pyth attachment can never produce a valid transaction, and the deploy script cannot run its first mainnet deploy (missing program keypair) nor create the first pool (62-byte payload where 63 are required).</p>
 
-<h2>1 · v3 findings — remediation verification (3 auditors + probes)</h2>
+<h2>Merge-provenance verdict</h2>
 <table>
-  <tr><th>v3 finding</th><th>Verdict</th><th>Evidence</th></tr>
-  <tr><td>C-1 P2P principal mint unbound (zero-cost collateral theft)</td><td class="v-ok">FIXED</td><td><code>liquidity_mint</code> field (state.rs:241), creator-declared, enforced in fund (1852-1856) and repay (2193-2197). The worthless-token funding attack is dead.</td></tr>
-  <tr><td>H-1 P2P repay blocked in grace</td><td class="v-ok">FIXED</td><td><code>Funded | InGracePeriod</code> accepted (2155-2164), blocked only after grace expiry. Probe E8 + a real bank test.</td></tr>
-  <tr><td>H-2 ClaimDefault silent no-op stranding collateral</td><td class="v-ok">FIXED</td><td>Token program + treasury required up front; terminal status written <b>after</b> transfers (2697-2701, 2781-2783). The stranding path now reverts.</td></tr>
-  <tr><td>H-3 P2P oracle droppable to baselines</td><td class="v-ok">FIXED</td><td>Canonical feed PDA mandatory, fully re-validated (1679-1697); no baseline fallback remains.</td></tr>
-  <tr><td>H-4 SKR bond orphaned on claim</td><td class="v-ok">FIXED</td><td>Profile mandatory when a bond exists (2633-2634); slash requires the escrow; release after the slash block (2688-2691).</td></tr>
-  <tr><td>H-5 Dust bricks CancelP2POffer</td><td class="v-ok">FIXED</td><td>Full escrow balance drained before <code>close_account</code> (2944-2982).</td></tr>
-  <tr><td>M-1 Admin offset / rotation / oracle_authority</td><td class="v-part">PARTIAL</td><td>Rotation added (812-832) ✓; <code>oracle_authority</code> enforced (936, 970) ✓. But: hardcoded <code>UPGRADE_AUTHORITY</code> root remains (F3); the new 16..48 ProgramData branch is <b>dead code</b> — the true layout is metadata = 45 B = 4 + 8 + <b>1-byte</b> tag + 32, authority at 13..45 (verified in vendored source: <code>size_of_programdata_metadata() == 45</code>). The original 13..45 branch was correct all along; the new branch fires only with probability ~2⁻²⁴ and the wrong comment (<code>1u32</code>) should be deleted.</td></tr>
-  <tr><td>M-2 Staleness policy on pool path</td><td class="v-part">FIXED (read) / fixed-3600 (write)</td><td>Both paths honor <code>feed.max_staleness_seconds</code> (1191, 1232, 1694); but <code>set_price_feed</code> always writes 3600 (1013) — not configurable. A 1-hour keeper outage halts all borrows.</td></tr>
-  <tr><td>M-3 Legacy migration</td><td class="v-part">POOL WORKS / OFFER DEAD</td><td>182-byte pools parse+pack via the legacy path (the 3 live pools are readable). The legacy <i>offer</i> branch slices <code>[..168]</code> for a 170-byte struct → always <code>InvalidAccountData</code> (F2). No live legacy offers exist, so no live funds are frozen.</td></tr>
+<tr><th>Round-7 fix</th><th>Status</th><th>Evidence</th></tr>
+<tr><td>C-1 1000× lamport mispricing</td><td class="badge ok">PRESENT</td><td><code>processor.rs:1234-1237, 1767-1769</code>; regression test pins $130 LTV boundary</td></tr>
+<tr><td>H-1 guardian floor</td><td class="badge ok">PRESENT (stricter)</td><td><code>pyth.rs:154-167</code> now rejects Partial at every count (Full-only)</td></tr>
+<tr><td>H-3 CU sizing/ordering</td><td class="badge ok">PRESENT</td><td><code>onChainService.ts:986-991</code>; budget unshifted to index 0</td></tr>
+<tr><td>M-2/3 canonical SOL fallback + 120s</td><td class="badge ok">PRESENT</td><td>Canonical account verified on both clusters: Full, fresh (55s/93s)</td></tr>
+<tr><td>M-4 conf ≤ price</td><td class="badge ok">PRESENT</td><td><code>pyth.rs:204-207</code></td></tr>
+<tr><td>L-1 checked_pow</td><td class="badge ok">PRESENT</td><td><code>pyth.rs:213,216</code>; <code>processor.rs:1321-1322</code></td></tr>
 </table>
 
-<h2>2 · Program — remaining/new findings (all probe-verified)</h2>
+<h2>Critical findings</h2>
 
-<div class="card">
-  <span class="sev high">HIGH</span><b>F1 · SKR-collateral loans can never be liquidated — the default collateral class is unenforceable</b>
-  <span class="poc">POC VERIFIED ×2 INDEPENDENT AUDITORS</span>
-  <div class="file">processor.rs:2427-2438, 2492-2508, 2551-2586</div>
-  <p>In <code>ClaimDefault</code>, any treasury-owned token account of the <b>SKR mint</b> is captured
-  by the slash-destination classifier (2431-2434), so <code>treasury_collateral_opt</code> can only ever
-  hold a treasury account of a <i>different</i> mint. The 5% margin transfer then dies: raw treasury PDA
-  → <code>InvalidAccountData</code>; non-SKR treasury account → <code>MintMismatch</code>; treasury-owned
-  SKR account → classifier claims it → <code>InvalidTreasuryAccount</code>. Executed traces: all three
-  configurations revert; the loan stays <code>InGracePeriod</code>; the SKR stays frozen in escrow. Only
-  <code>collateral_amount &lt; 20</code> (margin rounds to 0) ever succeeds. SOL collateral works
-  (control probe).</p>
-  <div class="scenario">Borrower takes an SKR-collateral loan (the app's default collateral), never
-  repays → the pool authority cannot seize anything even after grace expires. De facto unsecured lending
-  for the default collateral class; <code>total_borrowed</code> never unwinds.</div>
-  <div class="fix"><b>Fix:</b> classify the treasury by <b>role</b>, not mint — accept an explicit
-  treasury account validated as <code>owner == treasury PDA &amp;&amp; mint == collateral_mint &amp;&amp;
-  key != destination</code>, and exclude it from slash-destination selection (or keep the
-  full-transfer branch when treasury == destination). Add a real SPL-collateral claim test — the gap
-  that let this survive: every existing claim test uses <code>collateral_mint: Pubkey::default()</code>.</div>
+<div class="finding">
+  <span class="badge crit">CRITICAL</span> <span class="badge crit">C-1</span>
+  <h3>Pyth ephemeral signer is never signed — borrow &amp; create-offer fail 100% whenever Hermes is reachable</h3>
+  <div class="meta">mobile/src/solana/onChainService.ts:971-975 · seekerWallet.ts:256-258</div>
+  <p><code>tx.partialSign(...att.signers)</code> runs on a <code>new Transaction()</code> with no <code>recentBlockhash</code> → web3.js throws <code>Transaction recentBlockhash required</code> before signing. The <code>unshift</code> happened first, so the phantom <code>postUpdateAtomic</code> instruction stays in the tx; the catch swallows the error; the instruction declares the ephemeral price-update keypair as a required signer nobody ever signs → tx rejected at signature verification. Even if it had signed, <code>signAndSendSeekerTransaction</code> overwrites <code>recentBlockhash</code>/<code>feePayer</code> <em>after</em> signing, invalidating the signature anyway.</p>
+  <p>Today this is <em>inert</em> only because Hermes v2 returns 401 without an API key, so the attach throws before the unshift. The moment an API key is added, every borrow and pawn creation breaks — the exact inverse of the intended fail-open design.</p>
+  <div class="fix">Fix: set blockhash/feePayer <em>before</em> attaching signers; make <code>signAndSendSeekerTransaction</code> only fill them if unset (never overwrite a signed blockhash); move the <code>unshift</code> after a successful <code>partialSign</code>.</div>
+  <div class="verified">✔ VERIFIED — code path reproduced; web3.js throw behavior confirmed; overwrite confirmed at seekerWallet.ts:256-258</div>
 </div>
 
-<div class="card">
-  <ul>
-    <li><b>F2 (MED) — legacy 170-byte offers are permanently bricked.</b> The migration slice is
-    <code>[..168]</code> for a 170-byte struct → fund/repay/claim/cancel all fail closed forever;
-    <code>pack_into_slice</code> requires ≥ 202. No migration instruction exists. No live legacy offers
-    today (zero on-chain), but the claimed migration does not work.</li>
-    <li><b>F3 (MED) — hardcoded <code>UPGRADE_AUTHORITY</code> root.</b> processor.rs:27/777 accepts the
-    key unconditionally, can create/rotate <code>AdminConfig</code> → controls global prices and all
-    treasury withdrawals, even after a future authority rotation. Delete the constant or assert it
-    equals the live upgrade authority at init.</li>
-    <li><b>F4 (MED) — dead 16..48 ProgramData branch</b> (see §1 M-1 row; keep 13..45, delete the
-    misleading branch and the <code>1u32</code> comment).</li>
-    <li><b>F5 (MED) — P2P <code>liquidity_mint</code> is un-allowlisted and unit-mismatched.</b> Any
-    token-owned 82-byte account is accepted as the liquidity mint (1668-1671); <code>requested_amount</code>
-    is compared in raw base units against a micro-USD value (assumes 6 decimals). A creator can request
-    $1.35M worth of a 2-decimal token against $150 of collateral; a non-USDC client would sign it.
-    Allowlist the mint (USDC/WSOL) or normalize by the mint's decimals.</li>
-    <li><b>F6 (LOW) — collateral routed to <code>pool.vault_pda</code> is trapped</b> (raw lamports into
-    a WSOL token account; no sweep instruction). Restrict the destination to the authority wallet.</li>
-    <li><b>F7 (LOW) — <code>is_oracle_free</code> is a name-prefix flag</b> (the third disjunct is
-    dead code — borsh rejects trailing bytes). Make it an explicit instruction field.</li>
-    <li><b>F8 (LOW) — no late interest / permissionless grace</b>: a passive lender accrues nothing
-    past maturity and must trigger grace manually.</li>
-    <li><b>INV (LOW, informational) —</b> legacy 51-byte profile realloc <i>reinterprets</i> rather than
-    translates (reputation resets to 0); <code>staked_skr_amount</code> write-only drift; rent stranding
-    on SPL escrows and terminal PDAs; admin can override pool-scoped feeds (centralized-trust caveat).</li>
-  </ul>
+<div class="finding">
+  <span class="badge crit">CRITICAL</span> <span class="badge crit">C-2</span>
+  <h3>Full-only gate vs the atomic Pyth path: works today by a 1-signature margin, dead tomorrow</h3>
+  <div class="meta">mobile/src/solana/pyth.ts:28,148 · program/src/pyth.rs:154-167</div>
+  <p>The deployed GuardianSet under the Wormhole bridge (<code>HDwc…</code>) has <strong>5 keys → quorum 4</strong> (verified on-chain: account <code>8d9szT…</code>, index 1). The client trims Hermes VAAs to 5 signatures, so today a post <em>can</em> reach <code>VerificationLevel::Full</code> — by exactly one signature. If Pyth rotates the set to 8+ keys (quorum 6), every client post becomes <code>Partial</code> and every borrow/create-offer reverts with <code>InsufficientVerificationLevel</code> — total liveness failure with no on-chain signal. Independently, Hermes v2 now rejects keyless requests (HTTP 401 verified live), so the client path is dead in practice today, and <strong>SKR collateral has no canonical fallback</strong> — SKR loans depend entirely on the dormant keeper's admin feed staying inside its 3600s staleness window.</p>
+  <div class="fix">Either (a) accept <code>Partial{n}</code> only when n ≥ quorum(current on-chain guardian set), or (b) keep Full-only and have the client check the VAA's signature count against the on-chain set before attaching (fall back to the canonical account otherwise), or (c) drop atomic posting and pin canonical sponsored accounts for both SOL and SKR. Add an integration test generated the way the client generates its VAA.</div>
+  <div class="verified">✔ VERIFIED — GuardianSet on-chain (5 keys, quorum 4); Hermes 401 reproduced; program gate confirmed Full-only; SKR fallback absence confirmed</div>
 </div>
 
-<h2>3 · Formal invariant verification (~15 probes)</h2>
-<table>
-  <tr><th>Invariant</th><th>Verdict</th></tr>
-  <tr><td>Discriminator dispatch, fail-closed on zeroed/unknown (incl. legacy 182-byte pools)</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>Legacy P2P offer decode (168-slice vs 170-struct)</td><td class="v-no">VIOLATED (dead code, fail-closed)</td></tr>
-  <tr><td>State machine — legal transitions only, both families (incl. repay-in-grace)</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>SKR-collateral ClaimDefault reachable</td><td class="v-no">VIOLATED (HIGH — always reverts)</td></tr>
-  <tr><td>Token conservation per instruction and cross-instruction (exact to the lamport)</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>Authorization matrix — every value receiver authorized</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>Arithmetic — no overflow/panic/truncation; bounds; lender-favorable rounding</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>PDA uniqueness + invoke_signed seed binding (30 call sites)</td><td class="v-ok">PROVEN</td></tr>
-  <tr><td>Oracle — writer auth, staleness on both paths, borrower choice, decimals, bounds</td><td class="v-ok">PROVEN (admin-override caveat)</td></tr>
-  <tr><td>Cross-instruction — grace timing, liquidation-after-grace, no double claim/slash, bond release both paths</td><td class="v-ok">PROVEN</td></tr>
-</table>
-<div class="card"><b>QEDGen priority:</b> (1) <code>claim_default_reaches_terminal_state</code> — catches F1
-directly; (2) <code>vault_solvency</code>; (3) <code>terminal_status_immutability</code>; (4)
-<code>declared_len_matches_borsh + legacy_decode_total</code> — kills the 168/170 class; (5)
-<code>oracle_gate_soundness</code>; (6) <code>destination_authorization</code>; (7)
-<code>seed_namespace_injectivity</code>.</div>
-
-<h2>4 · Mobile re-audit (live-chain verified)</h2>
-<div class="card">
-  <p><b>Fixed:</b> SKR 1e6 scale in borrow ✓; SOL oracle derived from the native mint ✓; treasury ATA
-  passed ✓ (devnet mint); grace-period transaction actually sent on the success path ✓; preview key
-  decoupled from the deployer ✓; claim-default clock placement ✓.</p>
-  <p><b>New criticals:</b></p>
-  <ul>
-    <li><b>NEW-1</b> P2P repay reads legacy offsets 121/129 on the now-200-byte offer
-    (<code>requested_amount</code> is at 153, <code>interest_offered</code> at 161) → <b>every P2P
-    repayment fails</b> with <code>ExpectedAmountMismatch</code>, silently swallowed.</li>
-    <li><b>NEW-2</b> every on-chain loan still gets <code>poolId: 1</code> hardcoded (the real pool
-    pubkey is parsed then discarded) → repay of any non-pool-1 loan derives the wrong PDA and fails.</li>
-    <li><b>NEW-3</b> SKR staking has <b>no exit</b> — <code>buildUnstakeSkrTx</code> is dead code;
-    staking from the UI locks SKR permanently (or until slashed).</li>
-    <li><b>NEW-4</b> client dispatch is length-only (no discriminators): 182-byte pools parse as
-    offers and vice versa — phantom listings with live buttons (masked today only by byte luck).</li>
-  </ul>
-  <p><b>Live-chain reality:</b> all 3 pools are legacy 182-byte shells with <code>liquidity_mint =
-  EPjFWdd5…</code> (<b>mainnet USDC</b> — the client hardcodes the devnet mint, so F-11 mint checks and
-  the treasury key-scan both fail), no vaults, zero liquidity; the SOL feed is 16,494 s stale; no SKR
-  feed. <b>No money path can complete on devnet today.</b></p>
-  <p><b>Still broken from earlier rounds:</b> double-counted balances gate borrowing; fabricated
-  offers/stats/reputation/verification badges; loan term discarded; lock screen fail-open; no in-flight
-  guards on 6 money buttons; signer not compared to session; unauthenticated cache feeds wallet math;
-  no network guard on 5/9 signing handlers; no ATA creation; memo re-import overwrites PDA-derived
-  loan state with raw micro-units.</p>
-  <p><b>Grades: security D+, quality D+.</b></p>
+<div class="finding">
+  <span class="badge crit">CRITICAL</span> <span class="badge crit">C-3</span>
+  <h3>Program-id keypair missing — first mainnet deploy cannot sign</h3>
+  <div class="meta">mobile/scripts/deploy-mainnet.mjs:74</div>
+  <p>The script deploys with bare <code>--program-id HAjGxuih…</code>. On a cluster where the program account does not exist (mainnet — verified: not found), the CLI rejects with <em>“Initial deployments require a keypair be provided for the program id”</em>. The keypair for <code>HAjGxuih…</code> is on no keyring and in no file on this box: <code>id.json</code> → BEmX…, deployer → 5avuk…, keeper → HtiDpTk…, and <code>target/deploy/clock_lend-keypair.json</code> was silently regenerated to <code>517Dh4d…</code> by the last build. Devnet still upgrades (account exists); mainnet cannot bootstrap until the original keypair is recovered from backup — or a new program id is chosen end-to-end.</p>
+  <div class="fix">Recover the keypair and pass the file (<code>--program-id /path/HAjGxuih….json</code>); add a preflight comparing <code>solana-keygen pubkey $PROGRAM_KEYPAIR</code> to <code>PROGRAM_ID</code>. If lost: pick a new id and update <code>lib.rs declare_id!</code>, <code>program.ts</code>, runbook, seed scripts.</div>
+  <div class="verified">✔ VERIFIED — all four keypairs on disk checked; CLI first-deploy behavior reproduced on a local validator</div>
 </div>
 
-<h2>5 · Test suite reality</h2>
-<div class="card">
-  69 tests pass, but 36 never execute the program (23 decorative "security" formula tests + 13
-  serialization round-trips). Two bank tests pass for the wrong reason:
-  <code>test_bank_claim_default_without_token_program_rejected</code> aborts at the treasury check,
-  never reaching the token-program check it claims to verify; the treasury-withdraw test pre-populates
-  a program-owned treasury PDA that the program itself can never create. No test claims an SPL-collateral
-  loan — exactly why F1 survived. No legacy-migration tests, no P2P claim-default test, no
-  deposit/withdraw tests, no native-SOL cancel test.
+<div class="finding">
+  <span class="badge crit">CRITICAL</span> <span class="badge crit">C-4</span>
+  <h3><code>--create-pool</code> sends a 62-byte InitializePool; borsh requires 63</h3>
+  <div class="meta">mobile/scripts/deploy-mainnet.mjs:159-162 · program/src/instruction.rs:15-28</div>
+  <p><code>InitializePool</code> carries a trailing <code>is_oracle_free: bool</code> (added in F7), so borsh requires 63 bytes. The script builds 62 (<code>tag + pool_id + pool_type + 2×u16 + 2×i64 + name[32]</code>). Verified against the real program on a local validator: 62 bytes → <code>InvalidInstructionData</code>; +1 zero byte → decodes to business logic. The runbook's one-command bootstrap dies at the last step, <em>after</em> program/admin/feeds are live. <code>seed_devnet.mjs</code> and <code>seed_pool2.mjs</code> share the 62-byte payload and additionally omit the token-program account → also dead.</p>
+  <div class="fix">Append <code>Buffer.from([0]) /* is_oracle_free */</code> (plus a <code>--oracle-free</code> flag); fix or delete the two seed scripts; add an ops smoke test that runs the script end-to-end on devnet.</div>
+  <div class="verified">✔ VERIFIED — payload bytes counted; behavior reproduced on local validator against the real program</div>
 </div>
 
-<h2>6 · Fix order</h2>
-<div class="card">
-  <ol>
-    <li><b>F1 (the one real program bug):</b> role-based treasury classification in
-    <code>ClaimDefault</code> + an SPL-collateral claim test.</li>
-    <li><b>F2/F3/F4:</b> slice legacy offers at 170 (or add a real migration instruction); delete the
-    hardcoded <code>UPGRADE_AUTHORITY</code> root (or assert it equals the live upgrade authority);
-    delete the dead 16..48 branch and the <code>1u32</code> comment (layout: 45-byte metadata, authority
-    at 13..45, 1-byte tag).</li>
-    <li><b>F5:</b> allowlist the P2P liquidity mint (USDC/WSOL) and normalize <code>requested_amount</code>
-    by the mint's decimals.</li>
-    <li><b>Mobile NEW-1/NEW-2/NEW-4/NEW-3:</b> 200-byte offer offsets (153/161), bind loans to their
-    pool pubkey, discriminator-gated parsing, wire the unstake button.</li>
-    <li><b>Ops (devnet):</b> recreate the 3 pools in the 200-byte format with the <b>devnet</b> USDC
-    mint, deposit real liquidity, publish fresh SOL + SKR feeds (admin), create user ATAs.</li>
-    <li><b>Tests:</b> replace the 36 decorative tests with real end-to-end ones (SPL claim, P2P
-    lifecycle, migration, treasury), then run QEDGen on the §3 priority list.</li>
-  </ol>
+<h2>High findings</h2>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-1</span>
+  <h3>Exact-repay reads use devnetConnection — dead on mainnet, silent overpay risk</h3>
+  <div class="meta">mobile/src/solana/onChainService.ts:1135, 1396</div>
+  <p><code>buildRepayTx</code> / <code>buildRepayPawnOfferTx</code> read current principal/interest from <code>devnetConnection</code> to compute the exact amount the program's equality check requires. On mainnet this returns null, the catch swallows it, and the caller-supplied float is used — rounding drift rejects, overpay is a real loss. <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Use the mainnet connection (or take a <code>Connection</code> param); log in the catch.</div>
 </div>
 
-<div class="sub" style="margin-top:26px">ClockLend re-audit v4 · program (3,096-line processor, 69 tests) + mobile (17 files) + live devnet state ·
-~15 executable probes across two independent auditors · all verdicts cross-checked against source and vendored runtime code ·
-correction: the ProgramData upgrade-authority offset is 13..45 (45-byte metadata, 1-byte option tag), not 16..48 as previously reported.</div>
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-2</span>
+  <h3>All loan/offer data discarded on mainnet — LOANS tab and P2P deck permanently empty</h3>
+  <div class="meta">mobile/App.tsx:210-232</div>
+  <p><code>loadProtocolData</code> only assigns offers/orders when <code>net === 'devnet'</code>; on mainnet it sets both to <code>[]</code>. The app is mainnet-only, so repay/grace/cancel are unreachable — a borrower cannot see or repay their own mainnet loan. The parsers themselves are mainnet-correct (verified offsets 153/161 vs <code>state.rs</code>). <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Assign unconditionally; gate any dev-only mode on <code>__DEV__</code>, never the cluster.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-3</span>
+  <h3>handleCreatePool writes the devnet USDC mint into UI state — new desks unborrowable</h3>
+  <div class="meta">mobile/App.tsx:894 → 310</div>
+  <p>The on-chain pool correctly gets <code>USDC_MAINNET_MINT</code>, but the local pool object carries <code>4zMMC9srt…</code> (devnet), which <code>handleBorrow</code> uses to derive ATAs → <code>InvalidTreasuryAccount</code> for every borrow against a desk you just created. <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Use <code>USDC_MAINNET_MINT</code>; better: re-fetch pools from chain after confirmation.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-4</span>
+  <h3>Pawn repay truncated to whole cents — exact-equality check fails for non-cent interest</h3>
+  <div class="meta">mobile/src/solana/onChainService.ts:1393-1394 · App.tsx:732, 415</div>
+  <p><code>.toFixed(2)</code> + <code>Math.round</code> loses micro-precision for any interest not a multiple of 1000 base units; the compensating on-chain read is disabled by H-1. <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Carry amounts as <code>bigint</code> end-to-end; never round-trip through floats.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-5</span>
+  <h3>Auto-close buffer (732dc8b) is dead code — CLI form invalid, premise wrong</h3>
+  <div class="meta">mobile/scripts/deploy-mainnet.mjs:75-80</div>
+  <p>Two independent defects: <code>solana program close … --buffers &lt;BUFFER&gt;</code> is rejected by the CLI (flag vs positional conflict), and <code>deploy --buffer</code> already consumes the buffer — its lamports become the ProgramData rent; nothing remains to close or refund. The runbook's “buffer rent refunded” narrative is fiction. <span class="verified">✔ VERIFIED — both reproduced on solana-cli 3.1.9</span></p>
+  <div class="fix">Delete the block, or use bare <code>--buffers --bypass-warning</code> as a defensive sweep only; fix runbook §0 text.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-6</span>
+  <h3>36 of 83 green tests never execute the program</h3>
+  <div class="meta">program/tests/functional.rs (13 borsh round-trips) · security_tests.rs (23 pure-arithmetic)</div>
+  <p>“83 passing” materially overstates coverage; the runbook still says 77/77. No JS wire-encoding test exists, which is exactly why C-4 survived. <span class="verified">✔ VERIFIED — grep-verified per-file</span></p>
+  <div class="fix">Rename security_tests as model tests or convert the load-bearing ones to BanksClient tests; add CI.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-7</span>
+  <h3>Fuzz invariants cannot catch the bug classes from prior rounds</h3>
+  <div class="meta">program/tests/fuzz_invariants.rs:473-482, 604-608</div>
+  <p>No oracle staleness op (deleting the staleness check leaves the fuzzer green), no type-confusion op, no signer-omission/account-substitution, no lamport-destination invariant; TriggerGracePeriod appears only in a comment. <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Add the missing ops + equality/treasury invariants; fix the misleading comment.</div>
+</div>
+
+<div class="finding">
+  <span class="badge high">HIGH</span> <span class="badge high">H-8</span>
+  <h3>Untested paths: admin rotation, InitializePool guards, DepositLiquidity effects, future-skew, P2P Pyth</h3>
+  <div class="meta">program/tests/bank_integration.rs:2327, 2444, 3740, 3923 · pyth.rs:196</div>
+  <p>The entire <code>--rotate-oracle</code> path is never executed (uses <code>.ok()</code> so truncated calls silently no-op); <code>OraclePriceFromFuture</code> has zero tests; the CreateP2POffer Pyth site (C-1's second half) has zero tests; four admin-oracle fixtures still mask staleness with <code>i64::MAX</code> — the same class 67d2ad7 just removed from the Pyth fixtures. <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Add the five named tests; replace the four i64::MAX fixtures.</div>
+</div>
+
+<h2>Mediums (selected)</h2>
+<ul>
+<li><strong>Program — Full-only liveness coupling</strong>: <code>pyth.rs:154</code> hardcodes the level against an off-program invariant (guardian-set quorum); a rotation bricks every client post with no on-chain signal. See C-2 fix options.</li>
+<li><strong>Mobile — fake grace success</strong>: <code>App.tsx:533-549</code> marks the order InGracePeriod and persists it even when the tx failed; survives restart via cache.</li>
+<li><strong>Mobile — fabricated state after every tx</strong>: nine handlers mutate balances/portfolio with hardcoded $101.12 / $0.0192 while the screen claims “RPC-authoritative”; fabricated <code>stakedSkrAmount</code>/<code>successRate:100</code>/<code>initialLiquidity</code> as “Available $”.</li>
+<li><strong>Mobile — trust badges</strong>: SGT “VERIFIED” pill never reads the flag; detection is <code>mint.includes('seeker')</code> + any-frozen-account; flag defaults true; hardcoded <code>rootkit.skr</code> identity + devnet pool authority <code>BEmX…</code> (seekerWallet.ts:116, onChainService.ts:438); successRate 100 for zero-history pools.</li>
+<li><strong>Mobile — stake donates 0.002 SOL</strong> to an escrow PDA on every stake (below the real 2,039,280-lamport rent minimum), never refunded (onChainService.ts:1598-1604).</li>
+<li><strong>Ops — funding fiction</strong>: real mainnet rent = 1.5246 SOL, permanent (buffer lamports become ProgramData — no refund); runbook says 2.0 with a refund, script hard-blocks below 3.0 and prints “~3.5 SOL”.</li>
+<li><strong>Ops — runbook §2 keeper contradiction</strong>: cites <code>.github/workflows/keeper.yml</code> which was deleted (keeper retired); <code>KEEPER_KEYPAIR_B64</code> is never read by keeper.mjs; deploy script's closing line points at <code>scripts/keeper.mjs</code> (an empty dir).</li>
+<li><strong>Ops — runbook staleness</strong>: devnet hash is <code>600fba4a</code> not <code>9bbcdc68</code>; devnet does NOT contain the 67d2ad7 hardening (local .so == devnet ProgramData, both predate it) — redeploy devnet; test count is 83 not 77; freshness is 120s/300s + 60s skew.</li>
+<li><strong>Repo — Cargo.lock gitignored</strong>: the runbook's hash verification is non-reproducible without a pinned dependency graph (b8ce202's anchor removal is clean).</li>
+<li><strong>Repo — .gitignore misses <code>mainnet-*.json</code></strong>: an operator copying a keypair into the repo would have it staged; nothing is committed today (verified).</li>
+</ul>
+
+<h2>Lows (selected)</h2>
+<ul>
+<li><code>processor.rs:1221-1229</code> — a borrower can omit the pool-scoped oracle when <code>has_custom_oracle &amp;&amp; is_oracle_free</code> and get priced from the hardcoded $150/$0.02 baseline (policy bypass).</li>
+<li><code>processor.rs:1238-1276</code> — the C-1 scale invariant is enforced only on the Pyth path; the admin-feed path trusts <code>PriceFeed.decimals</code> (bounded 1..=18, never cross-checked vs the mint). InitializePool has no USDC allowlist (F5 covers only the P2P path).</li>
+<li><code>pyth.rs:50</code> — <code>hex32!</code> has no length assertion: a 65+-char literal silently decodes the first 64 chars.</li>
+<li>Mobile: dead devnet <code>Connection</code> export (program.ts:73); P2P parser devnet-mint default (onChainService.ts:497); memo-derived orders fabricate ids/interest/pool names that feed real PDA derivation (onChainService.ts:375-438); Hermes fetch has no timeout/shape validation (pyth.ts:75); unused <code>borsh</code> dep; <code>splash-icon.png</code> referenced by nothing; SecureStore 2048-byte cache silently dead on Android.</li>
+<li>Env files mode 664; the Jupiter key shipped in <code>EXPO_PUBLIC_*</code> is effectively public (quota surface, not a signing key — no keypairs in any env file, verified).</li>
+<li><code>instruction.rs:12-14</code> documents InitializePool accounts 5/6 inverted vs the processor (rent is 5, token is 6).</li>
+</ul>
+
+<h2>Clean areas (verified)</h2>
+<ul>
+<li>Hand-rolled PriceUpdateV2 parser: offsets byte-exact vs a live mainnet account; bounds-safe reads; checked_pow on adversarial exponents; Partial cursor advance correct.</li>
+<li>Processor hygiene: signer asserts on every state-changing instruction; PDAs re-derived with bumps; reinit blocked; status machines reachable; no cross-owner lamport debits.</li>
+<li>Anchor removal complete (program + mobile); <code>tsc --noEmit</code> clean, strict mode; zero keypair/secrets in git history; program-id allowlist before every MWA signing; fail-closed lock/integrity/PIN; HTTPS-only endpoints; production builds strip console logs.</li>
+<li>Runbook §3 verification procedure correct and executed: ProgramData authority at data[13..45], hash check methodology sound.</li>
+</ul>
+
+<h2>Proposed fix rounds</h2>
+<p><strong>P0 (critical):</strong> C-1 signer/blockhash ordering · C-2 oracle-path decision (quorum-aware or canonical SKR) · C-3 recover/regenerate program keypair + preflight · C-4 63-byte payload (+ seed script cleanup).<br>
+<strong>P1 (high):</strong> H-1 mainnet connection for exact repay · H-2 un-gate protocol data · H-3 mainnet mint in create-pool · H-4 BigInt end-to-end · H-5 delete dead buffer close · H-6/H-7/H-8 test fidelity + CI · runbook alignment (funding, keeper, hash, counts).<br>
+<strong>P2 (medium/low):</strong> honest UI state, badge honesty, hardcoded identity removal, stake rent fix, Cargo.lock + .gitignore, env hygiene, doc comment fix.</p>
+
+<div class="sub">Full per-round history and verification evidence: <code>.superstack/build-context.md</code>.</div>
 </div>
 </body>
 </html>

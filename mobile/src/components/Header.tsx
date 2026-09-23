@@ -9,6 +9,7 @@ interface HeaderProps {
   skrHandle: string;
   solBalance: number;
   network?: SolanaNetwork;
+  hasSeekerGenesisToken?: boolean;
   onPressProfile: () => void;
   onPressBalance?: () => void;
   onToggleNetwork?: () => void;
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   skrHandle,
   solBalance,
   network = 'mainnet-beta',
+  hasSeekerGenesisToken = false,
   onPressProfile,
   onPressBalance,
   onToggleNetwork,
@@ -36,7 +38,9 @@ export const Header: React.FC<HeaderProps> = ({
         <View>
           <View style={styles.handleRow}>
             <Text style={[styles.handleText, { color: colors.text }]}>{skrHandle}</Text>
-            <View style={[styles.verifiedDot, { backgroundColor: colors.primary }]} />
+            {hasSeekerGenesisToken && (
+              <View style={[styles.verifiedDot, { backgroundColor: colors.primary }]} />
+            )}
           </View>
         </View>
       </TouchableOpacity>

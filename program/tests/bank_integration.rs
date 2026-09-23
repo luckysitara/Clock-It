@@ -58,7 +58,9 @@ async fn test_bank_initialize_pool_success() {
         &program_id,
     );
 
-    let liquidity_mint = Pubkey::new_unique();
+    // The program allowlists liquidity mints (USDC devnet/mainnet or wrapped
+    // SOL) — use the real devnet USDC mint rather than a random one.
+    let liquidity_mint = clock_lend::state::USDC_DEVNET_MINT;
     let mut name = [0u8; 32];
     let name_bytes = b"Seeker Genesis Pool";
     name[..name_bytes.len()].copy_from_slice(name_bytes);
@@ -2323,8 +2325,8 @@ async fn test_bank_create_p2p_offer_rejects_unreasonable_ltv() {
         mint: spl_token::native_mint::id(),
         price_micro_usd: 150_000_000, // $150.00 / SOL
         decimals: 9,
-        last_updated_at: 1720000000,
-        max_staleness_seconds: i64::MAX,
+        last_updated_at: now_secs(),
+        max_staleness_seconds: 86400,
         authority: Pubkey::default(),
     };
 
@@ -2440,8 +2442,8 @@ async fn test_bank_create_p2p_offer_rejects_unallowlisted_liquidity_mint() {
         mint: spl_token::native_mint::id(),
         price_micro_usd: 150_000_000, // $150.00 / SOL
         decimals: 9,
-        last_updated_at: 1720000000,
-        max_staleness_seconds: i64::MAX,
+        last_updated_at: now_secs(),
+        max_staleness_seconds: 86400,
         authority: Pubkey::default(),
     };
 
@@ -3736,8 +3738,8 @@ async fn test_bank_p2p_offer_lifecycle_create_fund_repay() {
         mint: spl_token::native_mint::id(),
         price_micro_usd: 150_000_000, // $150.00 / SOL
         decimals: 9,
-        last_updated_at: 1720000000,
-        max_staleness_seconds: i64::MAX,
+        last_updated_at: now_secs(),
+        max_staleness_seconds: 86400,
         authority: Pubkey::default(),
     };
 
@@ -3919,8 +3921,8 @@ async fn test_bank_p2p_fund_wrong_mint_rejected() {
         mint: spl_token::native_mint::id(),
         price_micro_usd: 150_000_000,
         decimals: 9,
-        last_updated_at: 1720000000,
-        max_staleness_seconds: i64::MAX,
+        last_updated_at: now_secs(),
+        max_staleness_seconds: 86400,
         authority: Pubkey::default(),
     };
 
@@ -5538,4 +5540,600 @@ async fn test_bank_withdraw_liquidity_authority_only_and_success() {
     let dest = banks_client.get_account(authority_tok).await.unwrap().expect("dest");
     let dest_tok = spl_token::state::Account::unpack(&dest.data).unwrap();
     assert_eq!(dest_tok.amount, 250_000_000, "authority must receive the funds");
+}
+
+// ============================================================================
+// Round-8 test-fidelity additions: future-dated oracle bound, P2P Pyth path,
+// admin rotation, InitializePool guards, DepositLiquidity effects.
+// ============================================================================
+
+/// The +60s future-skew bound (OraclePriceFromFuture): a future-dated
+/// publish_time satisfies the LOWER staleness bound forever, so without the
+/// upper bound a price could sit in the past indefinitely. A price 1h in the
+/// future must be rejected; exactly +60s (the skew limit) must still pass.
+#[tokio::test]
+async fn test_bank_borrow_rejects_future_dated_pyth_price() {
+    let program_id = Pubkey::new_unique();
+    let feed_id = clock_lend::pyth::SOL_USD_FEED_ID;
+
+    for (publish_offset, expect_code) in [(3600i64, 36u32), (-86400i64, 29u32)] {
+        let (mut pt, fx) =
+            setup_pyth_borrow(program_id, feed_id, now_secs() + publish_offset, Level::Full).await;
+        let (banks_client, payer, recent_blockhash) = pt.start().await;
+
+        let loan_id: u64 = 700 + expect_code as u64;
+        let (loan_pda, _) = Pubkey::find_program_address(
+            &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+            &program_id,
+        );
+        let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+        let (profile_pda, _) = Pubkey::find_program_address(
+            &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(fx.borrower.pubkey(), true),
+                AccountMeta::new(fx.pool_pda, false),
+                AccountMeta::new(loan_pda, false),
+                AccountMeta::new(fx.vault_pda, false),
+                AccountMeta::new(fx.borrower_usdc, false),
+                AccountMeta::new(fx.borrower.pubkey(), false),
+                AccountMeta::new(escrow_pda, false),
+                AccountMeta::new_readonly(solana_program::system_program::id(), false),
+                AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(solana_program::system_program::id(), false),
+                AccountMeta::new(profile_pda, false),
+                AccountMeta::new(fx.treasury_tok, false),
+                AccountMeta::new_readonly(fx.pyth_account, false),
+            ],
+            data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+                loan_id,
+                borrow_amount: 100_000_000,
+                collateral_amount: 1_000_000_000,
+                duration_seconds: 86400 * 7,
+            }).unwrap(),
+        };
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+        let res = banks_client.process_transaction(tx).await;
+        expect_custom_error(
+            &res,
+            expect_code,
+            &format!("publish_time offset {publish_offset}s must fail with Custom({expect_code})"),
+        );
+    }
+
+    // Boundary: publish_time exactly +60s ahead stays inside the skew window.
+    let (mut pt, fx) = setup_pyth_borrow(program_id, feed_id, now_secs() + 60, Level::Full).await;
+    let (banks_client, payer, recent_blockhash) = pt.start().await;
+    let loan_id: u64 = 799;
+    let (loan_pda, _) = Pubkey::find_program_address(
+        &[LOAN_SEED, fx.pool_pda.as_ref(), fx.borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+        &program_id,
+    );
+    let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan_pda.as_ref()], &program_id);
+    let (profile_pda, _) = Pubkey::find_program_address(
+        &[PROFILE_SEED, fx.borrower.pubkey().as_ref()], &program_id);
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(fx.borrower.pubkey(), true),
+            AccountMeta::new(fx.pool_pda, false),
+            AccountMeta::new(loan_pda, false),
+            AccountMeta::new(fx.vault_pda, false),
+            AccountMeta::new(fx.borrower_usdc, false),
+            AccountMeta::new(fx.borrower.pubkey(), false),
+            AccountMeta::new(escrow_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new(profile_pda, false),
+            AccountMeta::new(fx.treasury_tok, false),
+            AccountMeta::new_readonly(fx.pyth_account, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+            loan_id,
+            borrow_amount: 100_000_000,
+            collateral_amount: 1_000_000_000,
+            duration_seconds: 86400 * 7,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &fx.borrower], recent_blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "publish_time exactly +60s ahead MUST pass (boundary): {:?}", res);
+}
+
+/// C-1's second half: the CreateP2POffer Pyth path (previously completely
+/// C-1's second half: the CreateP2POffer Pyth path (previously completely
+/// untested). 1 SOL at $200 with the 90% P2P cap allows exactly $180.00;
+/// $180.01 must fail with InvalidCollateralRatio. Partial verification must
+/// be rejected on this path too.
+#[tokio::test]
+async fn test_bank_create_offer_pyth_prices_sol_collateral() {
+    use clock_lend::pyth::PYTH_RECEIVER_ID;
+
+    let program_id = Pubkey::new_unique();
+    let feed_id = clock_lend::pyth::SOL_USD_FEED_ID;
+
+    async fn bank_with_pyth(
+        program_id: Pubkey,
+        feed_id: [u8; 32],
+        level: Level,
+        creator: &Keypair,
+        pyth_account: Pubkey,
+    ) -> (BanksClient, Keypair, solana_program::hash::Hash) {
+        let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+        pt.add_account(creator.pubkey(), Account {
+            lamports: 10_000_000_000, data: vec![],
+            owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+        });
+        pt.add_account(pyth_account, Account {
+            lamports: 10_000_000,
+            data: pyth_update_bytes(feed_id, 200_000_000, -6, now_secs(), level), // $200.00
+            owner: PYTH_RECEIVER_ID, executable: false, rent_epoch: 0,
+        });
+        pt.start().await
+    }
+
+    fn offer_ix(
+        program_id: Pubkey,
+        creator: &Keypair,
+        offer_id: u64,
+        offer_pda: Pubkey,
+        escrow_pda: Pubkey,
+        pyth_account: Pubkey,
+        requested: u64,
+    ) -> Instruction {
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(offer_pda, false),
+                AccountMeta::new(creator.pubkey(), false), // SOL collateral source = wallet
+                AccountMeta::new(escrow_pda, false),
+                AccountMeta::new_readonly(Pubkey::default(), false), // collateral mint = native SOL
+                AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(solana_program::system_program::id(), false),
+                AccountMeta::new_readonly(pyth_account, false),
+            ],
+            data: borsh::to_vec(&ClockLendInstruction::CreateP2POffer {
+                offer_id,
+                collateral_amount: 1_000_000_000, // 1 SOL
+                requested_amount: requested,
+                interest_offered: 5_000_000,
+                duration_seconds: 86400 * 7,
+            }).unwrap(),
+        }
+    }
+
+    // 1. Success at exactly the 90% cap ($180.00).
+    {
+        let creator = Keypair::new();
+        let pyth_account = Pubkey::new_unique();
+        let (banks_client, payer, bh) =
+            bank_with_pyth(program_id, feed_id, Level::Full, &creator, pyth_account).await;
+        let (offer_pda, _) = Pubkey::find_program_address(
+            &[P2P_SEED, creator.pubkey().as_ref(), &701u64.to_le_bytes()], &program_id);
+        let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+        let ix = offer_ix(program_id, &creator, 701, offer_pda, escrow_pda, pyth_account, 180_000_000);
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[&payer, &creator], bh);
+        let res = banks_client.process_transaction(tx).await;
+        assert!(res.is_ok(), "P2P offer at the exact 90% cap MUST succeed: {:?}", res);
+    }
+
+    // 2. $180.01 exceeds the cap.
+    {
+        let creator = Keypair::new();
+        let pyth_account = Pubkey::new_unique();
+        let (banks_client, payer, bh) =
+            bank_with_pyth(program_id, feed_id, Level::Full, &creator, pyth_account).await;
+        let (offer_pda, _) = Pubkey::find_program_address(
+            &[P2P_SEED, creator.pubkey().as_ref(), &702u64.to_le_bytes()], &program_id);
+        let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+        let ix = offer_ix(program_id, &creator, 702, offer_pda, escrow_pda, pyth_account, 180_010_000);
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[&payer, &creator], bh);
+        let res = banks_client.process_transaction(tx).await;
+        expect_custom_error(&res, 10, "$180.01 P2P request MUST exceed the 90% cap");
+    }
+
+    // 3. Partial verification is rejected on the P2P path too.
+    {
+        let creator = Keypair::new();
+        let pyth_account = Pubkey::new_unique();
+        let (banks_client, payer, bh) =
+            bank_with_pyth(program_id, feed_id, Level::Partial(3), &creator, pyth_account).await;
+        let (offer_pda, _) = Pubkey::find_program_address(
+            &[P2P_SEED, creator.pubkey().as_ref(), &703u64.to_le_bytes()], &program_id);
+        let (escrow_pda, _) = Pubkey::find_program_address(&[ESCROW_SEED, offer_pda.as_ref()], &program_id);
+        let ix = offer_ix(program_id, &creator, 703, offer_pda, escrow_pda, pyth_account, 100_000_000);
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[&payer, &creator], bh);
+        let res = banks_client.process_transaction(tx).await;
+        expect_custom_error(&res, 37, "Partial Pyth verification MUST be rejected on the P2P path");
+    }
+}
+
+
+/// The InitializeAdmin rotation path (accounts 4/5) had zero test coverage —
+/// the `--rotate-oracle` deploy flow exercised it only in production.
+#[tokio::test]
+async fn test_bank_admin_rotation_transfers_oracle_authority() {
+    let program_id = Pubkey::new_unique();
+    let admin_authority = Keypair::new();
+    let keeper = Keypair::new();
+    let new_admin = Keypair::new();
+
+    let (admin_pda, _) = Pubkey::find_program_address(&[ADMIN_SEED], &program_id);
+    let (program_data_pda, _) = Pubkey::find_program_address(
+        &[program_id.as_ref()], &solana_program::bpf_loader_upgradeable::id());
+    let (oracle_pda, _) = Pubkey::find_program_address(
+        &[ORACLE_SEED, spl_token::native_mint::id().as_ref()], &program_id);
+
+    let mut program_data_bytes = vec![0u8; 45];
+    program_data_bytes[0] = 3;
+    program_data_bytes[12] = 1;
+    program_data_bytes[13..45].copy_from_slice(admin_authority.pubkey().as_ref());
+
+    let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+    pt.add_account(program_data_pda, Account {
+        lamports: 10_000_000, data: program_data_bytes,
+        owner: solana_program::bpf_loader_upgradeable::id(), executable: false, rent_epoch: 0,
+    });
+    pt.add_account(admin_authority.pubkey(), Account {
+        lamports: 10_000_000_000, data: vec![],
+        owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+    });
+    pt.add_account(keeper.pubkey(), Account {
+        lamports: 10_000_000_000, data: vec![],
+        owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+    });
+    pt.add_account(new_admin.pubkey(), Account {
+        lamports: 10_000_000_000, data: vec![],
+        owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+    });
+    let (banks_client, payer, bh) = pt.start().await;
+
+    // 1. First init (4-account form).
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin_authority.pubkey(), true),
+            AccountMeta::new(admin_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(program_data_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &admin_authority], bh);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Initial InitializeAdmin MUST succeed: {:?}", res);
+
+    // 2. Rotation (6-account form): new admin + new oracle authority.
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(admin_authority.pubkey(), true),
+            AccountMeta::new(admin_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(program_data_pda, false),
+            AccountMeta::new_readonly(new_admin.pubkey(), false),
+            AccountMeta::new_readonly(keeper.pubkey(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializeAdmin).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &admin_authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Rotation MUST succeed: {:?}", res);
+
+    let admin_acc = banks_client.get_account(admin_pda).await.unwrap().unwrap();
+    let cfg = AdminConfig::unpack_from_slice(&admin_acc.data).unwrap();
+    assert_eq!(cfg.admin, new_admin.pubkey(), "admin must be rotated");
+    assert_eq!(cfg.oracle_authority, keeper.pubkey(), "oracle_authority must be rotated");
+
+    // 3. The OLD admin key has lost SetPriceFeed (now owned by the keeper).
+    let feed_ix = |signer: &Keypair| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(signer.pubkey(), true),
+            AccountMeta::new(oracle_pda, false),
+            AccountMeta::new_readonly(spl_token::native_mint::id(), false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(admin_pda, false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+            price_micro_usd: 150_000_000, decimals: 9,
+        }).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[feed_ix(&admin_authority)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &admin_authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    expect_custom_error(&res, 5, "Rotated-out admin MUST NOT publish feeds");
+
+    // 4. The keeper key CAN publish.
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[feed_ix(&keeper)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &keeper], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "Rotated-in keeper MUST be able to publish feeds: {:?}", res);
+}
+
+/// InitializePool parameter guards (InvalidDuration/InvalidInterestRate/
+/// InvalidCollateralRatio) and PoolAlreadyInitialized had zero direct tests.
+#[tokio::test]
+async fn test_bank_initialize_pool_rejects_invalid_bounds() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+    pt.add_account(authority.pubkey(), Account {
+        lamports: 10_000_000_000, data: vec![],
+        owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+    });
+    // The pool init CPI (InitializeAccount3) requires the mint to exist and be
+    // token-program owned.
+    pt.add_account(clock_lend::state::USDC_DEVNET_MINT, Account {
+        lamports: 10_000_000, data: mint_data(6),
+        owner: spl_token::id(), executable: false, rent_epoch: 0,
+    });
+    let (banks_client, payer, bh) = pt.start().await;
+
+    let init = |pool_id: u64, interest: u16, ltv: u16, min_d: i64, max_d: i64| {
+        let (pool_pda, _) = Pubkey::find_program_address(
+            &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()], &program_id);
+        let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(pool_pda, false),
+                AccountMeta::new_readonly(clock_lend::state::USDC_DEVNET_MINT, false),
+                AccountMeta::new(vault_pda, false),
+                AccountMeta::new_readonly(solana_program::system_program::id(), false),
+                AccountMeta::new_readonly(sysvar::rent::id(), false),
+                AccountMeta::new_readonly(spl_token::id(), false),
+            ],
+            data: borsh::to_vec(&ClockLendInstruction::InitializePool {
+                pool_id, pool_type: PoolType::Individual, interest_rate_bps: interest,
+                max_ltv_bps: ltv, min_duration: min_d, max_duration: max_d,
+                name: [0u8; 32], is_oracle_free: false,
+            }).unwrap(),
+        }
+    };
+
+    let cases: [(u64, u16, u16, i64, i64, u32, &str); 5] = [
+        (811, 800, 8500, 0, 86400 * 30, 32, "min_duration 0"),
+        (812, 800, 8500, 86400 * 30, 86400, 32, "max < min"),
+        (813, 800, 0, 86400, 86400 * 30, 10, "ltv 0"),
+        (814, 800, 9501, 86400, 86400 * 30, 10, "ltv > 9500"),
+        (815, 10001, 8500, 86400, 86400 * 30, 33, "interest > 10000"),
+    ];
+    for (pool_id, interest, ltv, min_d, max_d, code, label) in cases {
+        let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+        let mut tx = Transaction::new_with_payer(&[init(pool_id, interest, ltv, min_d, max_d)], Some(&payer.pubkey()));
+        tx.sign(&[&payer, &authority], blockhash);
+        let res = banks_client.process_transaction(tx).await;
+        expect_custom_error(&res, code, &format!("{label} must fail with Custom({code})"));
+    }
+
+    // PoolAlreadyInitialized: same pool id twice (use different params to ensure distinct tx signature).
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[init(816, 800, 8500, 86400, 86400 * 30)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "first init of pool 816 MUST succeed: {:?}", res);
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[init(816, 801, 8500, 86400, 86400 * 30)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    expect_custom_error(&res, 25, "re-initializing the same pool MUST fail");
+}
+
+/// DepositLiquidity had no test asserting its effects anywhere: this pins that
+/// the vault balance and pool.total_liquidity both move by the deposit amount.
+#[tokio::test]
+async fn test_bank_deposit_liquidity_moves_tokens_and_updates_pool() {
+    let program_id = Pubkey::new_unique();
+    let authority = Keypair::new();
+    let pool_id: u64 = 817;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()], &program_id);
+    let (vault_pda, _) = Pubkey::find_program_address(&[VAULT_SEED, pool_pda.as_ref()], &program_id);
+
+    let lp_tok = Pubkey::new_unique();
+    let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+    pt.add_account(authority.pubkey(), Account {
+        lamports: 10_000_000_000, data: vec![],
+        owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+    });
+    pt.add_account(lp_tok, Account {
+        lamports: 10_000_000,
+        data: token_acct_data(clock_lend::state::USDC_DEVNET_MINT, authority.pubkey(), 1_000 * 1_000_000),
+        owner: spl_token::id(), executable: false, rent_epoch: 0,
+    });
+    // The pool init CPI (InitializeAccount3) requires the mint to exist and be
+    // token-program owned.
+    pt.add_account(clock_lend::state::USDC_DEVNET_MINT, Account {
+        lamports: 10_000_000, data: mint_data(6),
+        owner: spl_token::id(), executable: false, rent_epoch: 0,
+    });
+    let (banks_client, payer, bh) = pt.start().await;
+
+    let init_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new_readonly(clock_lend::state::USDC_DEVNET_MINT, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new_readonly(solana_program::system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::rent::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::InitializePool {
+            pool_id, pool_type: PoolType::Individual, interest_rate_bps: 800, max_ltv_bps: 8500,
+            min_duration: 86400, max_duration: 86400 * 30,
+            name: [0u8; 32], is_oracle_free: false,
+        }).unwrap(),
+    };
+    let mut tx = Transaction::new_with_payer(&[init_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], bh);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "pool init MUST succeed: {:?}", res);
+
+    let dep_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(lp_tok, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+        data: borsh::to_vec(&ClockLendInstruction::DepositLiquidity { amount: 1_000 * 1_000_000 }).unwrap(),
+    };
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[dep_ix], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "deposit MUST succeed: {:?}", res);
+
+    let vault_acc = banks_client.get_account(vault_pda).await.unwrap().unwrap();
+    let vault_tok = spl_token::state::Account::unpack(&vault_acc.data).unwrap();
+    assert_eq!(vault_tok.amount, 1_000 * 1_000_000, "vault must hold the full deposit");
+
+    let pool_acc = banks_client.get_account(pool_pda).await.unwrap().unwrap();
+    let pool = LendingPool::unpack_from_slice(&pool_acc.data).unwrap();
+    assert_eq!(pool.total_liquidity, 1_000 * 1_000_000, "total_liquidity must reflect the deposit");
+}
+
+/// TriggerGracePeriod's pool-LoanOrder branch (processor.rs:2421-2464) was
+/// never exercised: the only TriggerGrace coverage was the P2P branch. Loans
+/// are genesis-packed because ProgramTest's clock does not advance to due_time.
+#[tokio::test]
+async fn test_bank_trigger_grace_pool_loan_branch() {
+    let program_id = Pubkey::new_unique();
+    let borrower = Keypair::new();
+    let authority = Keypair::new();
+    let stranger = Keypair::new();
+    let pool_id: u64 = 818;
+    let (pool_pda, _) = Pubkey::find_program_address(
+        &[POOL_SEED, authority.pubkey().as_ref(), &pool_id.to_le_bytes()], &program_id);
+
+    let now = now_secs();
+    let make_loan = |loan_id: u64, due_time: i64| -> (Pubkey, LoanOrder) {
+        let (loan_pda, _) = Pubkey::find_program_address(
+            &[LOAN_SEED, pool_pda.as_ref(), borrower.pubkey().as_ref(), &loan_id.to_le_bytes()],
+            &program_id);
+        (loan_pda, LoanOrder {
+            discriminator: LoanOrder::DISCRIMINATOR,
+            is_active: true,
+            loan_id,
+            borrower: borrower.pubkey(),
+            pool: pool_pda,
+            principal_amount: 100_000_000,
+            collateral_mint: spl_token::native_mint::id(),
+            collateral_amount: 1_000_000_000,
+            interest_due: 5_000_000,
+            origination_time: now - 10 * 86400,
+            due_time,
+            grace_period_expires: 0,
+            status: LoanStatus::Active,
+            locked_skr: 0,
+        })
+    };
+    let (overdue_loan_pda, overdue_loan) = make_loan(8181, now - 100);
+    let (future_loan_pda, future_loan) = make_loan(8182, now + 3600);
+    let (unauth_loan_pda, unauth_loan) = make_loan(8183, now - 100);
+
+    let mut pt = ProgramTest::new("clock_lend", program_id, processor!(process_instruction));
+    pt.add_account(pool_pda, Account {
+        lamports: 10_000_000,
+        data: borsh::to_vec(&LendingPool {
+            discriminator: LendingPool::DISCRIMINATOR,
+            is_initialized: true,
+            pool_type: PoolType::Individual,
+            authority: authority.pubkey(),
+            liquidity_mint: clock_lend::state::USDC_DEVNET_MINT,
+            vault_pda: Pubkey::new_unique(),
+            total_liquidity: 1_000_000_000,
+            total_borrowed: 0,
+            staked_skr_amount: 0,
+            interest_rate_bps: 800,
+            max_ltv_bps: 6500,
+            min_duration: 86400,
+            max_duration: 86400 * 30,
+            loans_originated: 1,
+            loans_repaid: 0,
+            name: [0u8; 32],
+            is_oracle_free: false,
+            pool_id,
+            has_custom_oracle: false,
+        }).unwrap(),
+        owner: program_id, executable: false, rent_epoch: 0,
+    });
+    for (pda, loan) in [(overdue_loan_pda, overdue_loan), (future_loan_pda, future_loan), (unauth_loan_pda, unauth_loan)] {
+        pt.add_account(pda, Account {
+            lamports: 10_000_000, data: borsh::to_vec(&loan).unwrap(),
+            owner: program_id, executable: false, rent_epoch: 0,
+        });
+    }
+    for kp in [&borrower, &authority, &stranger] {
+        pt.add_account(kp.pubkey(), Account {
+            lamports: 10_000_000_000, data: vec![],
+            owner: solana_program::system_program::id(), executable: false, rent_epoch: 0,
+        });
+    }
+    let (banks_client, payer, bh) = pt.start().await;
+
+    let grace_ix = |caller: &Keypair, loan_pda: Pubkey, with_pool: bool| {
+        let mut accounts = vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(loan_pda, false),
+        ];
+        if with_pool { accounts.push(AccountMeta::new_readonly(pool_pda, false)); }
+        Instruction {
+            program_id,
+            accounts,
+            data: borsh::to_vec(&ClockLendInstruction::TriggerGracePeriod).unwrap(),
+        }
+    };
+
+    // 1. Borrower triggers grace on an overdue loan.
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_ix(&borrower, overdue_loan_pda, false)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &borrower], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "borrower grace trigger on overdue pool loan MUST succeed: {:?}", res);
+    let acc = banks_client.get_account(overdue_loan_pda).await.unwrap().unwrap();
+    let loan = LoanOrder::unpack_from_slice(&acc.data).unwrap();
+    assert_eq!(loan.status, LoanStatus::InGracePeriod, "status must move to InGracePeriod");
+    assert!(loan.grace_period_expires > now_secs(), "grace expiry must be in the future");
+
+    // 2. Loan not yet due: LoanNotDue.
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_ix(&borrower, future_loan_pda, false)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &borrower], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    expect_custom_error(&res, 6, "grace trigger before due_time MUST fail with LoanNotDue");
+
+    // 3. A stranger is neither borrower nor pool authority: UnauthorizedCaller.
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_ix(&stranger, unauth_loan_pda, true)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &stranger], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    expect_custom_error(&res, 23, "stranger grace trigger MUST fail with UnauthorizedCaller");
+
+    // 4. The pool authority IS authorized.
+    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let mut tx = Transaction::new_with_payer(&[grace_ix(&authority, unauth_loan_pda, true)], Some(&payer.pubkey()));
+    tx.sign(&[&payer, &authority], blockhash);
+    let res = banks_client.process_transaction(tx).await;
+    assert!(res.is_ok(), "pool authority grace trigger MUST succeed: {:?}", res);
 }

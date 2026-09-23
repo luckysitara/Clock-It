@@ -49,6 +49,13 @@ macro_rules! hex32 {
         }
         const fn decode<const N: usize>(s: &str) -> [u8; N] {
             let bytes = s.as_bytes();
+            // A literal longer than 2*N chars would otherwise decode silently,
+            // keeping only the first N bytes — the plausible-looking-but-wrong
+            // failure mode this macro exists to prevent.
+            assert!(
+                bytes.len() == N * 2,
+                "feed id must be exactly 64 lowercase hex characters"
+            );
             let mut out = [0u8; N];
             let mut i = 0;
             while i < N {

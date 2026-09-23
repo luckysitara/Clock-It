@@ -19,7 +19,7 @@ export interface LendingPool {
   maxDurationDays: number;
   loansOriginated: number;
   loansRepaid: number;
-  successRate: number; // e.g. 99.4%
+  successRate: number | null; // null = no loan history yet
   isVerifiedMerchant: boolean;
 }
 
@@ -56,6 +56,11 @@ export interface P2POffer {
   collateralImage?: string;
   requestedAmount: number; // USDC
   interestOffered: number; // USDC
+  // Raw base-unit (micro-USD) strings straight from the account bytes — the
+  // program's repay check requires EXACT equality, so rounding through Number
+  // loses the micro-precision that would reject the transaction.
+  requestedAmountRaw?: string;
+  interestOfferedRaw?: string;
   durationDays: number;
   createdAt: number;
   dueTime?: number;

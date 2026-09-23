@@ -112,12 +112,7 @@ export async function deriveSkrUsername(pubkey: PublicKey, mwaLabel?: string): P
 
   const base58 = pubkey.toBase58();
 
-  // 2. Recognized developer address mapping
-  if (base58 === 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re') {
-    return 'rootkit.skr';
-  }
-
-  // 3. Query on-chain SNS registry with a 1500ms timeout guard so it never blocks UI
+  // 2. Query on-chain SNS registry with a 1500ms timeout guard so it never blocks UI
   try {
     const snsPromise = mainnetConnection.getProgramAccounts(SNS_PROGRAM_ID, {
       filters: [{ memcmp: { offset: 32, bytes: base58 } }],
@@ -170,7 +165,9 @@ export async function connectSeekerWallet(cluster: SolanaNetwork = 'mainnet-beta
     publicKey: pubkey,
     skrHandle,
     authToken: authPayload.authToken,
-    isSeekerGenesisVerified: true,
+    // Honest default: SGT ownership is confirmed on-chain by fetchLiveWalletAssets
+    // (exact mint match) and surfaced via assets.hasSeekerGenesisToken.
+    isSeekerGenesisVerified: false,
   };
 }
 
@@ -181,7 +178,9 @@ export async function createManualSession(pubkeyInput: string | PublicKey): Prom
   return {
     publicKey: pubkey,
     skrHandle,
-    isSeekerGenesisVerified: true,
+    // Honest default: SGT ownership is confirmed on-chain by fetchLiveWalletAssets
+    // (exact mint match) and surfaced via assets.hasSeekerGenesisToken.
+    isSeekerGenesisVerified: false,
   };
 }
 
@@ -207,7 +206,9 @@ export async function createPreviewSession(): Promise<SeekerSession> {
   return {
     publicKey: previewPubkey,
     skrHandle,
-    isSeekerGenesisVerified: true,
+    // Honest default: SGT ownership is confirmed on-chain by fetchLiveWalletAssets
+    // (exact mint match) and surfaced via assets.hasSeekerGenesisToken.
+    isSeekerGenesisVerified: false,
   };
 }
 
@@ -254,8 +255,12 @@ export async function signAndSendSeekerTransaction(
 
   const conn = getConnection(network);
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
-  transaction.recentBlockhash = blockhash;
-  transaction.feePayer = session.publicKey;
+  // Builders may have pre-set the blockhash/feePayer and collected ephemeral
+  // signer signatures over that exact message (Pyth attachment). Never
+  // overwrite those — the pre-collected signature would no longer match.
+  const hadPreexistingBlockhash = !!transaction.recentBlockhash;
+  if (!transaction.recentBlockhash) transaction.recentBlockhash = blockhash;
+  if (!transaction.feePayer) transaction.feePayer = session.publicKey;
 
   const signature = await transact(async (wallet: Web3MobileWallet) => {
     if (session.authToken) {
@@ -284,15 +289,22 @@ export async function signAndSendSeekerTransaction(
     return signatures[0];
   });
 
-  // Wait for confirmation on the active cluster
-  await conn.confirmTransaction(
-    {
-      signature,
-      blockhash,
-      lastValidBlockHeight,
-    },
-    'confirmed'
-  );
+  // Wait for confirmation on the active cluster. When the transaction carried
+  // its own pre-set blockhash (Pyth attachment), the fresh blockhash's
+  // validity window does not apply — poll from the current height instead.
+  if (hadPreexistingBlockhash) {
+    const currentHeight = await conn.getBlockHeight('confirmed');
+    await conn.confirmTransaction(
+      {
+        signature,
+        blockhash: transaction.recentBlockhash!,
+        lastValidBlockHeight: currentHeight + 300,
+      },
+      'confirmed'
+    );
+  } else {
+    await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  }
 
   return signature;
 }

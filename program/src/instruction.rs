@@ -10,8 +10,9 @@ pub enum ClockLendInstruction {
     /// 2. `[]` Liquidity Mint (USDC/SOL)
     /// 3. `[writable]` Vault PDA `[b"vault", pool_pda]`
     /// 4. `[]` System Program
-    /// 5. `[]` Token Program
-    /// 6. `[]` Rent Sysvar
+    /// 5. `[]` Rent Sysvar
+    /// 6. `[optional]` Token Program (required for SPL liquidity mints so the
+    ///    vault token account can be initialized)
     InitializePool {
         pool_id: u64,
         pool_type: PoolType,

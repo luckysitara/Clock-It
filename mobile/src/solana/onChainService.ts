@@ -15,12 +15,9 @@ import {
   buildPythAttachment,
   pythFeedIdForCollateral,
   tryCanonicalSolUpdateAccount,
-  SOL_USD_FEED_ID,
-  SKR_USD_FEED_ID,
 } from './pyth';
 import {
   PROGRAM_ID,
-  DEVNET_RPC,
   writeU64LE,
   getPoolPDA,
   getVaultPDA,
@@ -72,7 +69,60 @@ export const connection = mainnetConnection;
 
 export { PROGRAM_ID };
 
+/**
+ * Attach a Pyth price update to a transaction (borrow + create-offer paths).
+ *
+ * Order is load-bearing: web3.js partialSign throws on a transaction without
+ * a recentBlockhash, and the ephemeral signature must cover the FINAL message,
+ * so the blockhash/feePayer are set first and the receiver instruction is
+ * unshifted BEFORE the signer collects its signature. If signing fails for any
+ * reason, the instruction is removed again so no phantom postUpdateAtomic
+ * (whose ephemeral signer nobody else can sign) survives in the transaction.
+ *
+ * On any failure the caller falls back: SOL collateral references Pyth's
+ * canonical cranked account (re-verified on-chain by the program); SKR has no
+ * canonical account, so it falls back to the admin feed's freshness window.
+ */
+async function attachPythOrFallback(
+  tx: Transaction,
+  connection: Connection,
+  feePayer: PublicKey,
+  collateralName: string
+): Promise<{ pythAccount?: PublicKey; pythCu: number }> {
+  try {
+    const att = await buildPythAttachment(connection, feePayer, pythFeedIdForCollateral(collateralName));
+    if (!tx.recentBlockhash) {
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash;
+    }
+    if (!tx.feePayer) tx.feePayer = feePayer;
+    tx.instructions.unshift(...att.instructions);
+    try {
+      if (att.signers.length > 0) tx.partialSign(...att.signers);
+    } catch (signErr) {
+      tx.instructions.splice(0, att.instructions.length);
+      throw signErr;
+    }
+    return { pythAccount: att.priceUpdateAccount, pythCu: att.computeUnits };
+  } catch (err) {
+    console.warn('[Pyth] attach skipped, fallback:', (err as any)?.message || err);
+    if (collateralName.toUpperCase().includes('SOL')) {
+      const canonical = await tryCanonicalSolUpdateAccount(connection);
+      if (canonical) {
+        console.warn('[Pyth] using canonical SOL update account');
+        return { pythAccount: canonical, pythCu: 0 };
+      }
+    }
+    return { pythCu: 0 };
+  }
+}
+
 export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+// Seeker Genesis Token mint (Soulbound Token-2022). Single source of truth:
+// the SGT badge is granted by EXACT mint match only — never by substring or
+// frozen-account heuristics.
+export const SGT_MINT = '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG';
 export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
@@ -183,7 +233,8 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
   const loansRepaid = data.readUInt32LE(isV2 ? 162 : 146);
   const name = decodeName(data.subarray(isV2 ? 166 : 150, isV2 ? 198 : 182));
 
-  const successRate = loansOriginated > 0 ? (loansRepaid / loansOriginated) * 100 : 100;
+  // null (rendered as '—') until the desk actually has loan history.
+  const successRate: number | null = loansOriginated > 0 ? (loansRepaid / loansOriginated) * 100 : null;
 
   return {
     id: poolId,
@@ -200,8 +251,8 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
     maxDurationDays: maxDurationDays || 30,
     loansOriginated,
     loansRepaid,
-    successRate: parseFloat(successRate.toFixed(1)),
-    isVerifiedMerchant: stakedSkrAmount > 0 || poolType === 'Circle' || poolType === 'Institutional',
+    successRate: successRate === null ? null : parseFloat(successRate.toFixed(1)),
+    isVerifiedMerchant: stakedSkrAmount > 0,
   };
 }
 
@@ -367,14 +418,12 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
           collateral = borrowLegacy[2].trim();
           poolId = parseInt(borrowLegacy[3]);
 
-          // Check if already in cache for this signature
+          // Check if already in cache for this signature. A legacy memo with no
+          // cached id cannot be resolved to a loan PDA — skip it rather than
+          // invent an identifier (the PDA derivation would target the wrong loan).
           const cached = cachedBySig.get(m.sig);
-          if (cached) {
-            orderId = cached.id;
-          } else {
-            const digits = m.sig.replace(/\D/g, '');
-            orderId = parseInt(digits.slice(-4)) || Math.floor(1000 + Math.random() * 9000);
-          }
+          if (!cached) continue;
+          orderId = cached.id;
         }
 
         openCandidates.push({
@@ -407,49 +456,69 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
       }
     }
 
-    // Convert open candidates into LoanOrder records
+    // Convert open candidates into LoanOrder records — from the CHAIN, never
+    // from fabricated identifiers. A memo-derived candidate is only shown when
+    // its pool resolves to a real on-chain desk AND its loan PDA exists with
+    // the expected borrower; everything else is skipped rather than invented.
     const nowSec = Math.floor(Date.now() / 1000);
+    const livePools = await fetchLivePools(network);
+    const poolsById = new Map(livePools.map((p) => [p.id, p]));
     for (const cand of openCandidates) {
       // If locally marked repaid, skip
       const cached = cachedById.get(cand.id) || cachedBySig.get(cand.sig);
       if (cached && cached.status === 'Repaid') continue;
 
-      const dueTime = cand.time + 7 * 86400;
-      let status: LoanStatus = 'Active';
-      let gracePeriodExpires = 0;
-      if (nowSec > dueTime) {
-        status = 'InGracePeriod';
-        gracePeriodExpires = dueTime + 86400;
-      } else if (cached?.status === 'InGracePeriod') {
-        status = 'InGracePeriod';
-        gracePeriodExpires = cached.gracePeriodExpires || (dueTime + 86400);
+      const pool = poolsById.get(cand.poolId);
+      if (!pool) {
+        console.warn(`[Orders] memo candidate pool #${cand.poolId} has no on-chain desk — skipped`);
+        continue;
       }
-
-      const isSol = cand.collateral.toUpperCase().includes('SOL');
-      const collUnits = parseFloat(cand.collateral) || 0;
-      const collateralMint = isSol
-        ? 'So11111111111111111111111111111111111111112'
-        : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3';
-
-      // M-03: Align interest math to smart contract exact integer formula
-      const principalMicro = BigInt(Math.round(cand.principal * 1_000_000));
-      const exactInterestMicro = calculateExactInterestDue(principalMicro, 800, 7 * 86400, false);
-      const interestDue = Number(exactInterestMicro) / 1_000_000;
-      const poolAuth = cand.poolId === 1 ? 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re' : '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1';
-      const [poolPDA] = getPoolPDA(new PublicKey(poolAuth), cand.poolId);
+      const [poolPDA] = getPoolPDA(new PublicKey(pool.authority), pool.id);
       const [loanPDA] = getLoanPDA(poolPDA, borrower, cand.id);
       const [escrowPDA] = getEscrowPDA(loanPDA);
 
+      // The loan PDA is the single source of truth for amounts, terms and status.
+      const info = await rpcConn.getAccountInfo(loanPDA);
+      const data = info?.data ? Buffer.from(info.data) : undefined;
+      if (!data || data.length < 170 || data.subarray(0, 8).toString() !== 'CLK_LOAN') {
+        console.warn(`[Orders] memo candidate #${cand.id} has no on-chain loan PDA — skipped`);
+        continue;
+      }
+      if (data.readUInt8(8) !== 1) continue; // not active
+      const onChainBorrower = new PublicKey(data.subarray(17, 49));
+      if (!onChainBorrower.equals(borrower)) continue;
+
+      // LoanOrder layout (170-byte): discriminator[0..8], is_active[8],
+      // loan_id[9..17], borrower[17..49], pool[49..81], principal[81..89],
+      // collateral_mint[89..121], collateral_amount[121..129],
+      // interest_due[129..137], origination[137..145], due[145..153],
+      // grace_expires[153..161], status[161], locked_skr[162..170].
+      const principalMicro = Number(data.readBigUInt64LE(81));
+      const interestMicro = Number(data.readBigUInt64LE(129));
+      const dueTime = Number(data.readBigInt64LE(145));
+      const gracePeriodExpires = Number(data.readBigInt64LE(153));
+      const statusByte = data.readUInt8(161);
+      const collateralMint = new PublicKey(data.subarray(89, 121)).toBase58();
+      const collateralAmountRaw = Number(data.readBigUInt64LE(121));
+
+      const isSol = collateralMint === NATIVE_SOL_MINT.toBase58() ||
+        collateralMint === SystemProgram.programId.toBase58();
+      const collUnits = isSol ? collateralAmountRaw / 1_000_000_000 : collateralAmountRaw / 1_000_000;
+      let status: LoanStatus = 'Active';
+      if (statusByte === 1) status = 'InGracePeriod';
+      else if (statusByte === 2) status = 'Repaid';
+      else if (statusByte === 3) status = 'Defaulted';
+
       ordersMap.set(cand.id, {
         id: cand.id,
-        poolId: cand.poolId,
-        poolName: cand.poolId === 1 ? 'Seeker Genesis Circle' : 'Tokyo Whale Desk',
+        poolId: pool.id,
+        poolName: pool.name,
         borrower: borrowerPubkey,
-        principalAmount: cand.principal,
-        collateralName: cand.collateral.includes(' ') ? cand.collateral : `${cand.collateral} ${isSol ? 'SOL' : 'SKR'}`,
+        principalAmount: principalMicro / 1_000_000,
+        collateralName: `${collUnits > 0 ? collUnits.toFixed(2) : '1.0'} ${isSol ? 'SOL' : 'SKR'}`,
         collateralMint,
-        collateralAmount: collUnits,
-        interestDue,
+        collateralAmount: collUnits > 0 ? collUnits : 1,
+        interestDue: interestMicro / 1_000_000,
         originationTime: cand.time,
         dueTime,
         gracePeriodExpires,
@@ -494,10 +563,10 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
         let creator = '';
         let funder = '';
         let collateralMint = '';
-        let liquidityMint = USDC_DEVNET_MINT.toBase58();
+        let liquidityMint = USDC_MAINNET_MINT.toBase58();
         let collateralLamports = 0;
-        let requestedLamports = 0;
-        let interestLamports = 0;
+        let requestedRaw: string | undefined;
+        let interestRaw: string | undefined;
         let durationSeconds = 0;
         let createdAt = 0;
         let dueTime = 0;
@@ -513,8 +582,8 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
           collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
           liquidityMint = new PublicKey(data.subarray(113, 145)).toBase58();
           collateralLamports = Number(data.readBigUInt64LE(145));
-          requestedLamports = Number(data.readBigUInt64LE(153));
-          interestLamports = Number(data.readBigUInt64LE(161));
+          requestedRaw = data.readBigUInt64LE(153).toString();
+          interestRaw = data.readBigUInt64LE(161).toString();
           durationSeconds = Number(data.readBigInt64LE(169));
           createdAt = Number(data.readBigInt64LE(177));
           dueTime = Number(data.readBigInt64LE(185));
@@ -526,8 +595,8 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
           funder = new PublicKey(data.subarray(49, 81)).toBase58();
           collateralMint = new PublicKey(data.subarray(81, 113)).toBase58();
           collateralLamports = Number(data.readBigUInt64LE(113));
-          requestedLamports = Number(data.readBigUInt64LE(121));
-          interestLamports = Number(data.readBigUInt64LE(129));
+          requestedRaw = data.readBigUInt64LE(121).toString();
+          interestRaw = data.readBigUInt64LE(129).toString();
           durationSeconds = Number(data.readBigInt64LE(137));
           createdAt = Number(data.readBigInt64LE(145));
           dueTime = Number(data.readBigInt64LE(153));
@@ -539,8 +608,8 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
           funder = new PublicKey(data.subarray(41, 73)).toBase58();
           collateralMint = new PublicKey(data.subarray(73, 105)).toBase58();
           collateralLamports = Number(data.readBigUInt64LE(105));
-          requestedLamports = Number(data.readBigUInt64LE(113));
-          interestLamports = Number(data.readBigUInt64LE(121));
+          requestedRaw = data.readBigUInt64LE(113).toString();
+          interestRaw = data.readBigUInt64LE(121).toString();
           durationSeconds = Number(data.readBigInt64LE(129));
           createdAt = Number(data.readBigInt64LE(137));
           dueTime = Number(data.readBigInt64LE(145));
@@ -551,6 +620,8 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
 
         if (!isInitialized) continue;
 
+        const requestedLamports = requestedRaw ? Number(BigInt(requestedRaw)) : 0;
+        const interestLamports = interestRaw ? Number(BigInt(interestRaw)) : 0;
         const requestedAmount = requestedLamports / 1_000_000;
         const interestOffered = interestLamports / 1_000_000;
         const durationDays = Math.max(1, Math.round(durationSeconds / 86400));
@@ -580,6 +651,8 @@ export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'
           liquidityMint,
           requestedAmount,
           interestOffered,
+          requestedAmountRaw: requestedRaw,
+          interestOfferedRaw: interestRaw,
           durationDays: durationDays || 7,
           createdAt,
           dueTime: dueTime > 0 ? dueTime : undefined,
@@ -747,7 +820,7 @@ function getKnownTokenSymbol(mint: string): string {
   if (mint === 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263') {
     return 'BONK';
   }
-  if (mint === '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG') {
+  if (mint === SGT_MINT) {
     return 'SGT';
   }
   if (
@@ -767,7 +840,7 @@ function getKnownTokenName(mint: string): string {
   if (mint === 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263') {
     return 'Bonk';
   }
-  if (mint === '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG') {
+  if (mint === SGT_MINT) {
     return 'Seeker Genesis Token';
   }
   if (
@@ -847,13 +920,11 @@ export async function fetchLiveWalletAssets(
       const decimals: number = info.tokenAmount?.decimals || 0;
       const state: string = info.state || '';
 
-      // Detect Seeker Genesis Token (Soulbound / Frozen Token-2022)
-      if (
-        state === 'frozen' ||
-        mint === '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG' ||
-        mint.toLowerCase().includes('seeker') ||
-        mint.toLowerCase().includes('sgt')
-      ) {
+      // Detect the Seeker Genesis Token by EXACT mint match only. Substring
+      // heuristics ('seeker'/'sgt') can match unrelated mints, and a frozen
+      // Token-2022 account is not proof of SGT ownership — never overclaim
+      // the trust signal.
+      if (mint === SGT_MINT) {
         hasSeekerGenesisToken = true;
       }
 
@@ -959,29 +1030,16 @@ export async function buildBorrowTx(
 
   // Pyth pull-oracle (best effort): when the Hermes fetch succeeds, prepend the
   // receiver postUpdate instructions and pass the verified price account. On any
-  // failure the program falls back to the admin price feed, so borrowing still
-  // works while that feed is fresh.
-  let pythCu = 0;
-  let pythAccount: PublicKey | undefined;
-  try {
-    const att = await buildPythAttachment(
-      getConnection('mainnet-beta'),
-      borrower,
-      pythFeedIdForCollateral(collateralName)
-    );
-    tx.instructions.unshift(...att.instructions);
-    if (att.signers.length > 0) tx.partialSign(...att.signers);
-    pythAccount = att.priceUpdateAccount;
-    pythCu = att.computeUnits;
-  } catch (err) {
-    console.warn('[Pyth] attach skipped, fallback:', (err as any)?.message || err);
-    // Hermes unreachable: reference Pyth's canonical cranked SOL account
-    // directly (no posting needed) so SOL borrows stay Pyth-priced.
-    if (isNativeSol) {
-      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
-      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
-    }
-  }
+  // failure the program falls back to the admin price feed (or Pyth's canonical
+  // cranked SOL account), so borrowing still works while that feed is fresh.
+  const pyth = await attachPythOrFallback(
+    tx,
+    getConnection('mainnet-beta'),
+    borrower,
+    collateralName
+  );
+  const pythCu = pyth.pythCu;
+  const pythAccount = pyth.pythAccount;
 
   // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
   // (~170k CU) plus the program instructions; budget must precede the body.
@@ -1132,7 +1190,7 @@ export async function buildRepayTx(
   // Query on-chain loan state to guarantee exact repayment down to the micro-unit
   let exactRepayLamports = BigInt(Math.round(repayAmountUsdc * 1_000_000));
   try {
-    const loanInfo = await devnetConnection.getAccountInfo(loanPDA);
+    const loanInfo = await getConnection('mainnet-beta').getAccountInfo(loanPDA);
     const loanData = loanInfo?.data;
     // NEW-4: discriminator-gated read of the loan PDA for the exact amount
     if (loanData && loanData.length === 170 && loanData.subarray(0, 8).toString() === 'CLK_LOAN') {
@@ -1144,8 +1202,8 @@ export async function buildRepayTx(
       const interest = loanData.readBigUInt64LE(121);
       exactRepayLamports = BigInt(principal.toString()) + BigInt(interest.toString());
     }
-  } catch {
-    // fallback to caller-supplied amount
+  } catch (err) {
+    console.warn('[Repay] exact-amount read failed, using caller amount:', (err as any)?.message || err);
   }
 
   // Layout: 1 byte tag (6) + 8 bytes repay_amount = 9 bytes
@@ -1255,25 +1313,14 @@ export async function buildCreateP2POfferTx(
   const [oraclePDA] = getOraclePDA(oracleMint);
 
   // Pyth pull-oracle (best effort) with the admin feed as the program fallback.
-  let pythCu = 0;
-  let pythAccount: PublicKey | undefined;
-  try {
-    const att = await buildPythAttachment(
-      getConnection('mainnet-beta'),
-      creator,
-      isNativeSol ? SOL_USD_FEED_ID : SKR_USD_FEED_ID
-    );
-    tx.instructions.unshift(...att.instructions);
-    if (att.signers.length > 0) tx.partialSign(...att.signers);
-    pythAccount = att.priceUpdateAccount;
-    pythCu = att.computeUnits;
-  } catch (err) {
-    console.warn('[Pyth] offer attach skipped, fallback:', (err as any)?.message || err);
-    if (isNativeSol) {
-      pythAccount = await tryCanonicalSolUpdateAccount(getConnection('mainnet-beta'));
-      if (pythAccount) console.warn('[Pyth] using canonical SOL update account');
-    }
-  }
+  const pyth = await attachPythOrFallback(
+    tx,
+    getConnection('mainnet-beta'),
+    creator,
+    isNativeSol ? 'SOL' : 'SKR'
+  );
+  const pythCu = pyth.pythCu;
+  const pythAccount = pyth.pythAccount;
 
   // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
   // (~170k CU) plus the program instructions; budget must precede the body.
@@ -1390,10 +1437,15 @@ export async function buildRepayPawnOfferTx(
   tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
-  const totalDue = parseFloat((offer.requestedAmount + offer.interestOffered).toFixed(2));
-  let exactRepayLamports = BigInt(Math.round(totalDue * 1_000_000));
+  // H-4: exact repay down to the base unit. Prefer the raw account-derived
+  // strings (never round through Number), then the on-chain read, and only as
+  // a last resort the caller-supplied float.
+  let exactRepayLamports =
+    offer.requestedAmountRaw && offer.interestOfferedRaw
+      ? BigInt(offer.requestedAmountRaw) + BigInt(offer.interestOfferedRaw)
+      : BigInt(Math.round((offer.requestedAmount + offer.interestOffered) * 1_000_000));
   try {
-    const offerInfo = await devnetConnection.getAccountInfo(offerPDA);
+    const offerInfo = await getConnection('mainnet-beta').getAccountInfo(offerPDA);
     const data = offerInfo?.data;
     // NEW-1: read the CURRENT (202-byte) offer layout — requested_amount @153,
     // interest_offered @161 — with the discriminator gate. The legacy 170-byte
@@ -1409,8 +1461,8 @@ export async function buildRepayPawnOfferTx(
         exactRepayLamports = BigInt(requested.toString()) + BigInt(interest.toString());
       }
     }
-  } catch {
-    // fallback to caller-supplied amount
+  } catch (err) {
+    console.warn('[Repay] exact-amount read failed, using caller amount:', (err as any)?.message || err);
   }
 
   // ClockLendInstruction::RepayLoan (Variant 6)
@@ -1434,7 +1486,7 @@ export async function buildRepayPawnOfferTx(
   });
   tx.add(ix);
 
-  const memoText = `ClockLend: Repay P2P Pawn #${offer.id} | Repaid: $${totalDue} USDC | Collateral ${offer.collateralName} Released from Escrow`;
+  const memoText = `ClockLend: Repay P2P Pawn #${offer.id} | Repaid: $${(Number(exactRepayLamports) / 1_000_000).toFixed(2)} USDC | Collateral ${offer.collateralName} Released from Escrow`;
   tx.add(
     new TransactionInstruction({
       programId: MEMO_PROGRAM_ID,
@@ -1594,14 +1646,9 @@ export async function buildStakeSkrTx(
   data.writeUInt8(2, 0); // Instruction 2: StakeSKR
   writeU64LE(BigInt(Math.round(amountSkr * 1_000_000))).copy(data, 1);
 
-  // Transfer 0.002 SOL for rent-exempt UserProfile / Escrow PDA
-  tx.add(
-    SystemProgram.transfer({
-      fromPubkey: user,
-      toPubkey: escrowPDA,
-      lamports: 2_000_000,
-    })
-  );
+  // No client-side SOL transfer: the program funds both the profile and the
+  // skr_escrow PDAs itself (create_or_allocate_pda from the signer's wallet).
+  // An extra transfer here would be a permanent, unrecoverable donation.
 
   // Execute on-chain StakeSKR instruction
   tx.add(

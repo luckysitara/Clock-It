@@ -43,6 +43,9 @@ const TREASURY_SEED = Buffer.from('treasury');
 const RPC = process.env.MAINNET_RPC || process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const keypairPath = process.env.DEPLOYER_KEY || `${process.env.HOME}/.config/solana/mainnet-deployer.json`;
 const keeperKeyPath = process.env.ORACLE_KEY || `${process.env.HOME}/.config/solana/mainnet-keeper.json`;
+// Cluster for the solana CLI subprocess calls (web3.js calls always use RPC).
+// Set SOLANA_CLUSTER=devnet for a dry run.
+const CLI_NETWORK = process.env.SOLANA_CLUSTER || 'mainnet-beta';
 const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath, 'utf8'))));
 const conn = new Connection(RPC, 'confirmed');
 
@@ -50,16 +53,53 @@ const w64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); r
 const w64s = (n) => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(n)); return b; };
 const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; };
 
+// Resolve the program-id keypair. A FIRST deploy (the program account does not
+// exist on the cluster) requires the keypair for the program id — the CLI
+// rejects a bare address for initial deployments. Upgrades accept an address.
+function resolveProgramKeypairPath() {
+  const candidates = [
+    process.env.PROGRAM_KEYPAIR,
+    `${process.env.HOME}/.config/solana/clock-lend-program.json`,
+    new URL('../program/target/deploy/clock_lend-keypair.json', import.meta.url).pathname,
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    try {
+      const pub = execSync(`solana-keygen pubkey ${p}`, { encoding: 'utf8' }).trim();
+      if (pub === PROGRAM_ID.toBase58()) return p;
+    } catch (_e) { /* try next candidate */ }
+  }
+  return undefined;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const skrPrice = parseFloat(args[args.indexOf('--skr-price') + 1] || '0');
   const createPool = args.includes('--create-pool');
   const rotateOracle = args.includes('--rotate-oracle');
+  const unknown = args.filter((a) => a.startsWith('--') && !['--create-pool', '--rotate-oracle', '--skr-price'].includes(a));
+  if (unknown.length) throw new Error(`Unknown flags: ${unknown.join(', ')}`);
+
+  // C-3 preflight: fail BEFORE spending lamports if the program-id keypair is
+  // not on this machine (first deploy) — the CLI's error comes only after the
+  // write-buffer step, which wastes rent and leaves a partial bootstrap.
+  const programKeypairPath = resolveProgramKeypairPath();
+  const programExists = await (async () => {
+    try { return !!(await conn.getAccountInfo(PROGRAM_ID)); } catch (_e) { return false; }
+  })();
+  if (!programExists && !programKeypairPath) {
+    throw new Error(
+      `Program account ${PROGRAM_ID.toBase58()} does not exist on ${CLI_NETWORK} and no keypair for it ` +
+      'was found (checked PROGRAM_KEYPAIR, ~/.config/solana/clock-lend-program.json, ' +
+      'program/target/deploy/clock_lend-keypair.json). Recover the keypair from backup and set ' +
+      'PROGRAM_KEYPAIR=/path/to/keypair.json — or pick a new program id and update lib.rs/program.ts.'
+    );
+  }
 
   const balance = await conn.getBalance(keypair.publicKey);
   console.log(`Deployer ${keypair.publicKey.toBase58()} balance: ${balance / 1e9} SOL`);
-  if (balance < 3_000_000_000) {
-    throw new Error('Insufficient mainnet SOL — fund the deployer wallet (~3.5 SOL) first.');
+  if (balance < 1_700_000_000) {
+    throw new Error('Insufficient SOL — fund the deployer wallet (~2.0 SOL) first.');
   }
 
   // 1. Deploy the program (write-buffer + upgrade) — same program id on mainnet
@@ -68,16 +108,15 @@ async function main() {
     throw new Error(`${soPath} not found — run: cd program && cargo build-sbf`);
   }
   console.log('Writing program buffer...');
-  const bufOut = execSync(`solana program write-buffer --url mainnet-beta --keypair ${keypairPath} ${soPath}`, { encoding: 'utf8' });
-  const buffer = bufOut.match(/Buffer: (\w+)/)[1];
+  const bufOut = execSync(`solana program write-buffer --url ${CLI_NETWORK} --keypair ${keypairPath} ${soPath}`, { encoding: 'utf8' });
+  const bufMatch = bufOut.match(/Buffer: (\w+)/);
+  if (!bufMatch) throw new Error(`Could not parse buffer from write-buffer output:\n${bufOut}`);
+  const buffer = bufMatch[1];
   console.log('Upgrading program...');
-  execSync(`solana program deploy --url mainnet-beta --keypair ${keypairPath} --program-id ${PROGRAM_ID.toBase58()} --buffer ${buffer}`, { stdio: 'inherit' });
-  console.log('Closing the buffer to recover its rent...');
-  try {
-    execSync(`solana program close --url mainnet-beta --keypair ${keypairPath} --buffers ${buffer}`, { stdio: 'inherit' });
-  } catch (e) {
-    console.warn('Buffer close failed (recover manually later):', e?.message || e);
-  }
+  const programIdArg = programKeypairPath || PROGRAM_ID.toBase58();
+  execSync(`solana program deploy --url ${CLI_NETWORK} --keypair ${keypairPath} --program-id ${programIdArg} --buffer ${buffer}`, { stdio: 'inherit' });
+  // No close needed: `deploy --buffer` transfers the buffer's lamports into the
+  // new/upgraded ProgramData as its rent — nothing is left to refund.
 
   // 2. InitializeAdmin (sole root = on-chain upgrade authority via ProgramData)
   const [adminPda] = PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);
@@ -159,6 +198,7 @@ async function main() {
     const data = Buffer.concat([
       Buffer.from([0]), w64(poolId), Buffer.from([1]), u16(350), u16(9000),
       w64s(3 * 86400), w64s(30 * 86400), name,
+      Buffer.from([0]), // is_oracle_free: false — require a live oracle (63rd byte, added in F7)
     ]);
     console.log('Creating "Seeker Genesis Circle" desk...');
     await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
@@ -178,7 +218,9 @@ async function main() {
   }
 
   console.log('\nMAINNET BOOTSTRAP COMPLETE');
-  console.log('Next: run scripts/keeper.mjs on a schedule (staleness window is 3600s).');
+  console.log('Primary pricing is Pyth (pull oracle via Hermes — set EXPO_PUBLIC_HERMES_API_KEY in the app).');
+  console.log('Admin-feed fallback: run `KEEPER_KEY=... node mobile/scripts/keeper.mjs --network mainnet-beta`');
+  console.log('manually ONLY if the Pyth/Hermes path is unavailable (staleness window is 3600s).');
 }
 
 async function setFeed(mint, priceMicroUsd, decimals, adminPda) {

@@ -81,11 +81,11 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
             <View style={styles.handleTouchable}>
               <Text style={[styles.passportHandle, { color: colors.text }]}>{skrHandle}</Text>
               <View style={[styles.hardwareTag, { backgroundColor: colors.badgeBg }]}>
-                <Text style={[styles.hardwareTagText, { color: colors.primary }]}>✓ SEED VAULT</Text>
+                <Text style={[styles.hardwareTagText, { color: colors.primary }]}>SEED VAULT</Text>
               </View>
             </View>
             <Text style={[styles.walletSub, { color: colors.textMuted }]}>
-              {shorten(userProfile.pubkey)} • Seeker Genesis Verified
+              {shorten(userProfile.pubkey)} • Solana Mainnet
             </Text>
           </View>
         </View>

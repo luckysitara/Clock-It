@@ -24,7 +24,7 @@ use clock_lend::{
     state::{LendingPool, LoanOrder, LoanStatus, P2POffer, PoolType, UserProfile, ADMIN_SEED,
             DISCRIMINATOR_LOAN, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
             ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, SKR_MINT,
-            TREASURY_SEED, VAULT_SEED},
+            TREASURY_SEED, USDC_DEVNET_MINT, VAULT_SEED},
 };
 use solana_program::{
     instruction::{AccountMeta, Instruction},
@@ -76,6 +76,17 @@ fn mint_data(d: u8) -> Vec<u8> {
     spl_token::state::Mint::pack(m, &mut b).unwrap();
     b
 }
+
+// Mint with a live authority and zero supply, for harnesses that mint tokens
+// for real (mint_to overflows on the u64::MAX supply that mint_data packs).
+fn mint_data_with_authority(d: u8, auth: Pubkey) -> Vec<u8> {
+    let mut m = spl_token::state::Mint::unpack_unchecked(&[0u8; 82]).unwrap();
+    m.mint_authority = spl_token::solana_program::program_option::COption::Some(auth);
+    m.supply = 0; m.decimals = d; m.is_initialized = true;
+    let mut b = vec![0u8; 82];
+    spl_token::state::Mint::pack(m, &mut b).unwrap();
+    b
+}
 fn program_data_bytes(auth: &Pubkey) -> Vec<u8> {
     let mut d = vec![0u8; 45];
     d[0..4].copy_from_slice(&3u32.to_le_bytes());
@@ -117,6 +128,7 @@ struct Ctx {
     next_loan_id: u64,
     offers: Vec<(usize, u64, Pubkey, Pubkey)>,  // (creator_idx, offer_id, offer_pda, escrow_pda)
     next_offer_id: u64,
+    interest_paid: u64,                          // total interest returned to the vault by repayments
 }
 
 // ---------------------------------------------------------------- invariant checks
@@ -133,6 +145,15 @@ async fn check_invariants(ctx: &mut Ctx, step: usize, op: &str) {
         vault_bal >= pool.total_liquidity,
         "INVARIANT 1 VIOLATED at step {step} ({op}): vault {vault_bal} < pool.total_liquidity {} \
          (shortfall {})", pool.total_liquidity, pool.total_liquidity - vault_bal
+    );
+    // The vault's only inflows beyond deposits are repayments' interest
+    // (principal replaces what was borrowed out). Track the interest and bound
+    // the vault on BOTH sides: an understated vault is as much a solvency bug
+    // as an overstated total_liquidity.
+    assert!(
+        vault_bal <= pool.total_liquidity + ctx.interest_paid,
+        "INVARIANT 1b VIOLATED at step {step} ({op}): vault {vault_bal} > total_liquidity {} + \
+         interest_paid {}", pool.total_liquidity, ctx.interest_paid
     );
 
     for (i, u) in ctx.users.iter().enumerate() {
@@ -204,6 +225,23 @@ async fn op_deposit(ctx: &mut Ctx, rng: &mut Rng, _ui: usize) {
         AccountMeta::new(ctx.lp_usdc, false), AccountMeta::new(ctx.vault, false),
         AccountMeta::new_readonly(spl_token::id(), false),
     ], data: borsh::to_vec(&ClockLendInstruction::DepositLiquidity { amount }).unwrap() };
+    let _ = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.lp], &ctx.payer, ctx.bh).await;
+}
+
+async fn op_withdraw(ctx: &mut Ctx, rng: &mut Rng) {
+    // Only the pool authority may withdraw; never more than the free liquidity.
+    let pool = match ctx.bc.get_account(ctx.pool).await.unwrap() {
+        Some(a) => LendingPool::unpack_from_slice(&a.data).expect("pool unpack"),
+        None => return,
+    };
+    if pool.total_liquidity == 0 { return; }
+    let amount = (rng.range(1, 20) as u64 * USDC).min(pool.total_liquidity);
+    let lp_pk = ctx.lp.pubkey();
+    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+        AccountMeta::new(lp_pk, true), AccountMeta::new(ctx.pool, false),
+        AccountMeta::new(ctx.lp_usdc, false), AccountMeta::new(ctx.vault, false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+    ], data: borsh::to_vec(&ClockLendInstruction::WithdrawLiquidity { amount }).unwrap() };
     let _ = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.lp], &ctx.payer, ctx.bh).await;
 }
 
@@ -300,6 +338,7 @@ async fn op_repay(ctx: &mut Ctx, rng: &mut Rng) {
     let r = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.users[ui].kp], &ctx.payer, ctx.bh).await;
     if r.is_ok() {
         println!("      step: user {ui} repaid loan {loan_id} ({total_due})");
+        ctx.interest_paid = ctx.interest_paid.saturating_add(l.interest_due);
         ctx.loans.retain(|(_, lid, _, _)| *lid != loan_id);
     }
 }
@@ -382,7 +421,9 @@ async fn fuzz_sequence_invariants() {
 
     // ---------- boot ----------
     let pid = clock_lend::id();
-    let usdc = Keypair::new();
+    // The program allowlists liquidity mints, so the pool's USDC mint must be
+    // the real devnet mint address (created here in genesis, like SKR_MINT).
+    let usdc = USDC_DEVNET_MINT;
     let deployer = Keypair::new();
     let (pool, _) = Pubkey::find_program_address(
         &[POOL_SEED, deployer.pubkey().as_ref(), &1u64.to_le_bytes()], &pid);
@@ -397,9 +438,11 @@ async fn fuzz_sequence_invariants() {
         owner: solana_program::bpf_loader_upgradeable::id(), executable: false, rent_epoch: 0 });
     pt.add_account(SKR_MINT, Account { lamports: 100_000_000_000, data: mint_data(6),
         owner: spl_token::id(), executable: false, rent_epoch: 0 });
+    pt.add_account(USDC_DEVNET_MINT, Account { lamports: 100_000_000_000, data: mint_data(6),
+        owner: spl_token::id(), executable: false, rent_epoch: 0 });
     let treasury_tok = Pubkey::new_unique();
     pt.add_account(treasury_tok, Account { lamports: 100_000_000_000,
-        data: tok(usdc.pubkey(), treasury_pda, 0), owner: spl_token::id(), executable: false, rent_epoch: 0 });
+        data: tok(usdc, treasury_pda, 0), owner: spl_token::id(), executable: false, rent_epoch: 0 });
 
     let users: Vec<User> = (0..N_USERS).map(|_| {
         let kp = Keypair::new();
@@ -409,11 +452,11 @@ async fn fuzz_sequence_invariants() {
     }).collect();
     let lp_usdc = Pubkey::new_unique();
     pt.add_account(lp_usdc, Account { lamports: 100_000_000_000,
-        data: tok(usdc.pubkey(), deployer.pubkey(), 500_000 * USDC), owner: spl_token::id(),
+        data: tok(usdc, deployer.pubkey(), 500_000 * USDC), owner: spl_token::id(),
         executable: false, rent_epoch: 0 });
     for u in &users {
         pt.add_account(u.usdc, Account { lamports: 100_000_000_000,
-            data: tok(usdc.pubkey(), u.kp.pubkey(), 100_000 * USDC), owner: spl_token::id(),
+            data: tok(usdc, u.kp.pubkey(), 100_000 * USDC), owner: spl_token::id(),
             executable: false, rent_epoch: 0 });
         pt.add_account(u.skr, Account { lamports: 100_000_000_000,
             data: tok(SKR_MINT, u.kp.pubkey(), 100_000 * USDC), owner: spl_token::id(),
@@ -421,13 +464,9 @@ async fn fuzz_sequence_invariants() {
     }
 
     let (mut bc, payer, bh) = pt.start().await;
-    let rent = bc.get_rent().await.unwrap();
     send(&mut bc, &[
-        system_instruction::create_account(&payer.pubkey(), &usdc.pubkey(),
-            rent.minimum_balance(spl_token::state::Mint::LEN), spl_token::state::Mint::LEN as u64, &spl_token::id()),
-        spl_token::instruction::initialize_mint(&spl_token::id(), &usdc.pubkey(), &payer.pubkey(), None, 6).unwrap(),
         system_instruction::transfer(&payer.pubkey(), &deployer.pubkey(), 30_000_000_000),
-    ], &[&payer, &usdc], &payer, bh).await.unwrap();
+    ], &[&payer], &payer, bh).await.unwrap();
     for u in &users {
         send(&mut bc, &[system_instruction::transfer(&payer.pubkey(), &u.kp.pubkey(), 30_000_000_000)],
              &[&payer], &payer, bh).await.unwrap();
@@ -447,7 +486,7 @@ async fn fuzz_sequence_invariants() {
     send(&mut bc, &[feed_ix], &[&payer, &deployer], &payer, bh).await.expect("feed");
     let init_ix = Instruction { program_id: pid, accounts: vec![
         AccountMeta::new(deployer.pubkey(), true), AccountMeta::new(pool, false),
-        AccountMeta::new_readonly(usdc.pubkey(), false), AccountMeta::new(vault, false),
+        AccountMeta::new_readonly(usdc, false), AccountMeta::new(vault, false),
         AccountMeta::new_readonly(SYS, false), AccountMeta::new_readonly(sysvar::rent::id(), false),
         AccountMeta::new_readonly(spl_token::id(), false),
     ], data: borsh::to_vec(&ClockLendInstruction::InitializePool {
@@ -460,10 +499,10 @@ async fn fuzz_sequence_invariants() {
     let mut ctx = Ctx { bc, payer, bh, pid, pool, vault, treasury_tok, sol_oracle,
         lp: deployer,   // moved in after the setup transactions above
         lp_usdc, users,
-        loans: Vec::new(), next_loan_id: 1, offers: Vec::new(), next_offer_id: 1 };
+        loans: Vec::new(), next_loan_id: 1, offers: Vec::new(), next_offer_id: 1,
+        interest_paid: 0 };
 
     // ---------- run ----------
-    let mut ok = 0usize; let mut fail = 0usize;
     for step in 0..steps {
         // ProgramTest's blockhash queue evicts the start blockhash after enough
         // transactions; without refreshing, banks_server panics on the lookup.
@@ -471,16 +510,16 @@ async fn fuzz_sequence_invariants() {
         let ui = rng.below(N_USERS as u64) as usize;
         let op = rng.below(100);
         let name = match op {
-            0..=19 => { op_deposit(&mut ctx, &mut rng, ui).await; "DepositLiquidity" }
-            20..=34 => { op_stake(&mut ctx, &mut rng, ui).await; "StakeSKR" }
-            35..=49 => { op_unstake(&mut ctx, &mut rng, ui).await; "UnstakeSKR" }
-            50..=74 => { op_borrow(&mut ctx, &mut rng, ui, step).await; "BorrowFromPool" }
-            75..=87 => { op_repay(&mut ctx, &mut rng).await; "RepayLoan" }
-            88..=93 => { op_p2p_create(&mut ctx, &mut rng, ui).await; "CreateP2POffer" }
-            94..=96 => { op_p2p_fund(&mut ctx, &mut rng).await; "FundP2POffer" }
-            _ => { op_p2p_cancel(&mut ctx, &mut rng).await; "CancelP2POffer" }
+            0..=18 => { op_deposit(&mut ctx, &mut rng, ui).await; "DepositLiquidity" }
+            19..=32 => { op_stake(&mut ctx, &mut rng, ui).await; "StakeSKR" }
+            33..=46 => { op_unstake(&mut ctx, &mut rng, ui).await; "UnstakeSKR" }
+            47..=70 => { op_borrow(&mut ctx, &mut rng, ui, step).await; "BorrowFromPool" }
+            71..=82 => { op_repay(&mut ctx, &mut rng).await; "RepayLoan" }
+            83..=88 => { op_p2p_create(&mut ctx, &mut rng, ui).await; "CreateP2POffer" }
+            89..=91 => { op_p2p_fund(&mut ctx, &mut rng).await; "FundP2POffer" }
+            92..=93 => { op_p2p_cancel(&mut ctx, &mut rng).await; "CancelP2POffer" }
+            _ => { op_withdraw(&mut ctx, &mut rng).await; "WithdrawLiquidity" }
         };
-        let _ = &mut ok; let _ = &mut fail;
         check_invariants(&mut ctx, step, name).await;
     }
 
@@ -515,36 +554,44 @@ async fn fuzz_sequence_invariants() {
 #[tokio::test]
 async fn is_oracle_free_is_authoritative_not_name_derived() {
     let pid = clock_lend::id();
-    let usdc = Keypair::new();
+    // Program allowlists liquidity mints — use the real devnet USDC address.
+    let usdc = USDC_DEVNET_MINT;
 
     for (label, pool_name, flag, expect_borrow_ok) in [
         ("name says ORACLE_FREE, flag false", b"ORACLE_FREE Desk".to_vec(), false, false),
         ("plain name,         flag true ", b"Plain Desk".to_vec(),         true,  true),
     ] {
         let authority = Keypair::new();
+        let borrower = Keypair::new();
         let (pool, _) = Pubkey::find_program_address(
             &[POOL_SEED, authority.pubkey().as_ref(), &1u64.to_le_bytes()], &pid);
         let (vault, _) = Pubkey::find_program_address(&[VAULT_SEED, pool.as_ref()], &pid);
         let (treasury_pda, _) = Pubkey::find_program_address(&[TREASURY_SEED], &pid);
 
         let mut pt = ProgramTest::new("clock_lend", pid, processor!(process_instruction));
+        pt.add_account(USDC_DEVNET_MINT, Account { lamports: 100_000_000_000, data: mint_data(6),
+            owner: spl_token::id(), executable: false, rent_epoch: 0 });
         let treasury_tok = Pubkey::new_unique();
         pt.add_account(treasury_tok, Account { lamports: 100_000_000_000,
-            data: tok(usdc.pubkey(), treasury_pda, 0), owner: spl_token::id(), executable: false, rent_epoch: 0 });
+            data: tok(usdc, treasury_pda, 0), owner: spl_token::id(), executable: false, rent_epoch: 0 });
+        let at_pk = Pubkey::new_unique();
+        pt.add_account(at_pk, Account { lamports: 100_000_000_000,
+            data: tok(usdc, authority.pubkey(), 1_000 * USDC), owner: spl_token::id(),
+            executable: false, rent_epoch: 0 });
+        let b_usdc = Pubkey::new_unique();
+        pt.add_account(b_usdc, Account { lamports: 100_000_000_000,
+            data: tok(usdc, borrower.pubkey(), 1_000 * USDC), owner: spl_token::id(),
+            executable: false, rent_epoch: 0 });
         let (mut bc, payer, bh) = pt.start().await;
-        let rent = bc.get_rent().await.unwrap();
         send(&mut bc, &[
-            system_instruction::create_account(&payer.pubkey(), &usdc.pubkey(),
-                rent.minimum_balance(spl_token::state::Mint::LEN), spl_token::state::Mint::LEN as u64, &spl_token::id()),
-            spl_token::instruction::initialize_mint(&spl_token::id(), &usdc.pubkey(), &payer.pubkey(), None, 6).unwrap(),
             system_instruction::transfer(&payer.pubkey(), &authority.pubkey(), 30_000_000_000),
-        ], &[&payer, &usdc], &payer, bh).await.unwrap();
+        ], &[&payer], &payer, bh).await.unwrap();
 
         let mut name = [0u8; 32];
         name[..pool_name.len()].copy_from_slice(&pool_name);
         let ix = Instruction { program_id: pid, accounts: vec![
             AccountMeta::new(authority.pubkey(), true), AccountMeta::new(pool, false),
-            AccountMeta::new_readonly(usdc.pubkey(), false), AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(usdc, false), AccountMeta::new(vault, false),
             AccountMeta::new_readonly(SYS, false), AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ], data: borsh::to_vec(&ClockLendInstruction::InitializePool {
@@ -552,36 +599,26 @@ async fn is_oracle_free_is_authoritative_not_name_derived() {
             min_duration: 86_400, max_duration: 86_400 * 30, name, is_oracle_free: flag }).unwrap() };
         send(&mut bc, &[ix], &[&payer, &authority], &payer, bh).await.expect("init pool");
 
-        let at = Keypair::new();
-        send(&mut bc, &[
-            system_instruction::create_account(&payer.pubkey(), &at.pubkey(), rent.minimum_balance(165), 165, &spl_token::id()),
-            spl_token::instruction::initialize_account(&spl_token::id(), &at.pubkey(), &usdc.pubkey(), &authority.pubkey()).unwrap(),
-            spl_token::instruction::mint_to(&spl_token::id(), &usdc.pubkey(), &at.pubkey(), &payer.pubkey(), &[], 1_000 * USDC).unwrap(),
-        ], &[&payer, &at], &payer, bh).await.unwrap();
         let dep = Instruction { program_id: pid, accounts: vec![
             AccountMeta::new(authority.pubkey(), true), AccountMeta::new(pool, false),
-            AccountMeta::new(at.pubkey(), false), AccountMeta::new(vault, false),
+            AccountMeta::new(at_pk, false), AccountMeta::new(vault, false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ], data: borsh::to_vec(&ClockLendInstruction::DepositLiquidity { amount: 1_000 * USDC }).unwrap() };
         send(&mut bc, &[dep], &[&payer, &authority], &payer, bh).await.expect("deposit");
 
-        let borrower = Keypair::new();
         let (loan, _) = Pubkey::find_program_address(
             &[LOAN_SEED, pool.as_ref(), borrower.pubkey().as_ref(), &1u64.to_le_bytes()], &pid);
         let (escrow, _) = Pubkey::find_program_address(&[ESCROW_SEED, loan.as_ref()], &pid);
         let (profile, _) = Pubkey::find_program_address(&[PROFILE_SEED, borrower.pubkey().as_ref()], &pid);
-        let b_usdc = Keypair::new();
         send(&mut bc, &[
             system_instruction::transfer(&payer.pubkey(), &borrower.pubkey(), 20_000_000_000),
-            system_instruction::create_account(&payer.pubkey(), &b_usdc.pubkey(), rent.minimum_balance(165), 165, &spl_token::id()),
-            spl_token::instruction::initialize_account(&spl_token::id(), &b_usdc.pubkey(), &usdc.pubkey(), &borrower.pubkey()).unwrap(),
-        ], &[&payer, &b_usdc], &payer, bh).await.unwrap();
+        ], &[&payer], &payer, bh).await.unwrap();
 
         // borrow WITHOUT any oracle account appended
         let ix = Instruction { program_id: pid, accounts: vec![
             AccountMeta::new(borrower.pubkey(), true), AccountMeta::new(pool, false),
             AccountMeta::new(loan, false), AccountMeta::new(vault, false),
-            AccountMeta::new(b_usdc.pubkey(), false), AccountMeta::new(borrower.pubkey(), false),
+            AccountMeta::new(b_usdc, false), AccountMeta::new(borrower.pubkey(), false),
             AccountMeta::new(escrow, false), AccountMeta::new_readonly(SYS, false),
             AccountMeta::new_readonly(spl_token::id(), false), AccountMeta::new_readonly(SYS, false),
             AccountMeta::new(profile, false), AccountMeta::new(treasury_tok, false),
@@ -603,8 +640,10 @@ async fn is_oracle_free_is_authoritative_not_name_derived() {
 // The clock does not advance in ProgramTest, so due_time can never be reached
 // by driving the lifecycle. Instead we pre-seed loans already in the
 // InGracePeriod state with grace_period_expires = 0 (i.e. expired) and fuzz
-// ClaimDefault / TriggerGracePeriod against them with randomized callers and
-// randomized optional-account sets.
+// ClaimDefault against them with randomized callers and randomized
+// optional-account sets. (TriggerGracePeriod is NOT driven here — the pool-
+// loan branch is covered deterministically in bank_integration, the P2P
+// branch by the repay-in-grace tests.)
 //
 // Invariants after every step:
 //   L1. profile.staked_skr      == skr_escrow balance      (bond accounting)

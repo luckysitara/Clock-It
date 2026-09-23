@@ -45,6 +45,7 @@ import {
   buildDepositLiquidityTx,
   getCachedOrders,
   setCachedOrders,
+  USDC_MAINNET_MINT,
 } from './src/solana/onChainService';
 import { getLoanPDA, getPoolPDA } from './src/solana/program';
 import {
@@ -161,7 +162,7 @@ function MainApp() {
     usdcBalance: 0,
     skrBalance: 0,
     bonkBalance: 0,
-    hasSeekerGenesisToken: true,
+    hasSeekerGenesisToken: false, // set on-chain by fetchLiveWalletAssets; never overclaim before RPC confirms
     totalUsdValue: 0,
     tokenList: [],
   });
@@ -207,29 +208,21 @@ function MainApp() {
       if (profile.status === 'fulfilled') setUserProfile(profile.value);
 
       if (liveOffers.status === 'fulfilled') {
-        if (net === 'devnet') {
-          const onChainOffers = liveOffers.value;
-          const onChainIds = new Set(onChainOffers.map((o) => o.id));
-          const sessionActive = offersRef.current.filter((o) => !onChainIds.has(o.id));
-          const combined = [...sessionActive, ...onChainOffers];
-          offersRef.current = combined;
-          setOffers(combined);
-        } else {
-          setOffers([]);
-        }
+        const onChainOffers = liveOffers.value;
+        const onChainIds = new Set(onChainOffers.map((o) => o.id));
+        const sessionActive = offersRef.current.filter((o) => !onChainIds.has(o.id));
+        const combined = [...sessionActive, ...onChainOffers];
+        offersRef.current = combined;
+        setOffers(combined);
       }
 
       if (liveOrders.status === 'fulfilled') {
-        if (net === 'devnet') {
-          const onChainOrders = liveOrders.value;
-          ordersRef.current = onChainOrders;
-          setOrders(onChainOrders);
-          await setCachedOrders(userPubkey.toBase58(), onChainOrders);
-          // Recalculate assets with final verified on-chain orders
-          await refreshWalletAssets(userPubkey, net);
-        } else {
-          setOrders([]);
-        }
+        const onChainOrders = liveOrders.value;
+        ordersRef.current = onChainOrders;
+        setOrders(onChainOrders);
+        await setCachedOrders(userPubkey.toBase58(), onChainOrders);
+        // Recalculate assets with final verified on-chain orders
+        await refreshWalletAssets(userPubkey, net);
       }
     } catch (e) {
       console.log('Error loading protocol data:', e);
@@ -342,19 +335,9 @@ function MainApp() {
       setOrders(ordersRef.current);
       await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
 
-      // 3. Update wallet assets (credit borrowed USDC, deduct locked collateral)
-      setWalletAssets((prev) => {
-        const currentUsdc = parseFloat((prev.usdcBalance + borrowAmount).toFixed(2));
-        const currentSol = collateralName === 'SOL' ? Math.max(0, parseFloat((prev.solBalance - collateralUnits).toFixed(3))) : prev.solBalance;
-        const currentSkr = collateralName === 'SKR' ? Math.max(0, parseFloat((prev.skrBalance - collateralUnits).toFixed(0))) : prev.skrBalance;
-        return {
-          ...prev,
-          usdcBalance: currentUsdc,
-          solBalance: currentSol,
-          skrBalance: currentSkr,
-          totalUsdValue: parseFloat((currentSol * 101.12 + currentUsdc + currentSkr * 0.0192).toFixed(2)),
-        };
-      });
+      // 3. Refresh wallet assets from the chain — the chain has already moved
+      // the disbursement and collateral, so the RPC is the source of truth.
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
 
       // 4. Show sleek production transaction notice
       setTransactionNotice({
@@ -412,7 +395,8 @@ function MainApp() {
       return;
     }
     const poolAuthority = matchingPool ? new PublicKey(matchingPool.authority) : PublicKey.default;
-    const totalDue = parseFloat((order.principalAmount + order.interestDue).toFixed(2));
+    // Fallback only: buildRepayTx reads the exact amount from the loan account.
+    const totalDue = order.principalAmount + order.interestDue;
 
     try {
       const tx = await buildRepayTx(
@@ -532,19 +516,14 @@ function MainApp() {
       });
     } catch (err: any) {
       console.warn('Trigger grace error:', err);
-      // Still update UI locally with notice
-      ordersRef.current = ordersRef.current.map((o) =>
-        o.id === orderId ? { ...o, status: 'InGracePeriod' as const } : o
-      );
-      setOrders(ordersRef.current);
-      if (session?.publicKey) {
-        await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
-      }
+      // The transaction failed: nothing changed on-chain. Do NOT mark the
+      // order InGracePeriod locally — the cached state would lie across
+      // restarts while the chain still shows Active.
       setTransactionNotice({
-        type: 'grace',
-        title: 'Social Grace Activated',
-        subtitle: '24-hour grace window started. Circle peers have priority buyout rights before any liquidation.',
-        primaryBtnText: 'Understood',
+        type: 'error',
+        title: 'Grace Period Not Activated',
+        subtitle: err?.message || 'Could not start the grace period on-chain.',
+        primaryBtnText: 'Dismiss',
       });
     }
   };
@@ -746,28 +725,10 @@ function MainApp() {
       );
       setOffers([...offersRef.current]);
 
-      // Release collateral back to user's wallet and deduct repaid USDC
-      setWalletAssets((prev) => {
-        const newUsdc = Math.max(0, parseFloat((prev.usdcBalance - totalDue).toFixed(2)));
-        const newSol = parseFloat((prev.solBalance + returnSol).toFixed(3));
-        const newSkr = Math.round(prev.skrBalance + returnSkr);
-        return {
-          ...prev,
-          usdcBalance: newUsdc,
-          solBalance: newSol,
-          skrBalance: newSkr,
-          totalUsdValue: parseFloat((newSol * 101.12 + newUsdc + newSkr * 0.0192).toFixed(2)),
-        };
-      });
-
-      setUserProfile((prev) => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          reputationScore: Math.min(10000, prev.reputationScore + 100),
-          totalLoansCompleted: prev.totalLoansCompleted + 1,
-        };
-      });
+      // Refresh wallet assets from the chain — RPC is the source of truth.
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
+      const freshProfile = await fetchLiveUserProfile(session.publicKey, session.skrHandle, selectedNetwork);
+      setUserProfile(freshProfile);
 
       setTransactionNotice({
         type: 'repay',
@@ -818,17 +779,8 @@ function MainApp() {
       offersRef.current = offersRef.current.filter((o) => o.id !== offer.id);
       setOffers([...offersRef.current]);
 
-      // Return collateral to wallet
-      setWalletAssets((prev) => {
-        const newSol = parseFloat((prev.solBalance + returnSol).toFixed(3));
-        const newSkr = Math.round(prev.skrBalance + returnSkr);
-        return {
-          ...prev,
-          solBalance: newSol,
-          skrBalance: newSkr,
-          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
-        };
-      });
+      // Refresh wallet assets from the chain — RPC is the source of truth.
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
 
       setTransactionNotice({
         type: 'success',
@@ -886,44 +838,17 @@ function MainApp() {
       console.log('Lending pool created on-chain:', sig);
       const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      const newPool: LendingPool = {
-        id: poolId,
-        poolType,
-        authority: session.publicKey.toBase58(),
-        name,
-        liquidityMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
-        totalLiquidity: initialLiquidity,
-        totalBorrowed: 0,
-        stakedSkrAmount: poolType === 'Individual' ? 500 : 2500,
-        interestRateBps,
-        maxLtvBps,
-        minDurationDays: minDays,
-        maxDurationDays: maxDays,
-        loansOriginated: 0,
-        loansRepaid: 0,
-        successRate: 100,
-        isVerifiedMerchant: false,
-      };
-
-      setPools((prev) => [newPool, ...prev.filter((p) => p.id !== poolId)]);
-
-      // Adjust mock wallet assets for rent-exemption fees
-      setWalletAssets((prev) => {
-        const deduct = 0.005;
-        const newSol = Math.max(0, parseFloat((prev.solBalance - deduct).toFixed(3)));
-        return {
-          ...prev,
-          solBalance: newSol,
-          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + prev.skrBalance * 0.0192).toFixed(2)),
-        };
-      });
+      // The chain is the source of truth: re-fetch pools and assets instead of
+      // assembling a local LendingPool with fabricated stake/success fields.
+      setPools(await fetchLivePools(selectedNetwork));
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
 
       setTransactionNotice({
         type: 'borrow',
         title: 'Lending Desk Initialized!',
-        subtitle: `"${name}" (${poolType}) is now live on Solana Devnet. Borrowers can now request loans directly against your desk!`,
-        amount: `$${initialLiquidity} USDC Capacity`,
-        collateral: `${aprPercent.toFixed(1)}% APR • ${maxLtvPercent.toFixed(0)}% Max LTV`,
+        subtitle: `"${name}" (${poolType}) is now live on Solana. Fund it from the Fund Desk screen before borrowers can draw.`,
+        amount: `${aprPercent.toFixed(1)}% APR • ${maxLtvPercent.toFixed(0)}% Max LTV`,
+        collateral: poolPDA.toBase58().slice(0, 8) + '...',
         txSignature: sig,
         escrowAddress: poolPDA.toBase58(),
         solscanUrl,
@@ -960,40 +885,11 @@ function MainApp() {
       console.log('SKR staked on-chain:', sig);
       const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      // Update user profile reputation & tier
-      setUserProfile((prev) => {
-        const currentStaked = (prev?.stakedSkr || 0) + amount;
-        let newTier: 'Diamond' | 'Gold' | 'Silver' | 'Standard' = 'Standard';
-        if (currentStaked >= 5000) newTier = 'Diamond';
-        else if (currentStaked >= 2500) newTier = 'Gold';
-        else if (currentStaked >= 1000) newTier = 'Silver';
-
-        const currentScore = prev?.reputationScore || 10000;
-        const newScore = Math.min(10000, currentScore + Math.max(50, Math.floor(amount / 2)));
-        const newDiscount = Math.min(3.0, parseFloat(((prev?.aprDiscount || 0) + 0.5).toFixed(1)));
-
-        return {
-          pubkey: session.publicKey.toBase58(),
-          stakedSkr: currentStaked,
-          totalLoansCompleted: prev?.totalLoansCompleted || 0,
-          totalLoansDefaulted: prev?.totalLoansDefaulted || 0,
-          reputationScore: newScore,
-          tier: newTier,
-          aprDiscount: newDiscount,
-        };
-      });
-
-      // Deduct staked SKR and 0.002 SOL rent
-      setWalletAssets((prev) => {
-        const newSkr = Math.max(0, Math.round(prev.skrBalance - amount));
-        const newSol = Math.max(0, parseFloat((prev.solBalance - 0.002).toFixed(3)));
-        return {
-          ...prev,
-          skrBalance: newSkr,
-          solBalance: newSol,
-          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
-        };
-      });
+      // The chain is the source of truth for staked SKR, tier and score —
+      // local tier math would drift from the program's on-chain thresholds.
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
+      const freshProfile = await fetchLiveUserProfile(session.publicKey, session.skrHandle, selectedNetwork);
+      setUserProfile(freshProfile);
 
       setTransactionNotice({
         type: 'borrow',
@@ -1083,19 +979,10 @@ function MainApp() {
       console.log('SKR unstaked on-chain:', sig);
       const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      // Credit the returned SKR back to the wallet
-      setWalletAssets((prev) => {
-        const newSkr = prev.skrBalance + amount;
-        return {
-          ...prev,
-          skrBalance: newSkr,
-          totalUsdValue: parseFloat((prev.solBalance * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
-        };
-      });
-
-      setUserProfile((prev) =>
-        prev ? { ...prev, stakedSkr: Math.max(0, prev.stakedSkr - amount) } : prev
-      );
+      // Refresh wallet assets from the chain — RPC is the source of truth.
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
+      const freshProfile = await fetchLiveUserProfile(session.publicKey, session.skrHandle, selectedNetwork);
+      setUserProfile(freshProfile);
 
       setTransactionNotice({
         type: 'repay',
@@ -1192,7 +1079,7 @@ function MainApp() {
     const newSession: SeekerSession = {
       publicKey: newPubkey,
       skrHandle: newSkr,
-      isSeekerGenesisVerified: true,
+      isSeekerGenesisVerified: false,
     };
     setSession(newSession);
     await refreshWalletAssets(newPubkey, selectedNetwork);
@@ -1214,7 +1101,7 @@ function MainApp() {
           setSelectedNetwork((prev) => (prev === 'devnet' ? 'mainnet-beta' : 'devnet'))
         }
         onDisconnectWallet={handleDisconnect}
-      />
+       hasSeekerGenesisToken={walletAssets.hasSeekerGenesisToken} />
 
       {/* Main Content Area */}
       <View style={styles.body}>

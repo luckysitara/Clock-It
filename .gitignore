@@ -18,6 +18,9 @@ id.json
 *id.json
 keypair.json
 *keypair*.json
+mainnet-*.json
+*deployer*.json
+*keeper*.json
 
 # Solana & Local Config
 .anchor/
@@ -28,7 +31,8 @@ local.properties
 /program/target/
 **/target/
 **/*.rs.bk
-Cargo.lock
+# program/Cargo.lock is deliberately COMMITTED: the runbook's ProgramData hash
+# verification is only reproducible with a pinned dependency graph.
 
 # Android Build Outputs & Gradle
 /mobile/android/app/build/

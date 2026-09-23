@@ -60,7 +60,7 @@ export const ConnectWalletView: React.FC<ConnectWalletViewProps> = ({ onConnecte
         <View style={styles.topBar}>
           <View style={[styles.badge, { backgroundColor: colors.badgeBg, borderColor: colors.badgeBorder }]}>
             <View style={[styles.dot, { backgroundColor: colors.primary }]} />
-            <Text style={[styles.badgeText, { color: colors.primary }]}>SOLANA DEVNET</Text>
+            <Text style={[styles.badgeText, { color: colors.primary }]}>SOLANA MAINNET</Text>
           </View>
 
           <TouchableOpacity

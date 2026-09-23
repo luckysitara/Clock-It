@@ -415,8 +415,15 @@ pub fn process_initialize_pool(
         &[POOL_SEED, authority.key.as_ref(), &pool_id_bytes, &[pool_bump]],
     )?;
 
-    // Informational 2: Liquidity pools must be SPL token based. Raw native SOL is rejected (Wrapped SOL must be used instead).
-    if *liquidity_mint.key == Pubkey::default() || liquidity_mint.key == &solana_program::system_program::ID {
+    // Liquidity pools must be SPL token based: 6-decimal USD-pegged mints
+    // (USDC on either cluster) or wrapped SOL. Raw native SOL is rejected.
+    // The borrow path values non-native pools at $1.00/6dp, which is only
+    // sound for USD pegs — other mints are rejected outright (same
+    // allowlist as F5 on the P2P path).
+    if *liquidity_mint.key != USDC_DEVNET_MINT
+        && *liquidity_mint.key != USDC_MAINNET_MINT
+        && *liquidity_mint.key != spl_token::native_mint::id()
+    {
         return Err(ClockLendError::UnsupportedCollateralMint.into());
     }
 
@@ -841,7 +848,12 @@ pub fn process_initialize_admin(
     }
 
     if admin_account.owner == program_id && !admin_account.data_is_empty() {
-        if let Ok(mut existing) = AdminConfig::unpack_from_slice(&admin_account.try_borrow_data()?) {
+        // Bind the unpack result to a let FIRST: a `try_borrow_data()` temporary
+        // inside an `if let` scrutinee lives for the whole statement (Rust
+        // temporary lifetime extension), so borrowing the account mutably inside
+        // the body would fail with AccountBorrowFailed at runtime.
+        let existing = AdminConfig::unpack_from_slice(&admin_account.try_borrow_data()?);
+        if let Ok(mut existing) = existing {
             if existing.is_initialized {
                 // Rotation: the caller has already proven upgrade-authority
                 // credentials above, so any rotation is authorized.
@@ -1217,13 +1229,16 @@ pub fn process_borrow_from_pool(
 
     let current_time = Clock::get()?.unix_timestamp;
 
-    // H-3: Enforce pool-scoped oracle precedence if pool has configured a custom oracle
+    // H-3: Enforce pool-scoped oracle precedence if pool has configured a custom oracle.
+    // The pool-scoped feed is authoritative when it exists: a borrower must not
+    // be able to omit it and get priced from the hardcoded baseline instead of
+    // the authority's chosen feed.
     if pool.has_custom_oracle {
         if let Some(col_oracle) = collateral_oracle_opt {
             if *col_oracle.key != expected_pool_collateral_oracle1 && *col_oracle.key != expected_pool_collateral_oracle2 {
                 return Err(ClockLendError::InvalidOracleAccount.into());
             }
-        } else if !pool.is_oracle_free {
+        } else {
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
     }
@@ -1274,6 +1289,15 @@ pub fn process_borrow_from_pool(
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
     };
+
+    // C-1 guard on the admin-feed path: the feed's declared scale must match
+    // the collateral's actual denomination. The Pyth path already pins this,
+    // but a misconfigured admin feed (e.g. a SOL feed published with 6
+    // decimals) would otherwise re-value every lamport 1000x high.
+    let expected_collateral_decimals: u8 = if is_native_sol { 9 } else { 6 };
+    if collateral_decimals != expected_collateral_decimals {
+        return Err(ClockLendError::InvalidOracleAccount.into());
+    }
 
     // Resolve dynamic pool liquidity price & decimals (mandatory for non-USD unless pool.is_oracle_free)
     let (pool_price_micro_usd, pool_decimals): (u64, u8) = if let Some(oracle_acc) = pool_oracle_opt {
@@ -1789,6 +1813,13 @@ pub fn process_create_p2p_offer(
         (feed.price_micro_usd, feed.decimals)
     };
 
+    // C-1 guard on the admin-feed path (P2P): same scale-vs-mint cross-check
+    // as the borrow path — a misconfigured feed must not re-value collateral.
+    let expected_collateral_decimals: u8 = if is_native_sol { 9 } else { 6 };
+    if collateral_decimals != expected_collateral_decimals {
+        return Err(ClockLendError::InvalidOracleAccount.into());
+    }
+
     let col_scale = 10u128.checked_pow(collateral_decimals as u32).ok_or(ClockLendError::AmountOverflow)?;
     let collateral_value_micro_usd = (collateral_amount as u128)
         .checked_mul(collateral_price_micro_usd as u128)
@@ -2228,7 +2259,11 @@ pub fn process_repay_loan(
                 profile.pack_into_slice(&mut profile_account.try_borrow_mut_data()?)?;
             } else if let Some(profile_account) = user_profile_opt {
                 if profile_account.owner == program_id && !profile_account.data_is_empty() {
-                    if let Ok(mut profile) = UserProfile::unpack_from_slice(&profile_account.try_borrow_data()?) {
+                    // Bind the unpack to a let first (see the InitializeAdmin
+                    // rotation comment): a scrutinee borrow would still be held
+                    // during the mutable borrow below.
+                    let profile = UserProfile::unpack_from_slice(&profile_account.try_borrow_data()?);
+                    if let Ok(mut profile) = profile {
                         if profile.user == *borrower.key {
                             profile.total_loans_completed = profile.total_loans_completed.saturating_add(1);
                             profile.reputation_score = profile.reputation_score.saturating_add(50).min(10000);

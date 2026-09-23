@@ -329,7 +329,7 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                     </View>
                     <View style={styles.metric}>
                       <Text style={[styles.mLabel, { color: colors.textMuted }]}>Repayment Rate</Text>
-                      <Text style={[styles.mValue, { color: colors.primary }]}>{pool.successRate}%</Text>
+                      <Text style={[styles.mValue, { color: colors.primary }]}>{pool.successRate === null ? '—' : `${pool.successRate}%`}</Text>
                     </View>
                   </View>
 
@@ -871,7 +871,7 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
                 activeOpacity={0.85}
               >
                 <Text style={[styles.bumpActionText, { color: colors.primaryText }]}>
-                  🚀 Deploy Desk on Devnet
+                  🚀 Deploy Desk on Solana
                 </Text>
               </TouchableOpacity>
 
@@ -1026,7 +1026,7 @@ export const MerchantDesksView: React.FC<MerchantDesksViewProps> = ({
             </View>
 
             <TouchableOpacity style={[styles.bumpActionBtn, { backgroundColor: colors.primary }]} onPress={handleCreatePawn}>
-              <Text style={[styles.bumpActionText, { color: colors.primaryText }]}>Lock Collateral & List on Devnet</Text>
+              <Text style={[styles.bumpActionText, { color: colors.primaryText }]}>Lock Collateral & List on Solana</Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setPawnModal(false)}>

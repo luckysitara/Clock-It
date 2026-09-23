@@ -143,7 +143,7 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
                   styles.switchInput,
                   { backgroundColor: colors.card, color: colors.text, borderColor: colors.cardBorder },
                 ]}
-                placeholder="Paste Solana address to inspect..."
+                placeholder="Paste Solana address to inspect (watch-only)..."
                 placeholderTextColor={colors.textMuted}
                 value={switchAddrText}
                 onChangeText={setSwitchAddrText}
@@ -319,7 +319,9 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
               </View>
               <View style={styles.assetRight}>
                 <View style={[styles.verifiedPill, { backgroundColor: colors.badgeBg }]}>
-                  <Text style={[styles.verifiedPillText, { color: colors.primary }]}>VERIFIED</Text>
+                  <Text style={[styles.verifiedPillText, { color: colors.primary }]}>
+                    {assets.hasSeekerGenesisToken ? 'VERIFIED' : 'NOT DETECTED'}
+                  </Text>
                 </View>
               </View>
             </View>

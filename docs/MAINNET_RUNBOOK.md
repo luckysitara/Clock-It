@@ -1,15 +1,27 @@
 # ClockLend — Mainnet Runbook
 
-Status: program v6 (F1–F5 + hardening batch + F7 typed `is_oracle_free` + fuzz invariant
-suite) is **live on devnet** (hash `9bbcdc68`); mainnet bootstrap is prepared but **not
-executed** (deployer wallet has 0 mainnet SOL). Follow this checklist in order.
+Status: program v7 (F1–F5 + hardening batch + F7 typed `is_oracle_free` + fuzz invariant
+suite + round-8: Full-only Pyth verification, ±staleness bounds, mint allowlist,
+admin-rotation fix). **Devnet runs the pre-round-8 build** (hash `600fba4a`) and must be
+re-upgraded from the current tree before devnet testing reflects the oracle hardening.
+Mainnet bootstrap is prepared but **not executed** (deployer wallet has 0 mainnet SOL).
+Follow this checklist in order.
 
 ## 0. Pre-flight
 
+- [ ] **Recover the program-id keypair for `HAjGxuih…`.** A FIRST deploy (the program
+      account does not exist on mainnet) requires the keypair file — the CLI rejects a
+      bare address for initial deployments. It is NOT on the deploy box (the build
+      regenerates `program/target/deploy/clock_lend-keypair.json` with a random key, which
+      is wrong). Restore it from backup and export `PROGRAM_KEYPAIR=<path>` — the deploy
+      script now preflights it and aborts before spending lamports if it is missing.
+      (If it is truly lost: pick a new program id and update `lib.rs declare_id!`,
+      `program.ts`, this runbook, and all seed scripts.)
 - [ ] **Fund the deployer wallet with ~2.0 SOL on mainnet-beta.** Breakdown: program rent
-      ~1.57 SOL (308 KB ProgramData — permanent), buffer ~1.57 SOL (refunded automatically
-      when the deploy script closes it), PDAs + feeds + first desk ~0.02 SOL, fees ~0.005.
-      `solana balance -u m` must show ≥ 2.0.
+      **1.5246 SOL** (299,952-byte ProgramData — permanent; the staging buffer's lamports
+      are transferred into the ProgramData by `deploy --buffer`, there is NO refund),
+      PDAs + feeds + first desk ~0.02 SOL, fees ~0.005. `solana balance -u m` must show
+      ≥ 2.0 (the script enforces a 1.7 SOL floor).
 - [x] **Fresh mainnet keypairs generated** (`~/.config/solana/`, chmod 600):
       - Deployer (upgrade authority / admin): `5avuk58DjBwBsyWkhgp6efC5WbnUKTFA5iLkbS8Aqv29`
       - Keeper (oracle_authority after `--rotate-oracle`): `HtiDpTkcWDDaQeRLSBvYDdw2sRJb5VvkD7EMvr5JWVzJ`
@@ -24,7 +36,7 @@ executed** (deployer wallet has 0 mainnet SOL). Follow this checklist in order.
       script seeds the SKR feed from Jupiter's Price API v3 automatically; the keeper
       refreshes both SOL and SKR feeds from the same source every run.
       `--skr-price <usd>` still overrides manually if you want a policy floor.
-- [ ] `cd program && cargo build-sbf && cargo test` (77/77 incl. fuzz invariants).
+- [ ] `cd program && cargo build-sbf && cargo test` (88/88 incl. fuzz invariants).
 
 ## 1. Deploy
 
@@ -41,38 +53,34 @@ This, in order: deploys the program (same id `HAjGxuih…`, upgradeable), calls
 owner = treasury PDA), publishes the global SOL and SKR feeds (Jupiter Price API v3,
 CoinGecko fallback for SOL), and creates the first desk.
 
-## 2. Pricing (Pyth pull oracles — keeper retired)
+## 2. Pricing (Pyth pull oracles — keeper dormant)
 
 SOL and SKR are priced by **Pyth pull oracles** (feed ids hardcoded in the program:
-SOL/USD `0xef0d8b6f…` and SKR/USD `0x38846ec4…`). The app fetches verified price
-updates from Hermes (`hermes.pyth.network`, keyless) and attaches them to borrow and
-pawn-creation transactions; the program verifies each update against the canonical
-feed id (owner, discriminator, feed id, guardian verification, freshness 60s/300s).
-No keeper, no admin price key, nothing to schedule.
+SOL/USD `0xef0d8b6f…` and SKR/USD `0x38846ec4…`). The program accepts **Full guardian
+verification only** and bounds staleness on BOTH sides: freshness 120s (SOL) / 300s
+(SKR), plus a +60s future-skew bound (`OraclePriceFromFuture`).
 
-The admin PriceFeed path remains as an **emergency fallback**: if the Hermes fetch
-fails, the app omits the Pyth account and the program prices from the admin feed
-while it is fresh. `mobile/scripts/keeper.mjs` is kept dormant for that scenario —
-run it manually (or re-add the GitHub Actions workflow) only if you ever need the
-admin-feed path kept alive.
+The app fetches updates from Hermes v2 — which now **requires an API key**: set
+`EXPO_PUBLIC_HERMES_API_KEY` in `mobile/.env`. Before attaching, the client checks the
+VAA's signature count against the on-chain guardian-set quorum and refuses to post
+anything that would be stored as `Partial` (which the program rejects); it also refuses
+payloads that exceed the transaction size limit.
 
-**Deprecated — keeper via GitHub Actions (was Option A)**
+Fallbacks, in order: **canonical cranked SOL account** (`7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE`,
+Full-verified, re-verified by the program — SOL borrows stay Pyth-priced even when
+Hermes is down); then the **admin PriceFeed** (emergency path). **SKR has no canonical
+account**: SKR-collateral loans fall back to the admin feed, which must stay fresh
+(3600s window) — run the keeper below if SKR lending matters and the Pyth path is
+unavailable.
 
-**Option A (recommended — no backend): GitHub Actions.** The workflow at
-`.github/workflows/keeper.yml` runs the keeper every 15 minutes for free. Configure four
-repo secrets (Settings → Secrets and variables → Actions):
-`KEEPER_KEYPAIR_B64` (`base64 -w0 ~/.config/solana/mainnet-keeper.json`), `SOLANA_RPC_URL`,
-`JUPITER_API_URL`, `JUPITER_API_KEY`. Trigger manually once via the Actions tab to verify.
-
-**Option B (server): plain cron** —
+Manual admin-feed fallback (only when the Pyth/Hermes path is unavailable):
 ```bash
-crontab -e
-# */15 * * * * KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs --network mainnet-beta >> keeper.log 2>&1
+KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs --network mainnet-beta
 ```
+(`keeper.mjs` reads `KEEPER_KEY`/`ORACLE_KEY` as **keypair file paths**, not base64.)
 
-If the keeper stops for >1 h, all borrows revert with `StaleOraclePrice` (fail-closed, no
-loss). A missing SKR feed blocks SKR-collateral borrows only. GitHub schedules are
-approximate (usually within minutes) and pause after 60 days of repo inactivity.
+If the admin feed goes stale for >1 h, Pyth-priced borrows are unaffected; admin-feed
+borrows revert with `StaleOraclePrice` (fail-closed, no loss).
 
 ## 3. Verify (after deploy)
 
@@ -84,6 +92,13 @@ approximate (usually within minutes) and pause after 60 days of repo inactivity.
   `admin = 5avuk58D…Qv29` (deployer) and `oracle_authority = HtiDpTk…JWVzJ` (keeper).
 - Global SOL feed PDA `A4hjbxYH…oBXu` (same PDA address on mainnet) is fresh.
 - Treasury ATA for `EPjFWdd5` owned by treasury PDA `6yY4P4x2…L4dq` exists.
+- The canonical Pyth SOL account `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE` exists and
+  is receiver-owned with `verification_level = Full` (this is the app's Hermes-less
+  fallback for SOL borrows).
+- Note: `program/target/deploy/clock_lend-keypair.json` is a build artifact with a RANDOM
+  key — it is not the program-id keypair. Keep the real `HAjGxuih…` keypair (and its
+  backup) separate from the build tree, and commit `program/Cargo.lock` so the hash check
+  builds the same ELF everywhere.
 
 ## 4. Risks to accept (documented design decisions)
 

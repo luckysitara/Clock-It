@@ -1,8 +1,7 @@
-import { PublicKey, Connection } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 
 export const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
-export const DEVNET_RPC = 'https://api.devnet.solana.com';
 
 export const POOL_SEED = Buffer.from('pool');
 export const VAULT_SEED = Buffer.from('vault');
@@ -70,4 +69,3 @@ export function getAdminPDA(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([ADMIN_SEED], PROGRAM_ID);
 }
 
-export const connection = new Connection(DEVNET_RPC, 'confirmed');
