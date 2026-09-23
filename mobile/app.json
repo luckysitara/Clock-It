@@ -13,7 +13,7 @@
     "android": {
       "package": "com.clocklend.app",
       "adaptiveIcon": {
-        "backgroundColor": "#08090C",
+        "backgroundColor": "#0C1435",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
