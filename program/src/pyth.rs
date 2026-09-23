@@ -17,10 +17,9 @@
 //   [8]  publish_time (i64 LE)  [8] prev_publish_time  [8] ema_price  [8] ema_conf
 //   [8]  posted_slot (u64 LE)
 //
-// Verified here: receiver ownership, discriminator, verification level >= 3
-// guardian signatures (the receiver's own Config minimum_signatures), feed id
-// match, freshness window, price > 0, confidence <= price, bounded micro-USD
-// normalization.
+// Verified here: receiver ownership, discriminator, verification level (Full
+// only), feed id match, freshness bounded on both sides, price > 0,
+// confidence <= price, bounded micro-USD normalization.
 
 use crate::error::ClockLendError;
 use solana_program::{
@@ -42,7 +41,10 @@ macro_rules! hex32 {
             match c {
                 b'0'..=b'9' => c - b'0',
                 b'a'..=b'f' => c - b'a' + 10,
-                _ => 0,
+                // Fail the build rather than silently decoding to 0: a typo, or
+                // uppercase hex, would otherwise yield a plausible-looking but
+                // wrong feed id that only fails at runtime.
+                _ => panic!("feed id must be 64 lowercase hex characters"),
             }
         }
         const fn decode<const N: usize>(s: &str) -> [u8; N] {
@@ -69,9 +71,9 @@ pub const SKR_USD_FEED_ID: [u8; 32] = hex32!("38846ec4d0dbe808091817f5c0d6ab8058
 pub const SOL_MAX_AGE_SECS: i64 = 120;
 pub const SKR_MAX_AGE_SECS: i64 = 300;
 
-/// The receiver's on-chain Config enforces this many guardian signatures
-/// before writing any price update account.
-const MIN_GUARDIAN_SIGNATURES: u8 = 3;
+/// Slack allowed when comparing the price's PythNet publish time against the
+/// Solana clock, which is slot-derived and can drift from wall time.
+const MAX_CLOCK_SKEW_SECS: i64 = 60;
 
 /// sha256("account:PriceUpdateV2")[..8] — Anchor account discriminator.
 const PRICE_UPDATE_DISCRIMINATOR: [u8; 8] = [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
@@ -132,21 +134,36 @@ pub fn try_verify_pyth_price(
     // 3. write_authority (32) — informational; the receiver sets it.
     off += 32;
 
-    // 4. Verification level: tag 1 = Full (19 signatures); tag 0 = Partial{n}.
-    let num_signatures: u8 = match data.get(off) {
+    // 4. Verification level: tag 1 = Full, tag 0 = Partial { num_signatures }.
+    //
+    //    Only `Full` is accepted. `Full` means two-thirds of the current
+    //    Wormhole guardian set signed — the quorum the bridge's security
+    //    argument rests on. `Partial { n }` means only n guardians signed,
+    //    which Pyth documents as lowering "the threshold of guardians that
+    //    would need to collude to produce a malicious price update"; a 3-of-19
+    //    quorum is not a basis for pricing collateral.
+    //
+    //    There is deliberately no constant to relax this. If atomic posting is
+    //    ever required, read the receiver's on-chain Config
+    //    `minimum_signatures` rather than reintroducing a tunable floor — a
+    //    hardcoded threshold silently drifts out of sync with the receiver's
+    //    governance-set policy.
+    //
+    //    `off` must still advance past the Partial payload to keep the feed-id
+    //    offset correct.
+    let is_full = match data.get(off) {
         Some(1) => {
             off += 1;
-            19
+            true
         }
         Some(0) => {
-            let n = *data.get(off + 1).ok_or(ClockLendError::InvalidOracleAccount)?;
             off += 2;
-            n
+            false
         }
         _ => return Err(ClockLendError::InvalidOracleAccount.into()),
     };
-    if num_signatures < MIN_GUARDIAN_SIGNATURES {
-        return Err(ClockLendError::InvalidOracleAccount.into());
+    if !is_full {
+        return Err(ClockLendError::InsufficientVerificationLevel.into());
     }
 
     // 5. Feed id must match the canonical id for this collateral.
@@ -169,10 +186,15 @@ pub fn try_verify_pyth_price(
     off += 4;
     let publish_time = rd_i64(&data, off)?;
 
-    // 7. Freshness: the price message's publish time must be recent.
+    // 7. Freshness, bounded on BOTH sides. A lower bound alone is not enough:
+    //    a future-dated publish_time would satisfy it forever, so a price could
+    //    sit in the past indefinitely while still reading as fresh.
     let now = Clock::get()?.unix_timestamp;
     if publish_time.saturating_add(max_age_secs) < now {
         return Err(ClockLendError::StaleOraclePrice.into());
+    }
+    if publish_time > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+        return Err(ClockLendError::OraclePriceFromFuture.into());
     }
 
     // 8. Sanity bounds on the price and its confidence interval.

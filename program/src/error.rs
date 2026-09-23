@@ -76,6 +76,10 @@ pub enum ClockLendError {
     OfferAlreadyActive,
     #[error("Invalid Profile Account")]
     InvalidProfileAccount,
+    #[error("Oracle Price Dated In The Future")]
+    OraclePriceFromFuture,
+    #[error("Oracle Verification Level Insufficient")]
+    InsufficientVerificationLevel,
 }
 
 impl From<ClockLendError> for ProgramError {
