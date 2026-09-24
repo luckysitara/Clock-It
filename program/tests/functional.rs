@@ -273,7 +273,6 @@ fn test_set_price_feed_instruction_serialization() {
         ClockLendInstruction::try_from_slice(&serialized).expect("Deserialization failed");
     assert_eq!(ix, deserialized);
 }
-
 #[test]
 fn test_withdraw_treasury_instruction_serialization() {
     let ix = ClockLendInstruction::WithdrawTreasury {
@@ -285,5 +284,65 @@ fn test_withdraw_treasury_instruction_serialization() {
     assert_eq!(ix, deserialized);
 }
 
+#[test]
+fn test_skr_yield_vault_pack_unpack() {
+    use clock_lend::state::{SkrYieldVault, DISCRIMINATOR_SKR_YIELD};
+    let authority = Pubkey::new_unique();
+    let reward_mint = Pubkey::new_unique();
+    let vault = SkrYieldVault {
+        discriminator: DISCRIMINATOR_SKR_YIELD,
+        is_initialized: true,
+        authority,
+        reward_mint,
+        total_staked_skr: 50_000_000,
+        acc_reward_per_share: 1_250_000_000_000,
+        total_rewards_distributed: 100_000_000,
+        pending_rewards: 25_000_000,
+        unallocated_rewards: 5_000_000,
+    };
 
+    let mut buf = vec![0u8; SkrYieldVault::LEN];
+    vault.pack_into_slice(&mut buf).expect("Pack failed");
 
+    let unpacked = SkrYieldVault::unpack_from_slice(&buf).expect("Unpack failed");
+    assert_eq!(unpacked, vault);
+}
+
+#[test]
+fn test_user_yield_position_pack_unpack() {
+    use clock_lend::state::{UserYieldPosition, DISCRIMINATOR_USER_YIELD};
+    let user = Pubkey::new_unique();
+    let reward_mint = Pubkey::new_unique();
+    let pos = UserYieldPosition {
+        discriminator: DISCRIMINATOR_USER_YIELD,
+        is_initialized: true,
+        user,
+        reward_mint,
+        staked_skr: 10_000_000,
+        reward_debt: 5_000_000_000,
+        accrued_rewards: 1_500_000,
+        total_claimed: 3_000_000,
+        last_interaction_time: 1720000000,
+    };
+
+    let mut buf = vec![0u8; UserYieldPosition::LEN];
+    pos.pack_into_slice(&mut buf).expect("Pack failed");
+
+    let unpacked = UserYieldPosition::unpack_from_slice(&buf).expect("Unpack failed");
+    assert_eq!(unpacked, pos);
+}
+
+#[test]
+fn test_yield_vault_instruction_serialization() {
+    let init_ix = ClockLendInstruction::InitializeSkrYieldVault;
+    let s1 = borsh::to_vec(&init_ix).unwrap();
+    assert_eq!(ClockLendInstruction::try_from_slice(&s1).unwrap(), init_ix);
+
+    let dep_ix = ClockLendInstruction::DepositSkrYield { amount: 5_000_000 };
+    let s2 = borsh::to_vec(&dep_ix).unwrap();
+    assert_eq!(ClockLendInstruction::try_from_slice(&s2).unwrap(), dep_ix);
+
+    let claim_ix = ClockLendInstruction::ClaimSkrYield;
+    let s3 = borsh::to_vec(&claim_ix).unwrap();
+    assert_eq!(ClockLendInstruction::try_from_slice(&s3).unwrap(), claim_ix);
+}

@@ -439,7 +439,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 14,
-    shadowColor: '#10B981',
+    shadowColor: '#572DFD',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
     shadowRadius: 16,

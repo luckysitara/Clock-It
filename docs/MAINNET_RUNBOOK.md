@@ -1,9 +1,13 @@
 # ClockLend — Mainnet Runbook
 
-Status: program v7 (F1–F5 + hardening batch + F7 typed `is_oracle_free` + fuzz invariant
-suite + round-8: Full-only Pyth verification, ±staleness bounds, mint allowlist,
-admin-rotation fix). **Devnet runs the pre-round-8 build** (hash `600fba4a`) and must be
-re-upgraded from the current tree before devnet testing reflects the oracle hardening.
+Status: program v8 (all round-8 hardening + round-9 SKR yield vault: escrow-authoritative
+stake, admin-gated init, authority-gated deposits, unallocated-rewards folding, 1h claim
+cooldown, 97/97 tests). **Devnet runs a pre-round-8 build** — measured live:
+ProgramData `76MvPRVKdsthzyBQhFnfqgd7QtjebiAGCLNTA56nCgMB`, real ELF 299,937 bytes,
+md5 `69577ae6a19e060a9ed9d9d720cb173a` (recipe: md5 of `data[45..45+299937]` fetched
+via RPC). It does NOT contain the round-8 oracle hardening or the yield feature and
+must be re-upgraded from the current tree. Do not trust bare hash prefixes in this
+doc — always re-derive with the recipe above before quoting one.
 Mainnet bootstrap is prepared but **not executed** (deployer wallet has 0 mainnet SOL).
 Follow this checklist in order.
 
@@ -36,7 +40,9 @@ Follow this checklist in order.
       script seeds the SKR feed from Jupiter's Price API v3 automatically; the keeper
       refreshes both SOL and SKR feeds from the same source every run.
       `--skr-price <usd>` still overrides manually if you want a policy floor.
-- [ ] `cd program && cargo build-sbf && cargo test` (88/88 incl. fuzz invariants).
+- [ ] `cd program && cargo build-sbf && cargo test` (97/97 incl. fuzz invariants).
+      Note: the deploy script now builds the ELF itself (`cargo build-sbf`) and hard-fails
+      if the artifact is older than the sources — `--skip-build` overrides.
 
 ## 1. Deploy
 
@@ -82,6 +88,23 @@ KEEPER_KEY=~/.config/solana/mainnet-keeper.json node mobile/scripts/keeper.mjs -
 If the admin feed goes stale for >1 h, Pyth-priced borrows are unaffected; admin-feed
 borrows revert with `StaleOraclePrice` (fail-closed, no loss).
 
+## 2b. SKR yield vault (dividends)
+
+- The deploy script initializes the vault automatically (admin-gated tag 15, reward
+  mint = USDC `EPjFWdd5…`). PDAs: vault `[skr_yield_vault, EPjFWdd5]`, vault token
+  `[skr_yield_token, EPjFWdd5]`, user positions `[skr_yield_user, user, EPjFWdd5]`.
+- Funding: the app appends the two vault PDAs to every borrow (when the vault is
+  initialized), routing **50% of the origination fee** to yield holders — no keeper job.
+  Manual alternative: the vault authority (deployer key) may call DepositSkrYield
+  (tag 16, authority-gated).
+- Claims: tag 17. The stake is read from the SKR escrow token account (the single
+  source of truth — unstaking immediately removes shares). A **1-hour cooldown**
+  applies after each payout or stake change (`YieldCooldown`, error 40). Deposits made
+  while nobody is staked are parked in `unallocated_rewards` and folded into the next
+  allocation — never stranded.
+- Note: the SKR mint does not exist on devnet, so devnet yield testing requires a
+  devnet SKR mint; mainnet has `SKRbvo6Gf…` (6 decimals).
+
 ## 3. Verify (after deploy)
 
 - `solana program show --url m HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3`
@@ -95,6 +118,9 @@ borrows revert with `StaleOraclePrice` (fail-closed, no loss).
 - The canonical Pyth SOL account `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE` exists and
   is receiver-owned with `verification_level = Full` (this is the app's Hermes-less
   fallback for SOL borrows).
+- The SkrYieldVault PDA (CLK_SYLD, 121 bytes, `is_initialized = 1`, `authority` =
+  deployer key) and its vault token account exist and are owned by the program / token
+  program respectively.
 - Note: `program/target/deploy/clock_lend-keypair.json` is a build artifact with a RANDOM
   key — it is not the program-id keypair. Keep the real `HAjGxuih…` keypair (and its
   backup) separate from the build tree, and commit `program/Cargo.lock` so the hash check

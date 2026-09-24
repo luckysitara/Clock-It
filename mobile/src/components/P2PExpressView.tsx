@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, ScrollView, ActivityIndicator, Image } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { LendingPool, UserProfile, WalletAssets } from '../types';
+import { livePrices, fetchLivePrices } from '../solana/onChainService';
 
 const SOL_LOGO = require('../../assets/tokens/sol.png');
 const SKR_LOGO = require('../../assets/tokens/skr.png');
@@ -25,9 +26,18 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
 }) => {
   const { colors, mode } = useTheme();
   const [amountStr, setAmountStr] = useState<string>('50');
-  const [collateralType, setCollateralType] = useState<'SOL' | 'SKR'>('SKR');
+  const [collateralType, setCollateralType] = useState<'SKR' | 'SOL'>('SKR');
   const [durationDays, setDurationDays] = useState<number>(7);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  // Collateral sizing MUST use a live price: sizing with a hardcoded price
+  // reverts the borrow when the market moves up and silently over-locks when
+  // it moves down. If the price source is unavailable, borrowing is disabled.
+  const [priceAvailable, setPriceAvailable] = useState<boolean>(true);
+  useEffect(() => {
+    fetchLivePrices()
+      .then(() => setPriceAvailable(true))
+      .catch(() => setPriceAvailable(false));
+  }, []);
 
   const numAmount = parseFloat(amountStr) || 0;
 
@@ -40,16 +50,21 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
   const skrBalance = walletAssets?.skrBalance || 0;
   const solHolding = walletAssets?.tokenList?.find((t) => t.symbol === 'SOL');
   const skrHolding = walletAssets?.tokenList?.find((t) => t.symbol === 'SKR');
-  const solPrice = solHolding && solHolding.amount > 0 ? solHolding.usdValue / solHolding.amount : 101.12;
-  const skrPrice = skrHolding && skrHolding.amount > 0 ? skrHolding.usdValue / skrHolding.amount : 0.0192;
+
+  // Native SOL is never in tokenList (tokenList only contains SPL token
+  // accounts), so any tokenList lookup would silently fall back forever.
+  // Use the shared live-price cache (refreshed every 2 minutes).
+  const solPrice = livePrices.sol;
+  const skrPrice = livePrices.skr;
+
   const collateralPrice = collateralType === 'SOL' ? solPrice : skrPrice;
+  const userBalance = collateralType === 'SOL' ? solBalance : skrBalance;
+
   const ltv = (bestPool ? bestPool.maxLtvBps : 8500) / 10000;
   const rawCollateral = numAmount > 0 ? (numAmount / ltv) / collateralPrice : 0;
-  const requiredCollateralUnits = collateralType === 'SOL'
-    ? rawCollateral
-    : Math.ceil(rawCollateral);
+  const isDecimal = collateralType === 'SOL';
+  const requiredCollateralUnits = isDecimal ? rawCollateral : Math.ceil(rawCollateral);
 
-  const userBalance = collateralType === 'SOL' ? solBalance : skrBalance;
   const isInsufficientCollateral = requiredCollateralUnits > userBalance;
 
   const baseApr = bestPool ? bestPool.interestRateBps / 100 : 3.5;
@@ -171,9 +186,9 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
           {[
             {
               id: 'SKR' as const,
-              label: 'SKR (Default)',
+              label: 'SKR',
               logo: SKR_LOGO,
-              sub: `${skrBalance > 1000 ? (skrBalance / 1000).toFixed(1) + 'k' : skrBalance.toFixed(0)} avail`,
+              sub: 'Stake for yield',
             },
             {
               id: 'SOL' as const,
@@ -213,13 +228,13 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
             <Text style={[styles.calcLabel, { color: colors.textSecondary }]}>Required Escrow Deposit</Text>
             <View style={styles.calcValueRow}>
               <Image
-                source={collateralType === 'SOL' ? SOL_LOGO : SKR_LOGO}
+                source={collateralType === 'SKR' ? SKR_LOGO : SOL_LOGO}
                 style={styles.calcMiniLogo}
                 resizeMode="contain"
               />
               <Text style={[styles.calcValue, { color: colors.text }]}>
                 {requiredCollateralUnits > 0
-                  ? `${requiredCollateralUnits.toFixed(collateralType === 'SOL' ? 3 : 0)} ${collateralType}`
+                  ? `${requiredCollateralUnits.toFixed(isDecimal ? 3 : 0)} ${collateralType}`
                   : '—'}
               </Text>
             </View>
@@ -228,17 +243,28 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
             <Text style={[styles.calcSubLabel, { color: colors.textMuted }]}>Wallet Holdings</Text>
             <View style={styles.calcValueRow}>
               <Image
-                source={collateralType === 'SOL' ? SOL_LOGO : SKR_LOGO}
+                source={collateralType === 'SKR' ? SKR_LOGO : SOL_LOGO}
                 style={styles.calcMiniLogo}
                 resizeMode="contain"
               />
               <Text style={[styles.calcSubValue, { color: isInsufficientCollateral ? colors.danger : colors.primary }]}>
-                {collateralType === 'SOL'
-                  ? `${solBalance.toFixed(2)} SOL`
-                  : `${skrBalance > 1000 ? skrBalance.toLocaleString() : skrBalance.toFixed(0)} SKR`}
+                {`${userBalance.toFixed(isDecimal ? 2 : 0)} ${collateralType}`}
               </Text>
             </View>
           </View>
+        </View>
+
+        {/* Collateral Yield Bonus Banner */}
+        <View style={{ marginTop: 6, marginBottom: 8, paddingHorizontal: 4 }}>
+          {collateralType === 'SKR' ? (
+            <Text style={{ fontSize: 11, color: colors.primary, fontWeight: '600' }}>
+              🔒 Escrowed SKR earns nothing in escrow — stake SKR in your Profile to earn protocol-fee dividends.
+            </Text>
+          ) : (
+            <Text style={{ fontSize: 11, color: colors.accent, fontWeight: '600' }}>
+              🔓 SOL in escrow is released on repayment. No yield accrues to escrowed collateral.
+            </Text>
+          )}
         </View>
 
         {/* Insufficient balance warning + quick airdrop/fallback button */}
@@ -251,10 +277,10 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
           >
             <View style={{ flex: 1 }}>
               <Text style={[styles.warningText, { color: colors.danger }]}>
-                Need {requiredCollateralUnits.toFixed(collateralType === 'SOL' ? 2 : 0)} {collateralType}, you hold {userBalance.toFixed(collateralType === 'SOL' ? 2 : 0)} {collateralType}
+                Need {requiredCollateralUnits.toFixed(isDecimal ? 2 : 0)} {collateralType}, you hold {userBalance.toFixed(isDecimal ? 2 : 0)} {collateralType}
               </Text>
             </View>
-            {collateralType === 'SKR' && (
+            {collateralType !== 'SOL' && (
               <TouchableOpacity
                 style={[styles.airdropBtn, { backgroundColor: colors.primary }]}
                 onPress={() => setCollateralType('SOL')}
@@ -331,7 +357,7 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
           isInsufficientCollateral && { opacity: 0.6 },
         ]}
         onPress={handleBorrow}
-        disabled={isSubmitting || numAmount <= 0 || isInsufficientCollateral}
+        disabled={isSubmitting || numAmount <= 0 || isInsufficientCollateral || !priceAvailable}
         activeOpacity={0.85}
       >
         {isSubmitting ? (

@@ -93,7 +93,7 @@ export const SplashScreenView: React.FC<SplashScreenViewProps> = ({ onFinish }) 
             <Text style={styles.pillText}>Solana Seeker</Text>
           </View>
           <View style={styles.pill}>
-            <View style={[styles.dot, { backgroundColor: '#10B981' }]} />
+            <View style={[styles.dot, { backgroundColor: '#23ABF4' }]} />
             <Text style={styles.pillText}>Zero-Liquidation Grace</Text>
           </View>
         </View>
@@ -124,7 +124,7 @@ const styles = StyleSheet.create({
     borderRadius: (width * 0.42) / 2,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#10B981',
+    shadowColor: '#572DFD',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.6,
     shadowRadius: 28,

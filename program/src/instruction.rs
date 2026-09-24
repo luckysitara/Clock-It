@@ -67,6 +67,10 @@ pub enum ClockLendInstruction {
     /// 10. `[writable, optional]` UserProfile PDA (for SKR discount check)
     /// 11. `[writable, optional]` Treasury Account
     /// 12. `[]` Clock Sysvar
+    /// 13. `[writable, optional]` SkrYieldVault PDA `[b"skr_yield_vault", pool.liquidity_mint]`
+    ///     (passing it routes 50% of the origination fee to SKR yield holders;
+    ///     the vault must already be initialized or the borrow reverts)
+    /// 14. `[writable, optional]` Vault Token Account `[b"skr_yield_token", pool.liquidity_mint]`
     BorrowFromPool {
         loan_id: u64,
         borrow_amount: u64,
@@ -169,6 +173,10 @@ pub enum ClockLendInstruction {
     /// 2. `[writable]` User SKR Token Account
     /// 3. `[writable]` SKR Escrow Account PDA `[b"skr_escrow", user]`
     /// 4. `[]` Token Program
+    /// 5. `[writable, optional]` SkrYieldVault PDA `[b"skr_yield_vault", USDC mint]`
+    ///    (appending it syncs the user's yield position DOWN so a recycled
+    ///    stake can never keep earning ghost shares)
+    /// 6. `[writable, optional]` UserYieldPosition PDA `[b"skr_yield_user", user, vault.reward_mint]`
     UnstakeSKR {
         amount: u64,
     },
@@ -207,4 +215,44 @@ pub enum ClockLendInstruction {
     WithdrawTreasury {
         amount: u64,
     },
+    /// 15. Initialize SKR Yield Vault (protocol fee dividend accumulator)
+    /// Admin-gated: the caller must be AdminConfig.admin. Re-initialization
+    /// is rejected. reward_mint is allowlisted to USDC (devnet/mainnet) or SKR.
+    /// Accounts:
+    /// 0. `[signer]` Authority (must equal AdminConfig.admin)
+    /// 1. `[writable]` SkrYieldVault PDA `[b"skr_yield_vault", reward_mint]`
+    /// 2. `[]` Reward Mint (e.g. USDC)
+    /// 3. `[writable]` Vault Token Account PDA `[b"skr_yield_token", reward_mint]`
+    /// 4. `[]` System Program
+    /// 5. `[]` Rent Sysvar
+    /// 6. `[]` Token Program
+    /// 7. `[]` AdminConfig PDA `[b"admin"]`
+    InitializeSkrYieldVault,
+    /// 16. Deposit Protocol Fee Revenue into SkrYieldVault (dividend distribution)
+    /// Authority-gated: only vault.authority may deposit. Deposits made while
+    /// total_staked_skr == 0 are parked in unallocated_rewards and folded into
+    /// the next allocation (never stranded).
+    /// Accounts:
+    /// 0. `[signer]` Depositor (must equal vault.authority)
+    /// 1. `[writable]` SkrYieldVault PDA `[b"skr_yield_vault", reward_mint]`
+    /// 2. `[writable]` Depositor Reward Token Account
+    /// 3. `[writable]` SkrYieldVault Token Account `[b"skr_yield_token", reward_mint]`
+    /// 4. `[]` Token Program
+    DepositSkrYield {
+        amount: u64,
+    },
+    /// 17. Claim SKR Protocol Fee Dividends (1-hour stake cooldown)
+    /// The stake is read from the SKR escrow token account (single source of
+    /// truth). Payouts are blocked within MIN_STAKE_AGE_SECS of the last
+    /// payout or stake change.
+    /// Accounts:
+    /// 0. `[signer]` User
+    /// 1. `[writable]` SkrYieldVault PDA `[b"skr_yield_vault", reward_mint]`
+    /// 2. `[writable]` UserYieldPosition PDA `[b"skr_yield_user", user, reward_mint]`
+    /// 3. `[writable]` SkrYieldVault Token Account `[b"skr_yield_token", reward_mint]`
+    /// 4. `[writable]` User Reward Token Account (receives dividend USDC)
+    /// 5. `[]` Token Program
+    /// 6. `[]` System Program
+    /// 7. `[]` SKR Escrow Token Account `[b"skr_escrow", user]`
+    ClaimSkrYield,
 }

@@ -80,6 +80,12 @@ pub enum ClockLendError {
     OraclePriceFromFuture,
     #[error("Oracle Verification Level Insufficient")]
     InsufficientVerificationLevel,
+    #[error("Invalid SKR Yield Vault Account")]
+    InvalidYieldVault,
+    #[error("Invalid User Yield Position Account")]
+    InvalidUserYieldPosition,
+    #[error("SKR Yield Claim Cooldown Active")]
+    YieldCooldown,
 }
 
 impl From<ClockLendError> for ProgramError {

@@ -46,6 +46,11 @@ import {
   getCachedOrders,
   setCachedOrders,
   USDC_MAINNET_MINT,
+  fetchSkrYieldVault,
+  fetchUserYieldPosition,
+  buildClaimSkrYieldTx,
+  SkrYieldVaultState,
+  UserYieldPositionState,
 } from './src/solana/onChainService';
 import { getLoanPDA, getPoolPDA } from './src/solana/program';
 import {
@@ -156,6 +161,8 @@ function MainApp() {
   const offersRef = useRef<P2POffer[]>(INITIAL_COMMUNITY_OFFERS);
   const [offers, setOffers] = useState<P2POffer[]>(INITIAL_COMMUNITY_OFFERS);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [skrYieldVault, setSkrYieldVault] = useState<SkrYieldVaultState | undefined>(undefined);
+  const [userYieldPosition, setUserYieldPosition] = useState<UserYieldPositionState | undefined>(undefined);
   const [walletAssets, setWalletAssets] = useState<WalletAssets>({
     network: 'mainnet-beta',
     solBalance: 0,
@@ -197,15 +204,19 @@ function MainApp() {
   const loadProtocolData = async (userPubkey: PublicKey, skrHandle: string, net: SolanaNetwork = selectedNetwork) => {
     try {
       setIsLoadingPools(true);
-      const [livePools, profile, liveOrders, liveOffers] = await Promise.allSettled([
+      const [livePools, profile, liveOrders, liveOffers, yieldVault, yieldPosition] = await Promise.allSettled([
         fetchLivePools(net),
         fetchLiveUserProfile(userPubkey, skrHandle, net),
         fetchLiveUserOrders(userPubkey, net),
         fetchLiveP2POffers(net),
+        fetchSkrYieldVault(net, USDC_MAINNET_MINT),
+        fetchUserYieldPosition(net, userPubkey, USDC_MAINNET_MINT),
       ]);
 
       if (livePools.status === 'fulfilled') setPools(livePools.value);
       if (profile.status === 'fulfilled') setUserProfile(profile.value);
+      if (yieldVault.status === 'fulfilled') setSkrYieldVault(yieldVault.value);
+      if (yieldPosition.status === 'fulfilled') setUserYieldPosition(yieldPosition.value);
 
       if (liveOffers.status === 'fulfilled') {
         const onChainOffers = liveOffers.value;
@@ -220,7 +231,7 @@ function MainApp() {
         const onChainOrders = liveOrders.value;
         ordersRef.current = onChainOrders;
         setOrders(onChainOrders);
-        await setCachedOrders(userPubkey.toBase58(), onChainOrders);
+        await setCachedOrders(userPubkey.toBase58(), onChainOrders, net);
         // Recalculate assets with final verified on-chain orders
         await refreshWalletAssets(userPubkey, net);
       }
@@ -237,11 +248,14 @@ function MainApp() {
       const pubkey = session.publicKey;
       const pubkeyStr = pubkey.toBase58();
 
-      // 1. Fast 0ms local hybrid cache hydration
-      getCachedOrders(pubkeyStr).then((cached) => {
+      // 1. Fast 0ms local hybrid cache hydration (strictly isolated by network)
+      getCachedOrders(pubkeyStr, selectedNetwork).then((cached) => {
         if (cached && cached.length > 0) {
           ordersRef.current = cached;
           setOrders(cached);
+        } else {
+          ordersRef.current = [];
+          setOrders([]);
         }
         // 2. Query wallet assets (incorporating activeBorrowAmount immediately)
         refreshWalletAssets(pubkey, selectedNetwork);
@@ -286,7 +300,8 @@ function MainApp() {
     if (!session) return;
 
     const poolAuthority = new PublicKey(pool.authority);
-    const collateralLamports = collateralName.toUpperCase().includes('SOL')
+    const isSol = collateralName === 'SOL';
+    const collateralLamports = isSol
       ? Math.round(collateralUnits * 1_000_000_000)
       : Math.round(collateralUnits * 1_000_000);
     const isPoolLiquid = pool.totalLiquidity >= borrowAmount;
@@ -312,14 +327,17 @@ function MainApp() {
 
       // 2. Create active loan order in state
       const interestDue = parseFloat((borrowAmount * (pool.interestRateBps / 10000) * (7 / 365)).toFixed(2));
+      const collateralMintStr = isSol
+        ? 'So11111111111111111111111111111111111111112'
+        : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3';
       const newOrder: LoanOrder = {
         id: loanId,
         poolId: pool.id,
         poolName: pool.name,
         borrower: session.publicKey.toBase58(),
         principalAmount: borrowAmount,
-        collateralName: `${collateralUnits} ${collateralName}`,
-        collateralMint: collateralName === 'SOL' ? 'So11111111111111111111111111111111111111112' : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3',
+        collateralName: `${collateralUnits.toFixed(isSol ? 2 : 0)} ${collateralName}`,
+        collateralMint: collateralMintStr,
         collateralAmount: collateralUnits,
         interestDue,
         originationTime: Math.floor(Date.now() / 1000),
@@ -333,7 +351,7 @@ function MainApp() {
 
       ordersRef.current = [newOrder, ...ordersRef.current.filter((o) => o.id !== loanId)];
       setOrders(ordersRef.current);
-      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current, selectedNetwork);
 
       // 3. Refresh wallet assets from the chain — the chain has already moved
       // the disbursement and collateral, so the RPC is the source of truth.
@@ -417,7 +435,7 @@ function MainApp() {
       // Remove / mark order as repaid
       ordersRef.current = ordersRef.current.filter((o) => o.id !== order.id);
       setOrders(ordersRef.current);
-      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
+      await setCachedOrders(session.publicKey.toBase58(), ordersRef.current, selectedNetwork);
 
       // Return collateral to wallet and deduct repaid USDC
       setWalletAssets((prev) => {
@@ -503,7 +521,7 @@ function MainApp() {
       );
       setOrders(ordersRef.current);
       if (session?.publicKey) {
-        await setCachedOrders(session.publicKey.toBase58(), ordersRef.current);
+        await setCachedOrders(session.publicKey.toBase58(), ordersRef.current, selectedNetwork);
       }
       setTransactionNotice({
         type: 'grace',
@@ -840,7 +858,7 @@ function MainApp() {
 
       // The chain is the source of truth: re-fetch pools and assets instead of
       // assembling a local LendingPool with fabricated stake/success fields.
-      setPools(await fetchLivePools(selectedNetwork));
+      setPools(await fetchLivePools(selectedNetwork, { force: true }));
       await refreshWalletAssets(session.publicKey, selectedNetwork);
 
       setTransactionNotice({
@@ -870,6 +888,38 @@ function MainApp() {
         type: 'error',
         title: 'Initialization Notice',
         subtitle: err?.message || 'Could not initialize pool on-chain.',
+        primaryBtnText: 'Dismiss',
+      });
+    }
+  };
+
+  // Claim SKR yield dividends (tag 17 — 1h stake cooldown applies on-chain)
+  const handleClaimYield = async () => {
+    if (!session) return;
+    try {
+      const tx = await buildClaimSkrYieldTx(session.publicKey, USDC_MAINNET_MINT);
+      const sig = await signAndSendSeekerTransaction(tx, session, selectedNetwork);
+      console.log('SKR yield claimed on-chain:', sig);
+      // Re-read the real on-chain state — the position and vault are the
+      // source of truth for accrued/claimed amounts.
+      const [vault, position] = await Promise.all([
+        fetchSkrYieldVault(selectedNetwork, USDC_MAINNET_MINT, { force: true }),
+        fetchUserYieldPosition(selectedNetwork, session.publicKey, USDC_MAINNET_MINT, { force: true }),
+      ]);
+      setSkrYieldVault(vault);
+      setUserYieldPosition(position);
+      await refreshWalletAssets(session.publicKey, selectedNetwork);
+      showToast('Yield claimed on-chain');
+    } catch (err: any) {
+      console.warn('Claim yield error:', err);
+      const message =
+        err?.message?.includes('Custom(40)') || err?.message?.includes('cooldown')
+          ? 'The 1-hour stake cooldown is still active. Try again later.'
+          : err?.message || 'Could not claim yield on-chain.';
+      setTransactionNotice({
+        type: 'error',
+        title: 'Yield Claim Notice',
+        subtitle: message,
         primaryBtnText: 'Dismiss',
       });
     }
@@ -1101,7 +1151,9 @@ function MainApp() {
           setSelectedNetwork((prev) => (prev === 'devnet' ? 'mainnet-beta' : 'devnet'))
         }
         onDisconnectWallet={handleDisconnect}
-       hasSeekerGenesisToken={walletAssets.hasSeekerGenesisToken} />
+        hasSeekerGenesisToken={walletAssets.hasSeekerGenesisToken}
+        isProfileActive={activeTab === 'PROFILE'}
+      />
 
       {/* Main Content Area */}
       <View style={styles.body}>
@@ -1153,6 +1205,9 @@ function MainApp() {
             onUnstakeSkr={handleUnstakeSkr}
             onOpenAssetsModal={() => setShowAssetsModal(true)}
             onDisconnectWallet={handleDisconnect}
+            yieldVault={skrYieldVault}
+            yieldPosition={userYieldPosition}
+            onClaimYield={handleClaimYield}
             onLockApp={() => {
               setLockScreenMode('unlock');
               setIsLocked(true);
@@ -1220,7 +1275,7 @@ function MainApp() {
         >
           <View style={{ position: 'relative' }}>
             <Ionicons
-              name={activeTab === 'LOANS' ? 'time' : 'time-outline'}
+              name={activeTab === 'LOANS' ? 'receipt' : 'receipt-outline'}
               size={22}
               color={activeTab === 'LOANS' ? colors.primary : colors.textSecondary}
             />

@@ -17,12 +17,18 @@ pub const SKR_MINT: Pubkey = solana_program::pubkey!("SKRbvo6Gf7GondiT3BbTfuRDPq
 pub const USDC_DEVNET_MINT: Pubkey = solana_program::pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 pub const USDC_MAINNET_MINT: Pubkey = solana_program::pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
+pub const SKR_YIELD_VAULT_SEED: &[u8] = b"skr_yield_vault";
+pub const SKR_YIELD_TOKEN_SEED: &[u8] = b"skr_yield_token";
+pub const USER_YIELD_SEED: &[u8] = b"skr_yield_user";
+
 pub const DISCRIMINATOR_POOL: [u8; 8] = *b"CLK_POOL";
 pub const DISCRIMINATOR_LOAN: [u8; 8] = *b"CLK_LOAN";
 pub const DISCRIMINATOR_OFFER: [u8; 8] = *b"CLK_PAWN";
 pub const DISCRIMINATOR_PROFILE: [u8; 8] = *b"CLK_PROF";
 pub const DISCRIMINATOR_FEED: [u8; 8] = *b"CLK_FEED";
 pub const DISCRIMINATOR_ADMIN: [u8; 8] = *b"CLK_ADMN";
+pub const DISCRIMINATOR_SKR_YIELD: [u8; 8] = *b"CLK_SYLD";
+pub const DISCRIMINATOR_USER_YIELD: [u8; 8] = *b"CLK_UYLD";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountKind {
@@ -32,6 +38,8 @@ pub enum AccountKind {
     UserProfile,
     PriceFeed,
     AdminConfig,
+    SkrYieldVault,
+    UserYieldPosition,
     Unknown,
 }
 
@@ -50,6 +58,8 @@ impl AccountKind {
             b"CLK_PROF" => AccountKind::UserProfile,
             b"CLK_FEED" => AccountKind::PriceFeed,
             b"CLK_ADMN" => AccountKind::AdminConfig,
+            b"CLK_SYLD" => AccountKind::SkrYieldVault,
+            b"CLK_UYLD" => AccountKind::UserYieldPosition,
             _ => AccountKind::Unknown,
         }
     }
@@ -427,3 +437,76 @@ impl AdminConfig {
         Ok(())
     }
 }
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
+pub struct SkrYieldVault {
+    pub discriminator: [u8; 8],
+    pub is_initialized: bool,
+    pub authority: Pubkey,
+    pub reward_mint: Pubkey,
+    pub total_staked_skr: u64,
+    pub acc_reward_per_share: u128, // Scaled by 1e12 for micro-precision dividend accounting
+    pub total_rewards_distributed: u64,
+    pub pending_rewards: u64,
+    /// Rewards deposited while no staker was synced. They are folded into
+    /// acc_reward_per_share on the next deposit so they are never stranded.
+    pub unallocated_rewards: u64,
+}
+
+impl SkrYieldVault {
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_SKR_YIELD;
+    pub const LEN: usize = 8 + 1 + 32 + 32 + 8 + 16 + 8 + 8 + 8; // 121 bytes
+
+    pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
+            BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else {
+            Err(ProgramError::InvalidAccountData)
+        }
+    }
+
+    pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
+        if dst.len() < Self::LEN {
+            return Err(ProgramError::AccountDataTooSmall);
+        }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
+pub struct UserYieldPosition {
+    pub discriminator: [u8; 8],
+    pub is_initialized: bool,
+    pub user: Pubkey,
+    pub reward_mint: Pubkey,
+    pub staked_skr: u64,
+    pub reward_debt: u128, // (staked_skr * acc_reward_per_share) / 1e12
+    pub accrued_rewards: u64,
+    pub total_claimed: u64,
+    pub last_interaction_time: i64,
+}
+
+impl UserYieldPosition {
+    pub const DISCRIMINATOR: [u8; 8] = DISCRIMINATOR_USER_YIELD;
+    pub const LEN: usize = 8 + 1 + 32 + 32 + 8 + 16 + 8 + 8 + 8; // 121 bytes
+
+    pub fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
+        if src.len() >= Self::LEN && &src[0..8] == &Self::DISCRIMINATOR {
+            BorshDeserialize::try_from_slice(&src[..Self::LEN]).map_err(|_| ProgramError::InvalidAccountData)
+        } else {
+            Err(ProgramError::InvalidAccountData)
+        }
+    }
+
+    pub fn pack_into_slice(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
+        if dst.len() < Self::LEN {
+            return Err(ProgramError::AccountDataTooSmall);
+        }
+        let serialized = borsh::to_vec(self).map_err(|_| ProgramError::InvalidAccountData)?;
+        dst[..serialized.len()].copy_from_slice(&serialized);
+        Ok(())
+    }
+}
+

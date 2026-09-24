@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Linking, T
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme/ThemeContext';
 import { UserProfile, WalletAssets } from '../types';
+import { SkrYieldVaultState, UserYieldPositionState } from '../solana/onChainService';
 import { PROGRAM_ID } from '../solana/program';
 import {
   isLockEnabled,
@@ -24,6 +25,10 @@ interface CreditProfileViewProps {
   onLockApp?: () => void;
   onSetupPin?: () => void;
   onChangePin?: () => void;
+  // SKR yield vault (only rendered when the on-chain vault exists)
+  yieldVault?: SkrYieldVaultState;
+  yieldPosition?: UserYieldPositionState;
+  onClaimYield?: () => void;
 }
 
 export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
@@ -37,6 +42,9 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
   onLockApp,
   onSetupPin,
   onChangePin,
+  yieldVault,
+  yieldPosition,
+  onClaimYield,
 }) => {
   const { colors, mode, toggleTheme } = useTheme();
   const [lockEnabled, setLockEnabledState] = useState<boolean>(false);
@@ -306,6 +314,34 @@ export const CreditProfileView: React.FC<CreditProfileViewProps> = ({
           )}
         </View>
       </View>
+
+      {/* SKR Protocol Yield (rendered only when the on-chain vault exists) */}
+      {yieldVault?.initialized && (
+        <View style={[styles.section, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>SKR Protocol Yield</Text>
+          <View style={styles.verifyItem}>
+            <Text style={styles.verifyIcon}>💧</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.verifyTitle, { color: colors.text }]}>
+                Accrued: ${((yieldPosition?.accruedRewards ?? 0) / 1_000_000).toFixed(4)} USDC
+              </Text>
+              <Text style={[styles.verifySub, { color: colors.textSecondary }]}>
+                {yieldPosition && yieldPosition.stakedSkr > 0
+                  ? `Your escrowed ${(yieldPosition.stakedSkr / 1_000_000).toLocaleString()} SKR earns protocol-fee dividends. Claim pays out hourly.`
+                  : 'Stake SKR to start earning protocol-fee dividends.'}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.claimYieldBtn, { backgroundColor: colors.primary, borderColor: colors.primary }]}
+              onPress={onClaimYield}
+              disabled={!onClaimYield}
+              activeOpacity={0.85}
+            >
+              <Text style={[styles.claimYieldText, { color: colors.primaryText }]}>Claim</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* Security & Verification Card */}
       <View style={[styles.section, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
@@ -612,6 +648,17 @@ const styles = StyleSheet.create({
     height: 42,
     borderRadius: 12,
     borderWidth: 1,
+  },
+  claimYieldBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  claimYieldText: {
+    fontSize: 13,
+    fontWeight: '800',
   },
   secActionBtnText: {
     fontSize: 12,

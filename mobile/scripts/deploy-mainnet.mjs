@@ -77,7 +77,7 @@ async function main() {
   const skrPrice = parseFloat(args[args.indexOf('--skr-price') + 1] || '0');
   const createPool = args.includes('--create-pool');
   const rotateOracle = args.includes('--rotate-oracle');
-  const unknown = args.filter((a) => a.startsWith('--') && !['--create-pool', '--rotate-oracle', '--skr-price'].includes(a));
+  const unknown = args.filter((a) => a.startsWith('--') && !['--create-pool', '--rotate-oracle', '--skr-price', '--skip-build'].includes(a));
   if (unknown.length) throw new Error(`Unknown flags: ${unknown.join(', ')}`);
 
   // C-3 preflight: fail BEFORE spending lamports if the program-id keypair is
@@ -107,6 +107,42 @@ async function main() {
   if (!fs.existsSync(soPath)) {
     throw new Error(`${soPath} not found — run: cd program && cargo build-sbf`);
   }
+
+  // C-3 (round 9): build + freshness preflight. Shipping a stale ELF silently
+  // omits whatever the sources gained since the last build — the previous
+  // artifact on this box predated BOTH the round-8 hardening and the yield
+  // feature. Hard-fail unless --skip-build is passed.
+  const skipBuild = args.includes('--skip-build');
+  if (!skipBuild) {
+    console.log('Building the program from source (cargo build-sbf)...');
+    execSync(`cd ${new URL('../program', import.meta.url).pathname} && cargo build-sbf`, { stdio: 'inherit' });
+  }
+  const soStat = fs.statSync(soPath);
+  let newestSource = 0;
+  for (const dir of ['src', 'tests']) {
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = `${d}/${e.name}`;
+        if (e.isDirectory()) walk(p);
+        else if (/\.[a-z]+$/i.test(e.name)) newestSource = Math.max(newestSource, fs.statSync(p).mtimeMs);
+      }
+    };
+    const root = new URL(`../program/${dir}`, import.meta.url).pathname;
+    if (fs.existsSync(root)) walk(root);
+  }
+  const tomlPath = new URL('../program/Cargo.toml', import.meta.url).pathname;
+  const lockPath = new URL('../program/Cargo.lock', import.meta.url).pathname;
+  newestSource = Math.max(newestSource, fs.statSync(tomlPath).mtimeMs);
+  if (fs.existsSync(lockPath)) newestSource = Math.max(newestSource, fs.statSync(lockPath).mtimeMs);
+  if (soStat.mtimeMs < newestSource) {
+    throw new Error(
+      `${soPath} is OLDER than the program sources — a stale build would ship silently. ` +
+      'Rebuild (cargo build-sbf) or pass --skip-build only if you are certain.'
+    );
+  }
+  const soMd5 = execSync(`md5sum ${soPath}`, { encoding: 'utf8' }).split(' ')[0];
+  console.log(`Artifact: ${soPath} (${soStat.size} bytes, md5 ${soMd5})`);
+
   console.log('Writing program buffer...');
   const bufOut = execSync(`solana program write-buffer --url ${CLI_NETWORK} --keypair ${keypairPath} ${soPath}`, { encoding: 'utf8' });
   const bufMatch = bufOut.match(/Buffer: (\w+)/);
@@ -215,6 +251,31 @@ async function main() {
       data,
     })), [keypair], { commitment: 'confirmed' });
     console.log(`Desk created: ${poolPda.toBase58()}`);
+  }
+
+  // 7. Initialize the SKR yield vault (admin-gated, tag 15). The vault funds
+  // itself via the 50/50 origination-fee split once the app appends its PDAs.
+  console.log('Initializing SKR yield vault (reward mint = USDC)...');
+  {
+    const [yieldVaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('skr_yield_vault'), USDC_MAINNET_MINT.toBuffer()], PROGRAM_ID);
+    const [yieldTokenPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('skr_yield_token'), USDC_MAINNET_MINT.toBuffer()], PROGRAM_ID);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: yieldVaultPda, isSigner: false, isWritable: true },
+        { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
+        { pubkey: yieldTokenPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: adminPda, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([15]),
+    })), [keypair], { commitment: 'confirmed' });
+    console.log(`SkrYieldVault: ${yieldVaultPda.toBase58()} (token ${yieldTokenPda.toBase58()})`);
   }
 
   console.log('\nMAINNET BOOTSTRAP COMPLETE');

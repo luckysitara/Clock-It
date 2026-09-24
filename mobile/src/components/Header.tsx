@@ -10,6 +10,7 @@ interface HeaderProps {
   solBalance: number;
   network?: SolanaNetwork;
   hasSeekerGenesisToken?: boolean;
+  isProfileActive?: boolean;
   onPressProfile: () => void;
   onPressBalance?: () => void;
   onToggleNetwork?: () => void;
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   solBalance,
   network = 'mainnet-beta',
   hasSeekerGenesisToken = false,
+  isProfileActive = false,
   onPressProfile,
   onPressBalance,
   onToggleNetwork,
@@ -30,20 +32,27 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <View style={[styles.container, { backgroundColor: colors.card, borderBottomColor: colors.cardBorder }]}>
-      {/* Left: Seeker ID User Handle */}
-      <TouchableOpacity style={styles.profileButton} onPress={onPressProfile} activeOpacity={0.7}>
-        <View style={[styles.avatar, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
-          <Image source={require('../../assets/logo.png')} style={styles.logoImg} resizeMode="contain" />
+      {/* Left: Dynamic Title or Seeker Handle Button */}
+      {isProfileActive ? (
+        <View style={styles.headerTitleGroup}>
+          <Text style={[styles.screenTitle, { color: colors.text }]}>Seeker Account</Text>
+          <Text style={[styles.screenSubtitle, { color: colors.textSecondary }]}>Identity & Credit Profile</Text>
         </View>
-        <View>
-          <View style={styles.handleRow}>
-            <Text style={[styles.handleText, { color: colors.text }]}>{skrHandle}</Text>
-            {hasSeekerGenesisToken && (
-              <View style={[styles.verifiedDot, { backgroundColor: colors.primary }]} />
-            )}
+      ) : (
+        <TouchableOpacity style={styles.profileButton} onPress={onPressProfile} activeOpacity={0.7}>
+          <View style={[styles.avatar, { backgroundColor: colors.cardAlt, borderColor: colors.cardBorder }]}>
+            <Image source={require('../../assets/logo.png')} style={styles.logoImg} resizeMode="contain" />
           </View>
-        </View>
-      </TouchableOpacity>
+          <View>
+            <View style={styles.handleRow}>
+              <Text style={[styles.handleText, { color: colors.text }]}>{skrHandle}</Text>
+              {hasSeekerGenesisToken && (
+                <View style={[styles.verifiedDot, { backgroundColor: colors.primary }]} />
+              )}
+            </View>
+          </View>
+        </TouchableOpacity>
+      )}
 
       {/* Right: Theme Toggle & Wallet Button */}
       <View style={styles.rightActions}>
@@ -96,6 +105,19 @@ const styles = StyleSheet.create({
   },
   avatarText: {
     fontSize: 18,
+  },
+  headerTitleGroup: {
+    justifyContent: 'center',
+  },
+  screenTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: -0.3,
+  },
+  screenSubtitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 1,
   },
   handleRow: {
     flexDirection: 'row',

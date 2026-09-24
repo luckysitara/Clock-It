@@ -118,7 +118,7 @@ android {
         }
     }
     gradle.taskGraph.whenReady { taskGraph ->
-        if (taskGraph.allTasks.any { it.name.contains("Release") }) {
+        if (taskGraph.allTasks.any { (it.name.startsWith("assemble") || it.name.startsWith("bundle")) && it.name.contains("Release") }) {
             if (!project.hasProperty('MYAPP_RELEASE_STORE_FILE') && System.getenv('KEYSTORE_PATH') == null) {
                 throw new GradleException("Release build rejected (M-01): Production release keystore credentials not configured. Set KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD via environment variables or MYAPP_RELEASE_* project properties. Insecure debug.keystore fallback is permanently disabled.")
             }

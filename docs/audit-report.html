@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClockLend — Round-8 Audit Report (2026-09-23)</title>
+<title>ClockLend — Round-9 Audit Report (2026-09-24)</title>
 <style>
   :root { --bg:#0C1435; --card:#141d47; --text:#e8ecff; --muted:#9aa3cc; --crit:#ff5f6d; --high:#ffb347; --med:#ffd97d; --low:#7fd8ff; --ok:#4ade80; }
   * { box-sizing: border-box; }
@@ -33,179 +33,165 @@
   th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid #2a3568; vertical-align:top; }
   th { color:var(--muted); font-weight:600; }
   code { font-family:ui-monospace, monospace; }
-  a { color:#8fb4ff; }
+  ul li { margin:.3rem 0; font-size:.92rem; }
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>ClockLend — Round-8 Audit Report</h1>
-<div class="sub">2026-09-23 · post-pull (merge <code>551a2d3</code> + <code>67d2ad7</code> + <code>b0d42fd</code>) · 3 independent fresh-eyes auditors (program / mobile / ops) + main-loop verification · all criticals &amp; highs verified against source, live chain, or local validator</div>
+<h1>ClockLend — Round-9 Audit Report</h1>
+<div class="sub">2026-09-24 · scope: NEW uncommitted SKR yield vault + LST feature on top of committed round-8 fix round (52927da) · 3 fresh-eyes agents (program / mobile / ops) + main-loop verification of all criticals &amp; highs</div>
 
 <div class="scores">
-  <div class="score"><div class="grade" style="color:var(--high)">B−</div><div class="label">Program security</div></div>
+  <div class="score"><div class="grade" style="color:var(--med)">C+</div><div class="label">Program security (core lending B+, yield feature D)</div></div>
   <div class="score"><div class="grade" style="color:var(--med)">C+</div><div class="label">Program quality/tests</div></div>
   <div class="score"><div class="grade" style="color:var(--crit)">D+</div><div class="label">Mobile security</div></div>
-  <div class="score"><div class="grade" style="color:var(--crit)">D+</div><div class="label">Mobile quality</div></div>
-  <div class="score"><div class="grade" style="color:var(--crit)">D</div><div class="label">Deploy tooling</div></div>
+  <div class="score"><div class="grade" style="color:var(--med)">C</div><div class="label">Mobile quality</div></div>
+  <div class="score"><div class="grade" style="color:var(--crit)">C−</div><div class="label">Deploy tooling</div></div>
   <div class="score"><div class="grade" style="color:var(--crit)">FALSE</div><div class="label">ready_for_mainnet</div></div>
 </div>
 
 <h2>Headline</h2>
-<p>The <strong>program survived the merge intact</strong>: all six round-7 fixes are present, 83/83 tests pass, and the hand-rolled PriceUpdateV2 parser was validated byte-exact against a live mainnet account. The hardening in <code>67d2ad7</code> is real (Full-only verification, +60s future-skew bound).</p>
-<p>But <strong>the client oracle path and the mainnet bootstrap are both broken</strong>: the mobile Pyth attachment can never produce a valid transaction, and the deploy script cannot run its first mainnet deploy (missing program keypair) nor create the first pool (62-byte payload where 63 are required).</p>
+<p>The committed round-8 fix round survived intact — <strong>zero regressions</strong> from the new diff. But the new <strong>SKR yield vault is not safe to ship</strong>: the share accounting trusts a cached counter instead of the actual escrowed SKR (drain exploit), and the vault can be re-initialized by anyone to zero all accrued rewards. On top of that, the deploy script would ship a <em>stale</em> program artifact that predates both round-8 hardening and the feature itself.</p>
 
-<h2>Merge-provenance verdict</h2>
+<h2>Round-8 regression check — all present</h2>
 <table>
-<tr><th>Round-7 fix</th><th>Status</th><th>Evidence</th></tr>
-<tr><td>C-1 1000× lamport mispricing</td><td class="badge ok">PRESENT</td><td><code>processor.rs:1234-1237, 1767-1769</code>; regression test pins $130 LTV boundary</td></tr>
-<tr><td>H-1 guardian floor</td><td class="badge ok">PRESENT (stricter)</td><td><code>pyth.rs:154-167</code> now rejects Partial at every count (Full-only)</td></tr>
-<tr><td>H-3 CU sizing/ordering</td><td class="badge ok">PRESENT</td><td><code>onChainService.ts:986-991</code>; budget unshifted to index 0</td></tr>
-<tr><td>M-2/3 canonical SOL fallback + 120s</td><td class="badge ok">PRESENT</td><td>Canonical account verified on both clusters: Full, fresh (55s/93s)</td></tr>
-<tr><td>M-4 conf ≤ price</td><td class="badge ok">PRESENT</td><td><code>pyth.rs:204-207</code></td></tr>
-<tr><td>L-1 checked_pow</td><td class="badge ok">PRESENT</td><td><code>pyth.rs:213,216</code>; <code>processor.rs:1321-1322</code></td></tr>
+<tr><th>Fix</th><th>Status</th><th>Evidence</th></tr>
+<tr><td>let-bound unpack (AccountBorrowFailed)</td><td class="badge ok">PRESENT</td><td><code>processor.rs:868-881, 2330-2334</code></td></tr>
+<tr><td>oracle-omit bypass closed</td><td class="badge ok">PRESENT</td><td><code>processor.rs:1300-1316</code></td></tr>
+<tr><td>admin-feed decimals cross-check</td><td class="badge ok">PRESENT</td><td><code>processor.rs:1319-1322</code> + P2P twin</td></tr>
+<tr><td>InitializePool USDC allowlist</td><td class="badge ok">PRESENT</td><td><code>processor.rs:436-437</code></td></tr>
+<tr><td>hex32! length assert</td><td class="badge ok">PRESENT</td><td><code>pyth.rs:50-60</code></td></tr>
+<tr><td>Mobile: quorum-aware Pyth attach, blockhash ordering, exact-amount reads, raw-string fields, honest state</td><td class="badge ok">PRESENT</td><td>verified at each site by the mobile agent</td></tr>
 </table>
 
 <h2>Critical findings</h2>
 
 <div class="finding">
   <span class="badge crit">CRITICAL</span> <span class="badge crit">C-1</span>
-  <h3>Pyth ephemeral signer is never signed — borrow &amp; create-offer fail 100% whenever Hermes is reachable</h3>
-  <div class="meta">mobile/src/solana/onChainService.ts:971-975 · seekerWallet.ts:256-258</div>
-  <p><code>tx.partialSign(...att.signers)</code> runs on a <code>new Transaction()</code> with no <code>recentBlockhash</code> → web3.js throws <code>Transaction recentBlockhash required</code> before signing. The <code>unshift</code> happened first, so the phantom <code>postUpdateAtomic</code> instruction stays in the tx; the catch swallows the error; the instruction declares the ephemeral price-update keypair as a required signer nobody ever signs → tx rejected at signature verification. Even if it had signed, <code>signAndSendSeekerTransaction</code> overwrites <code>recentBlockhash</code>/<code>feePayer</code> <em>after</em> signing, invalidating the signature anyway.</p>
-  <p>Today this is <em>inert</em> only because Hermes v2 returns 401 without an API key, so the attach throws before the unshift. The moment an API key is added, every borrow and pawn creation breaks — the exact inverse of the intended fail-open design.</p>
-  <div class="fix">Fix: set blockhash/feePayer <em>before</em> attaching signers; make <code>signAndSendSeekerTransaction</code> only fill them if unset (never overwrite a signed blockhash); move the <code>unshift</code> after a successful <code>partialSign</code>.</div>
-  <div class="verified">✔ VERIFIED — code path reproduced; web3.js throw behavior confirmed; overwrite confirmed at seekerWallet.ts:256-258</div>
+  <h3>Share inflation: cached total_staked_skr + unstake that never decrements = one stake drains the dividend pool</h3>
+  <div class="meta">program/src/processor.rs:3582-3588 (claim sync) · 725-815 (unstake) · 3596-3607 (no-profile branch)</div>
+  <p><code>vault.total_staked_skr</code> is only ever mutated inside <code>process_claim_skr_yield</code>, from <code>profile.staked_skr + locked_skr</code>. <code>process_unstake_skr</code> returns the SKR to the user and never touches the yield vault, and the claim path's no-profile branch keeps earning on the <em>cached</em> <code>position.staked_skr</code>. Exploit: stake X → ClaimSkrYield (registers X shares) → UnstakeSKR (SKR back, shares remain) → repeat with N fresh accounts re-staking the same X → N·X shares against X real escrowed SKR. On the next dividend the attacker's positions claim ~all of it (payout is first-come, capped by the vault token balance); honest stakers receive 0 and their <code>accrued_rewards</code> is silently written off. Cost to the attacker: transaction fees only.</p>
+  <div class="fix">Derive stake from the real SKR escrow token account balance (<code>spl_token::state::Account::unpack(&amp;skr_escrow...)</code>) instead of the cached counter — or at minimum decrement <code>vault.total_staked_skr</code> in <code>process_unstake_skr</code> (and the ClaimDefault slash path) and make the profile account mandatory on the claim path.</div>
+  <div class="verified">✔ VERIFIED — claim sync reads the profile counter; unstake grep-shows zero yield-vault references; no-profile branch re-earns cached stake</div>
 </div>
 
 <div class="finding">
   <span class="badge crit">CRITICAL</span> <span class="badge crit">C-2</span>
-  <h3>Full-only gate vs the atomic Pyth path: works today by a 1-signature margin, dead tomorrow</h3>
-  <div class="meta">mobile/src/solana/pyth.ts:28,148 · program/src/pyth.rs:154-167</div>
-  <p>The deployed GuardianSet under the Wormhole bridge (<code>HDwc…</code>) has <strong>5 keys → quorum 4</strong> (verified on-chain: account <code>8d9szT…</code>, index 1). The client trims Hermes VAAs to 5 signatures, so today a post <em>can</em> reach <code>VerificationLevel::Full</code> — by exactly one signature. If Pyth rotates the set to 8+ keys (quorum 6), every client post becomes <code>Partial</code> and every borrow/create-offer reverts with <code>InsufficientVerificationLevel</code> — total liveness failure with no on-chain signal. Independently, Hermes v2 now rejects keyless requests (HTTP 401 verified live), so the client path is dead in practice today, and <strong>SKR collateral has no canonical fallback</strong> — SKR loans depend entirely on the dormant keeper's admin feed staying inside its 3600s staleness window.</p>
-  <div class="fix">Either (a) accept <code>Partial{n}</code> only when n ≥ quorum(current on-chain guardian set), or (b) keep Full-only and have the client check the VAA's signature count against the on-chain set before attaching (fall back to the canonical account otherwise), or (c) drop atomic posting and pin canonical sponsored accounts for both SOL and SKR. Add an integration test generated the way the client generates its VAA.</div>
-  <div class="verified">✔ VERIFIED — GuardianSet on-chain (5 keys, quorum 4); Hermes 401 reproduced; program gate confirmed Full-only; SKR fallback absence confirmed</div>
+  <h3>InitializeSkrYieldVault is permissionless AND has no is_initialized guard — anyone can zero the vault and strand all rewards</h3>
+  <div class="meta">program/src/processor.rs:3355-3399</div>
+  <p><code>create_or_allocate_pda</code> returns <code>Ok</code> when the account is already program-owned, and there is no <code>is_initialized</code> read anywhere in the handler — so a second call unconditionally packs a fresh zeroed vault: <code>acc_reward_per_share = 0</code>, <code>total_staked_skr = 0</code>, <code>pending_rewards = 0</code>, <code>authority = caller</code>. The PDA is derived from <code>reward_mint</code> only, so any wallet can call it. Consequences: every user's stored <code>reward_debt</code> now exceeds <code>staked·acc/1e12</code> → all accrued rewards compute to 0 (stranded), and with <code>total_staked_skr == 0</code> all subsequent deposits stop updating <code>acc</code> → permanently unclaimable dividends. This is repeatable sabotage, and it also lets anyone race the team for first-call ownership of the vault (the <code>authority</code> field is currently read nowhere, but any future consumer inherits the hole).</p>
+  <div class="fix">Unpack first and bail: <code>if existing.is_initialized { return Err(...) }</code>, and gate first init on the AdminConfig admin (same pattern as WithdrawTreasury).</div>
+  <div class="verified">✔ VERIFIED — no is_initialized check; zeroed struct packed unconditionally; no admin/authority check in the handler</div>
 </div>
 
 <div class="finding">
   <span class="badge crit">CRITICAL</span> <span class="badge crit">C-3</span>
-  <h3>Program-id keypair missing — first mainnet deploy cannot sign</h3>
-  <div class="meta">mobile/scripts/deploy-mainnet.mjs:74</div>
-  <p>The script deploys with bare <code>--program-id HAjGxuih…</code>. On a cluster where the program account does not exist (mainnet — verified: not found), the CLI rejects with <em>“Initial deployments require a keypair be provided for the program id”</em>. The keypair for <code>HAjGxuih…</code> is on no keyring and in no file on this box: <code>id.json</code> → BEmX…, deployer → 5avuk…, keeper → HtiDpTk…, and <code>target/deploy/clock_lend-keypair.json</code> was silently regenerated to <code>517Dh4d…</code> by the last build. Devnet still upgrades (account exists); mainnet cannot bootstrap until the original keypair is recovered from backup — or a new program id is chosen end-to-end.</p>
-  <div class="fix">Recover the keypair and pass the file (<code>--program-id /path/HAjGxuih….json</code>); add a preflight comparing <code>solana-keygen pubkey $PROGRAM_KEYPAIR</code> to <code>PROGRAM_ID</code>. If lost: pick a new id and update <code>lib.rs declare_id!</code>, <code>program.ts</code>, runbook, seed scripts.</div>
-  <div class="verified">✔ VERIFIED — all four keypairs on disk checked; CLI first-deploy behavior reproduced on a local validator</div>
-</div>
-
-<div class="finding">
-  <span class="badge crit">CRITICAL</span> <span class="badge crit">C-4</span>
-  <h3><code>--create-pool</code> sends a 62-byte InitializePool; borsh requires 63</h3>
-  <div class="meta">mobile/scripts/deploy-mainnet.mjs:159-162 · program/src/instruction.rs:15-28</div>
-  <p><code>InitializePool</code> carries a trailing <code>is_oracle_free: bool</code> (added in F7), so borsh requires 63 bytes. The script builds 62 (<code>tag + pool_id + pool_type + 2×u16 + 2×i64 + name[32]</code>). Verified against the real program on a local validator: 62 bytes → <code>InvalidInstructionData</code>; +1 zero byte → decodes to business logic. The runbook's one-command bootstrap dies at the last step, <em>after</em> program/admin/feeds are live. <code>seed_devnet.mjs</code> and <code>seed_pool2.mjs</code> share the 62-byte payload and additionally omit the token-program account → also dead.</p>
-  <div class="fix">Append <code>Buffer.from([0]) /* is_oracle_free */</code> (plus a <code>--oracle-free</code> flag); fix or delete the two seed scripts; add an ops smoke test that runs the script end-to-end on devnet.</div>
-  <div class="verified">✔ VERIFIED — payload bytes counted; behavior reproduced on local validator against the real program</div>
+  <h3>Deploy script ships a stale artifact — today's deploy would silently omit round-8 hardening AND the yield feature</h3>
+  <div class="meta">mobile/scripts/deploy-mainnet.mjs:106-109 · program/target/deploy/clock_lend.so</div>
+  <p>The script's only check is <code>fs.existsSync(soPath)</code> — it never builds and never compares freshness. The artifact on disk (300,104 bytes, md5 <code>189a61df</code>, mtime 2026-09-23 09:30) predates both the round-8 commit (09:46) and the yield sources — all five <code>program/src/*.rs</code> files are newer. Running the runbook command today write-buffers and upgrades that old ELF, prints "MAINNET BOOTSTRAP COMPLETE", and ships a program without the Pyth Full-verification hardening, the ±staleness bounds, the allowlists, or the yield feature.</p>
+  <div class="fix">Preflight: run <code>cargo build-sbf</code> (or hard-fail without <code>--skip-build</code>); fail if any <code>program/src/**</code> file or <code>program/Cargo.lock</code> is newer than the .so; print md5 + size before upload.</div>
+  <div class="verified">✔ VERIFIED — mtimes and md5 checked; all five source files newer than the artifact</div>
 </div>
 
 <h2>High findings</h2>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-1</span>
-  <h3>Exact-repay reads use devnetConnection — dead on mainnet, silent overpay risk</h3>
-  <div class="meta">mobile/src/solana/onChainService.ts:1135, 1396</div>
-  <p><code>buildRepayTx</code> / <code>buildRepayPawnOfferTx</code> read current principal/interest from <code>devnetConnection</code> to compute the exact amount the program's equality check requires. On mainnet this returns null, the catch swallows it, and the caller-supplied float is used — rounding drift rejects, overpay is a real loss. <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Use the mainnet connection (or take a <code>Connection</code> param); log in the catch.</div>
+  <h3>The yield feature is inert in the shipped client — and the deployed program can't run it anyway</h3>
+  <div class="meta">mobile/src/solana/onChainService.ts:1954 · program/src/instruction.rs:210-240</div>
+  <p><code>buildClaimSkrYieldTx</code> has zero callers; there are no <code>buildInitializeSkrYieldVaultTx</code> / <code>buildDepositSkrYieldTx</code> builders at all; no UI screen wires it; and <code>buildBorrowTx</code> never appends the two yield-vault PDAs, so the program's 50/50 origination-fee split never fires from the app — the vault can never be funded in production. The deployed program (devnet) predates tags 15–17, so a claim would revert with invalid-instruction-data even if wired. <span class="verified">✔ VERIFIED — grep: zero callers</span></p>
+  <div class="fix">Either ship it (add the two missing builders, append the vault PDAs in buildBorrowTx gated on vault-is-initialized, add UI gated on an on-chain <code>CLK_SYLD</code> read) or cut the dead code until the upgrade lands. Don't ship a live-looking claim path against an un-upgraded program.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-2</span>
-  <h3>All loan/offer data discarded on mainnet — LOANS tab and P2P deck permanently empty</h3>
-  <div class="meta">mobile/App.tsx:210-232</div>
-  <p><code>loadProtocolData</code> only assigns offers/orders when <code>net === 'devnet'</code>; on mainnet it sets both to <code>[]</code>. The app is mainnet-only, so repay/grace/cancel are unreachable — a borrower cannot see or repay their own mainnet loan. The parsers themselves are mainnet-correct (verified offsets 153/161 vs <code>state.rs</code>). <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Assign unconditionally; gate any dev-only mode on <code>__DEV__</code>, never the cluster.</div>
+  <h3>No time weighting / cooldown — JIT front-running snipes origination-fee dividends</h3>
+  <div class="meta">program/src/processor.rs:3467-3475, 3644</div>
+  <p>Accrual is purely by <code>acc_reward_per_share</code> snapshot; <code>last_interaction_time</code> is recorded but never enforced. Both deposit triggers (permissionless <code>DepositSkrYield</code> and the borrow-path fee split) are observable before they land, so an attacker can stake in slot N, register shares, let the dividend land in N+1, claim pro-rata, and unstake in N+2 — capital returned, zero holding risk, disproportionate payout. <span class="verified">✔ VERIFIED in source — no time check on the claim path</span></p>
+  <div class="fix">Time-weighted accrual (per-slot reward_rate with <code>last_acc_update</code>), or a minimum stake age before claimability.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-3</span>
-  <h3>handleCreatePool writes the devnet USDC mint into UI state — new desks unborrowable</h3>
-  <div class="meta">mobile/App.tsx:894 → 310</div>
-  <p>The on-chain pool correctly gets <code>USDC_MAINNET_MINT</code>, but the local pool object carries <code>4zMMC9srt…</code> (devnet), which <code>handleBorrow</code> uses to derive ATAs → <code>InvalidTreasuryAccount</code> for every borrow against a desk you just created. <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Use <code>USDC_MAINNET_MINT</code>; better: re-fetch pools from chain after confirmation.</div>
+  <h3>DepositSkrYield is permissionless and the reward mint is unrestricted at init</h3>
+  <div class="meta">program/src/processor.rs:3417, 3342</div>
+  <p>Only <code>assert_signer</code> — no vault-authority/treasury/admin check, so anyone can push rewards at any time and thereby control exactly when <code>acc</code> moves (who gets entitled), or interleave dust deposits to shift rounding. Init accepts any <code>reward_mint</code> pubkey. <span class="verified">✔ VERIFIED in source</span></p>
+  <div class="fix">Gate deposits on <code>vault.authority</code> (with a rotation path proving upgrade authority), allowlist <code>reward_mint</code> to {USDC devnet/mainnet, SKR}. If the drip is meant to be permissionless, add epoch pacing so it can't control accrual timing.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-4</span>
-  <h3>Pawn repay truncated to whole cents — exact-equality check fails for non-cent interest</h3>
-  <div class="meta">mobile/src/solana/onChainService.ts:1393-1394 · App.tsx:732, 415</div>
-  <p><code>.toFixed(2)</code> + <code>Math.round</code> loses micro-precision for any interest not a multiple of 1000 base units; the compensating on-chain read is disabled by H-1. <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Carry amounts as <code>bigint</code> end-to-end; never round-trip through floats.</div>
+  <h3>SOL collateral sizing always uses a hardcoded $150.0 — the live-price lookup can never match</h3>
+  <div class="meta">mobile/src/components/P2PExpressView.tsx:43</div>
+  <p><code>solHolding = tokenList.find(symbol === 'SOL')</code> is always undefined — <code>tokenList</code> comes from <code>getParsedTokenAccountsByOwner</code>, which never contains native SOL — so <code>150.0</code> is always used. That flows into the on-chain collateral amount: the tx reverts <code>InvalidCollateralRatio</code> when the price is above market and silently over-locks when below. Two hardcoded SOL prices coexist (150.0 here, 101.12 in <code>livePrices</code>). <span class="verified">✔ VERIFIED</span></p>
+  <div class="fix">Use <code>livePrices.sol</code> (already fetched every 120s); disable the borrow CTA with "price unavailable" when stale rather than substituting a constant.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-5</span>
-  <h3>Auto-close buffer (732dc8b) is dead code — CLI form invalid, premise wrong</h3>
-  <div class="meta">mobile/scripts/deploy-mainnet.mjs:75-80</div>
-  <p>Two independent defects: <code>solana program close … --buffers &lt;BUFFER&gt;</code> is rejected by the CLI (flag vs positional conflict), and <code>deploy --buffer</code> already consumes the buffer — its lamports become the ProgramData rent; nothing remains to close or refund. The runbook's “buffer rent refunded” narrative is fiction. <span class="verified">✔ VERIFIED — both reproduced on solana-cli 3.1.9</span></p>
-  <div class="fix">Delete the block, or use bare <code>--buffers --bypass-warning</code> as a defensive sweep only; fix runbook §0 text.</div>
+  <h3>Runbook devnet hash is unreproducible — its own verify recipe reports a false mismatch</h3>
+  <div class="meta">docs/MAINNET_RUNBOOK.md:5</div>
+  <p>Live devnet ProgramData holds a 299,937-byte ELF (md5 <code>69577ae6…</code>); the local artifact is 300,104 bytes (<code>189a61df</code>) and the ELFs differ at e_entry — different builds. The runbook recipe yields <code>1c4ac89d</code> for live devnet vs <code>189a61df</code> locally — a false mismatch — and no 600fba4a prefix is reproducible from anything on this box. The field churns each round (9bbcdc68 → 25b68ef2 → 600fba4a) without a recorded recipe. <span class="verified">✔ VERIFIED via live RPC by the ops agent</span></p>
+  <div class="fix">Record the exact recipe + inputs; add a <code>verify-devnet.sh</code> that computes it; state which build the deployed ELF actually is.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-6</span>
-  <h3>36 of 83 green tests never execute the program</h3>
-  <div class="meta">program/tests/functional.rs (13 borsh round-trips) · security_tests.rs (23 pure-arithmetic)</div>
-  <p>“83 passing” materially overstates coverage; the runbook still says 77/77. No JS wire-encoding test exists, which is exactly why C-4 survived. <span class="verified">✔ VERIFIED — grep-verified per-file</span></p>
-  <div class="fix">Rename security_tests as model tests or convert the load-bearing ones to BanksClient tests; add CI.</div>
+  <h3>The multi-user yield test is flaky — "96/96 passing" is not reproducible</h3>
+  <div class="meta">program/tests/skr_yield_and_lst_tests.rs:572, 581</div>
+  <p>Observed ~30–50% failure rate across agents (4/12 for one, multiple runs for another), always <code>left: 0</code> at :572/:581; also reproduces in isolation. An instrumented verbatim copy passed 3/3, so the mechanism is <em>inconclusive</em> — non-deterministic solana-program-test behavior, not a proven program error. Either way, <code>cargo test</code> is not a trustworthy deploy gate today. <span class="verified">✔ OBSERVED by two independent agents</span></p>
+  <div class="fix">Give each submission a distinct blockhash and assert on returned results/program state rather than later reads; require ≥20 consecutive green runs before treating the gate as real.</div>
 </div>
 
 <div class="finding">
   <span class="badge high">HIGH</span> <span class="badge high">H-7</span>
-  <h3>Fuzz invariants cannot catch the bug classes from prior rounds</h3>
-  <div class="meta">program/tests/fuzz_invariants.rs:473-482, 604-608</div>
-  <p>No oracle staleness op (deleting the staleness check leaves the fuzzer green), no type-confusion op, no signer-omission/account-substitution, no lamport-destination invariant; TriggerGracePeriod appears only in a comment. <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Add the missing ops + equality/treasury invariants; fix the misleading comment.</div>
+  <h3>Dividends deposited while total_staked_skr == 0 are permanently stranded</h3>
+  <div class="meta">program/src/processor.rs:3467 (deposit), 1588 (borrow split)</div>
+  <p>Both allocation sites skip <code>acc_reward_per_share</code> when <code>total_staked_skr == 0</code> but still credit <code>pending_rewards</code> — and claims pay only <code>staked · acc / 1e12</code>, which never includes that money. The first dividend (e.g. keeper deposits before any user syncs) is lost forever. On devnet this is 100% of routed revenue, because the SKR mint doesn't exist there. <span class="verified">✔ VERIFIED in source</span></p>
+  <div class="fix">Add an <code>unallocated_rewards</code> field rolled into the next <code>acc</code> increase, or reject deposits while <code>total_staked_skr == 0</code>.</div>
 </div>
 
-<div class="finding">
-  <span class="badge high">HIGH</span> <span class="badge high">H-8</span>
-  <h3>Untested paths: admin rotation, InitializePool guards, DepositLiquidity effects, future-skew, P2P Pyth</h3>
-  <div class="meta">program/tests/bank_integration.rs:2327, 2444, 3740, 3923 · pyth.rs:196</div>
-  <p>The entire <code>--rotate-oracle</code> path is never executed (uses <code>.ok()</code> so truncated calls silently no-op); <code>OraclePriceFromFuture</code> has zero tests; the CreateP2POffer Pyth site (C-1's second half) has zero tests; four admin-oracle fixtures still mask staleness with <code>i64::MAX</code> — the same class 67d2ad7 just removed from the Pyth fixtures. <span class="verified">✔ VERIFIED</span></p>
-  <div class="fix">Add the five named tests; replace the four i64::MAX fixtures.</div>
-</div>
-
-<h2>Mediums (selected)</h2>
+<h2>Mediums</h2>
 <ul>
-<li><strong>Program — Full-only liveness coupling</strong>: <code>pyth.rs:154</code> hardcodes the level against an off-program invariant (guardian-set quorum); a rotation bricks every client post with no on-chain signal. See C-2 fix options.</li>
-<li><strong>Mobile — fake grace success</strong>: <code>App.tsx:533-549</code> marks the order InGracePeriod and persists it even when the tx failed; survives restart via cache.</li>
-<li><strong>Mobile — fabricated state after every tx</strong>: nine handlers mutate balances/portfolio with hardcoded $101.12 / $0.0192 while the screen claims “RPC-authoritative”; fabricated <code>stakedSkrAmount</code>/<code>successRate:100</code>/<code>initialLiquidity</code> as “Available $”.</li>
-<li><strong>Mobile — trust badges</strong>: SGT “VERIFIED” pill never reads the flag; detection is <code>mint.includes('seeker')</code> + any-frozen-account; flag defaults true; hardcoded <code>rootkit.skr</code> identity + devnet pool authority <code>BEmX…</code> (seekerWallet.ts:116, onChainService.ts:438); successRate 100 for zero-history pools.</li>
-<li><strong>Mobile — stake donates 0.002 SOL</strong> to an escrow PDA on every stake (below the real 2,039,280-lamport rent minimum), never refunded (onChainService.ts:1598-1604).</li>
-<li><strong>Ops — funding fiction</strong>: real mainnet rent = 1.5246 SOL, permanent (buffer lamports become ProgramData — no refund); runbook says 2.0 with a refund, script hard-blocks below 3.0 and prints “~3.5 SOL”.</li>
-<li><strong>Ops — runbook §2 keeper contradiction</strong>: cites <code>.github/workflows/keeper.yml</code> which was deleted (keeper retired); <code>KEEPER_KEYPAIR_B64</code> is never read by keeper.mjs; deploy script's closing line points at <code>scripts/keeper.mjs</code> (an empty dir).</li>
-<li><strong>Ops — runbook staleness</strong>: devnet hash is <code>600fba4a</code> not <code>9bbcdc68</code>; devnet does NOT contain the 67d2ad7 hardening (local .so == devnet ProgramData, both predate it) — redeploy devnet; test count is 83 not 77; freshness is 120s/300s + 60s skew.</li>
-<li><strong>Repo — Cargo.lock gitignored</strong>: the runbook's hash verification is non-reproducible without a pinned dependency graph (b8ce202's anchor removal is clean).</li>
-<li><strong>Repo — .gitignore misses <code>mainnet-*.json</code></strong>: an operator copying a keypair into the repo would have it staged; nothing is committed today (verified).</li>
+<li><strong>M-1</strong> No solvency invariant between <code>pending_rewards</code> and the vault token balance — over-claimers silently write off other users' accrued rewards (only <code>payout = claimable.min(vault_tok.amount)</code> stands in the way).</li>
+<li><strong>M-2</strong> UserProfile is optional on ClaimSkrYield — the no-profile branch earns on cached stake (the enabler of C-1).</li>
+<li><strong>M-3</strong> P2PExpressView banners fabricate "protocol fee dividends" on escrowed collateral and "Liquid Staking APY" — escrowed SKR earns nothing; no LST exists in the program (allowlist rejects those mints; only a stale comment mentions JitoSOL/Sanctum).</li>
+<li><strong>M-4</strong> Free-text collateral parsing: "2 JitoSOL" silently escrows 1.0 native SOL; bare "SKR" escrows 1000 SKR; SOL detection inconsistent across three code paths.</li>
+<li><strong>M-5</strong> Order-cache network namespacing half-applied — App.tsx:343/427/513 still call <code>setCachedOrders</code> without the network arg (cross-network loan leakage when the toggle is used).</li>
+<li><strong>M-6</strong> Claim builder assumes the reward ATA exists — intermittent InvalidAccountData exactly when there is something to claim.</li>
+<li><strong>M-7</strong> <code>NoYieldToClaim</code> error is never returned (dead code); runbook has NO yield section; test count stale (88 vs 96); BorrowFromPool doc comment omits the two new optional accounts.</li>
+<li><strong>M-8</strong> InitializeSkrYieldVault unauthenticated (folded into C-2; the <code>authority</code> field it records is currently unread — a trap for future handlers).</li>
 </ul>
 
-<h2>Lows (selected)</h2>
+<h2>Lows</h2>
 <ul>
-<li><code>processor.rs:1221-1229</code> — a borrower can omit the pool-scoped oracle when <code>has_custom_oracle &amp;&amp; is_oracle_free</code> and get priced from the hardcoded $150/$0.02 baseline (policy bypass).</li>
-<li><code>processor.rs:1238-1276</code> — the C-1 scale invariant is enforced only on the Pyth path; the admin-feed path trusts <code>PriceFeed.decimals</code> (bounded 1..=18, never cross-checked vs the mint). InitializePool has no USDC allowlist (F5 covers only the P2P path).</li>
-<li><code>pyth.rs:50</code> — <code>hex32!</code> has no length assertion: a 65+-char literal silently decodes the first 64 chars.</li>
-<li>Mobile: dead devnet <code>Connection</code> export (program.ts:73); P2P parser devnet-mint default (onChainService.ts:497); memo-derived orders fabricate ids/interest/pool names that feed real PDA derivation (onChainService.ts:375-438); Hermes fetch has no timeout/shape validation (pyth.ts:75); unused <code>borsh</code> dep; <code>splash-icon.png</code> referenced by nothing; SecureStore 2048-byte cache silently dead on Android.</li>
-<li>Env files mode 664; the Jupiter key shipped in <code>EXPO_PUBLIC_*</code> is effectively public (quota surface, not a signing key — no keypairs in any env file, verified).</li>
-<li><code>instruction.rs:12-14</code> documents InitializePool accounts 5/6 inverted vs the processor (rent is 5, token is 6).</li>
+<li>Five <code>checked_mul(...).unwrap_or(0)</code> sites silently zero reward math instead of erroring — inconsistent with the deposit path's <code>ok_or(AmountOverflow)</code>.</li>
+<li>Init skips validation of a pre-existing vault token account (defence-in-depth only).</li>
+<li>Stale JitoSOL/Sanctum comments contradict the allowlist; "LST" exists only in a test filename — <code>test_skr_collateral_allowlist</code> asserts a Rust constant and executes nothing.</li>
+<li>Fuzz suite has zero yield coverage (no accumulator invariants).</li>
+<li><code>calculateTokenUsd</code> lost its price-parameter type (<code>prices: any</code>).</li>
+<li>Android: release-keystore guard narrowed to <code>assemble/bundle</code> task prefixes; FLAG_SECURE skipped on DEBUG builds.</li>
 </ul>
 
 <h2>Clean areas (verified)</h2>
 <ul>
-<li>Hand-rolled PriceUpdateV2 parser: offsets byte-exact vs a live mainnet account; bounds-safe reads; checked_pow on adversarial exponents; Partial cursor advance correct.</li>
-<li>Processor hygiene: signer asserts on every state-changing instruction; PDAs re-derived with bumps; reinit blocked; status machines reachable; no cross-owner lamport debits.</li>
-<li>Anchor removal complete (program + mobile); <code>tsc --noEmit</code> clean, strict mode; zero keypair/secrets in git history; program-id allowlist before every MWA signing; fail-closed lock/integrity/PIN; HTTPS-only endpoints; production builds strip console logs.</li>
-<li>Runbook §3 verification procedure correct and executed: ProgramData authority at data[13..45], hash check methodology sound.</li>
+<li>Reward_debt ordering on the claim path is correct (pending computed before the re-snapshot; accrued preserved across capped payouts).</li>
+<li>Rounding floors conservatively; division-by-zero guarded; u128 overflow structurally unreachable today.</li>
+<li>AccountKind dispatch unaffected by the two new variants; all match sites remain explicit; length constants arithmetically correct.</li>
+<li>PDA seeds collision-free; user positions bind user+mint; every PDA re-derived before use.</li>
+<li>User-position has no reinit hole; escrow front-run authority defenses intact; no AccountBorrowFailed hazard in the new code.</li>
+<li>No new dependencies; Cargo.lock tracked; no secrets; keypairs mode 600.</li>
+<li>Claim builder's tag (17), account order/flags, and seeds all byte-match the program — the encoding is right; the plumbing around it is what's missing.</li>
 </ul>
 
 <h2>Proposed fix rounds</h2>
-<p><strong>P0 (critical):</strong> C-1 signer/blockhash ordering · C-2 oracle-path decision (quorum-aware or canonical SKR) · C-3 recover/regenerate program keypair + preflight · C-4 63-byte payload (+ seed script cleanup).<br>
-<strong>P1 (high):</strong> H-1 mainnet connection for exact repay · H-2 un-gate protocol data · H-3 mainnet mint in create-pool · H-4 BigInt end-to-end · H-5 delete dead buffer close · H-6/H-7/H-8 test fidelity + CI · runbook alignment (funding, keeper, hash, counts).<br>
-<strong>P2 (medium/low):</strong> honest UI state, badge honesty, hardcoded identity removal, stake rent fix, Cargo.lock + .gitignore, env hygiene, doc comment fix.</p>
+<p><strong>P0:</strong> C-1 escrow-derived stake (or decrement on unstake) · C-2 reinit guard + admin gate · C-3 build-sbf/freshness preflight · H-7 unallocated-rewards carry · H-2/H-3 deposit auth + time-weighting decision.<br>
+<strong>P1:</strong> H-1 wire the feature or cut it · H-4 live price · H-5 verify recipe · H-6 deterministic test · M-1..M-8.<br>
+<strong>P2:</strong> lows + runbook yield section + doc comments.<br>
+<em>Product decisions needed from the user: ship the yield feature or cut it for now; rebuild the artifact before any deploy.</em></p>
+
+<h2>Round-9 fix round — APPLIED (2026-09-24)</h2>
+<p>All P0/P1/P2 fixes from this report are implemented and verified. C-1: claim stake is now escrow-authoritative (skr_escrow account required, accrual bounded by the real balance, UnstakeSKR syncs positions down). C-2: vault init is admin-gated and reinit-rejected. C-3: the deploy script builds the ELF itself and hard-fails on a stale artifact (fresh build: 339,928 bytes, md5 <code>308dbba1</code>, not yet deployed). H-2/H-3/H-7: 1h claim cooldown (error 40), authority-gated deposits, <code>unallocated_rewards</code> folding so pre-stake dividends are never stranded. Mobile: yield client fully wired (init/deposit/claim builders, borrow fee-split append, unstake sync, on-chain-gated yield card), live prices replace the hardcoded $150, honest banners, strict collateral parsing, cache namespacing. Tests: 97/97, yield suite 6/6 consecutive runs green (flakiness root-caused: identical-(blockhash,message) memoization — every submission now advances a slot). Details: <code>.superstack/build-context.md</code>.</p>
 
 <div class="sub">Full per-round history and verification evidence: <code>.superstack/build-context.md</code>.</div>
 </div>

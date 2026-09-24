@@ -57,6 +57,36 @@ export const MAINNET_RPCS = [
   'https://api.mainnet-beta.solana.com',
 ];
 
+// Base58-encoded 8-byte account discriminators for RPC-side gPA filters.
+// Filtering server-side cuts the scan payload from "every account the program
+// ever created" to just the requested type — the difference between a screen
+// loading in 200ms and in minutes at 1M+ accounts.
+const B58_CLK_POOL = 'CFskzA4CnMh';
+const B58_CLK_PAWN = 'CFskzA486E1';
+
+// Small TTL cache for protocol reads: screen loads within a few seconds of
+// each other (tab switches, re-renders) share one RPC result. Post-mutation
+// refreshes pass { force: true } and bypass it.
+const FETCH_CACHE_TTL_MS = 10_000;
+const fetchCache = new Map<string, { at: number; value: unknown; inflight?: Promise<unknown> }>();
+export function cachedFetch<T>(
+  key: string,
+  fn: () => Promise<T>,
+  opts?: { force?: boolean }
+): Promise<T> {
+  const entry = fetchCache.get(key);
+  if (!opts?.force && entry?.inflight) return entry.inflight as Promise<T>;
+  if (!opts?.force && entry && Date.now() - entry.at < FETCH_CACHE_TTL_MS) {
+    return Promise.resolve(entry.value as T);
+  }
+  const p = fn().then((v) => {
+    fetchCache.set(key, { at: Date.now(), value: v });
+    return v;
+  });
+  fetchCache.set(key, { at: entry?.at ?? 0, value: entry?.value, inflight: p });
+  return p;
+}
+
 export const devnetConnection = new Connection(DEVNET_RPCS[0], 'confirmed');
 export const mainnetConnection = new Connection(MAINNET_RPCS[0], 'confirmed');
 
@@ -133,6 +163,10 @@ export const USDC_MAINNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4w
 export const SKR_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
 export const NATIVE_SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 
+export const SKR_YIELD_VAULT_SEED = Buffer.from('skr_yield_vault');
+export const SKR_YIELD_TOKEN_SEED = Buffer.from('skr_yield_token');
+export const USER_YIELD_SEED = Buffer.from('skr_yield_user');
+
 // M-03: Integer Interest Calculation Helper matching Smart Contract exactly
 export function calculateExactInterestDue(
   borrowAmountMicro: bigint,
@@ -152,6 +186,27 @@ export function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): Pu
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
   return address;
+}
+
+/** Associated Token Program createIdempotent (tag 1) — no spl-token dep. */
+export function createAssociatedTokenAccountIdempotentInstruction(
+  payer: PublicKey,
+  ata: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]),
+  });
 }
 
 // Seeded pool addresses for instantaneous retrieval (populated after mainnet desk creation)
@@ -178,10 +233,13 @@ export async function queryRpcWithFallback<T>(
   throw lastError || new Error(`All RPC endpoints failed for ${network}`);
 }
 
-// Local hybrid cache for persistent loan orders
-export async function getCachedOrders(borrowerPubkey: string): Promise<LoanOrder[]> {
+// Local hybrid cache for persistent loan orders (strictly namespaced by network)
+export async function getCachedOrders(
+  borrowerPubkey: string,
+  network: SolanaNetwork = 'mainnet-beta'
+): Promise<LoanOrder[]> {
   try {
-    const raw = await SecureStore.getItemAsync(`clocklend_orders_${borrowerPubkey}`);
+    const raw = await SecureStore.getItemAsync(`clocklend_orders_${network}_${borrowerPubkey}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed;
@@ -192,9 +250,13 @@ export async function getCachedOrders(borrowerPubkey: string): Promise<LoanOrder
   return [];
 }
 
-export async function setCachedOrders(borrowerPubkey: string, orders: LoanOrder[]): Promise<void> {
+export async function setCachedOrders(
+  borrowerPubkey: string,
+  orders: LoanOrder[],
+  network: SolanaNetwork = 'mainnet-beta'
+): Promise<void> {
   try {
-    await SecureStore.setItemAsync(`clocklend_orders_${borrowerPubkey}`, JSON.stringify(orders));
+    await SecureStore.setItemAsync(`clocklend_orders_${network}_${borrowerPubkey}`, JSON.stringify(orders));
   } catch (err) {
     console.warn('Error saving cached orders:', err);
   }
@@ -257,7 +319,14 @@ function parsePoolData(pubkey: string, data: Buffer, id: number): LendingPool | 
 }
 
 // Fetch all live Lending Pools from the deployed contract
-export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): Promise<LendingPool[]> {
+export async function fetchLivePools(
+  network: SolanaNetwork = 'mainnet-beta',
+  opts?: { force?: boolean }
+): Promise<LendingPool[]> {
+  return cachedFetch(`pools:${network}`, () => fetchLivePoolsUncached(network), opts);
+}
+
+async function fetchLivePoolsUncached(network: SolanaNetwork): Promise<LendingPool[]> {
   const poolsMap = new Map<string, LendingPool>();
   const rpcConn = getConnection(network);
 
@@ -274,9 +343,21 @@ export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): P
     console.warn('Fast pool query notice:', err);
   }
 
-  // 2. Full scan to find any additional pools created by individuals
+  // 2. Filtered scan for additional pools: RPC-side discriminator filter for
+  // modern 200-byte pools + a legacy 182-byte dataSize query. This fetches
+  // only pool accounts instead of the program's entire account history.
   try {
-    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
+    const accounts = await queryRpcWithFallback(network, async (c) => {
+      const [modern, legacy] = await Promise.all([
+        c.getProgramAccounts(PROGRAM_ID, { filters: [{ memcmp: { offset: 0, bytes: B58_CLK_POOL } }] }),
+        // web3.js 1.99's config type lacks the dataSize filter variant even
+        // though the RPC supports it — cast the (runtime-correct) result.
+        (c.getProgramAccounts(PROGRAM_ID, { filters: [{ dataSize: 182 }] } as any) as unknown) as Promise<
+          Awaited<ReturnType<Connection['getProgramAccounts']>>
+        >,
+      ]);
+      return [...modern, ...legacy];
+    });
     for (const acc of accounts) {
       if (acc.account.data.length === 200 || acc.account.data.length === 182) {
         const pubkeyStr = acc.pubkey.toBase58();
@@ -297,7 +378,7 @@ export async function fetchLivePools(network: SolanaNetwork = 'mainnet-beta'): P
 export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNetwork = 'mainnet-beta'): Promise<LoanOrder[]> {
   const rpcConn = getConnection(network);
   const borrowerPubkey = borrower.toBase58();
-  const cachedOrders = await getCachedOrders(borrowerPubkey);
+  const cachedOrders = await getCachedOrders(borrowerPubkey, network);
   const cachedBySig = new Map<string, LoanOrder>();
   const cachedById = new Map<number, LoanOrder>();
   for (const co of cachedOrders) {
@@ -366,9 +447,30 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
     console.warn('Program account query notice:', err);
   }
 
-  // 2. Scan blockchain transactions & memos for ground-truth borrow/repay history
+  const finalizeOrders = async (): Promise<LoanOrder[]> => {
+    // 3. Fallback: if blockchain was temporarily unreachable or slow, keep active cached orders
+    if (ordersMap.size === 0 && cachedOrders.length > 0) {
+      for (const co of cachedOrders) {
+        if (co.status === 'Active' || co.status === 'InGracePeriod') {
+          ordersMap.set(co.id, co);
+        }
+      }
+    }
+    const finalOrders = Array.from(ordersMap.values());
+    await setCachedOrders(borrowerPubkey, finalOrders, network);
+    return finalOrders;
+  };
+
+  // 2. Scan blockchain transactions & memos for ground-truth borrow/repay history.
+  // Every on-chain loan is a PDA account (found by the filtered scan above), so
+  // this heavy signature walk only runs as a LAST-RESORT fallback when the PDA
+  // scan found nothing — and with a bounded window. It no longer duplicates the
+  // PDA results (memo candidates must resolve to a real loan PDA anyway).
+  if (ordersMap.size > 0) {
+    return finalizeOrders();
+  }
   try {
-    const signatures = await queryRpcWithFallback(network, (c) => c.getSignaturesForAddress(borrower, { limit: 60 }));
+    const signatures = await queryRpcWithFallback(network, (c) => c.getSignaturesForAddress(borrower, { limit: 20 }));
     const memos = signatures
       .filter((s) => Boolean(s.memo))
       .map((s) => ({
@@ -532,27 +634,33 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
     console.warn('Signature scan notice:', sigErr);
   }
 
-  // 3. Fallback: if blockchain was temporarily unreachable or slow, keep active cached orders
-  if (ordersMap.size === 0 && cachedOrders.length > 0) {
-    for (const co of cachedOrders) {
-      if (co.status === 'Active' || co.status === 'InGracePeriod') {
-        ordersMap.set(co.id, co);
-      }
-    }
-  }
-
-  const finalOrders = Array.from(ordersMap.values());
-  // Save verified active orders back to SecureStore hybrid cache
-  await setCachedOrders(borrowerPubkey, finalOrders);
-
-  return finalOrders;
+  return finalizeOrders();
 }
 
 // Fetch live P2P pawn offers directly from Devnet contract
-export async function fetchLiveP2POffers(network: SolanaNetwork = 'mainnet-beta'): Promise<P2POffer[]> {
+export async function fetchLiveP2POffers(
+  network: SolanaNetwork = 'mainnet-beta',
+  opts?: { force?: boolean }
+): Promise<P2POffer[]> {
+  return cachedFetch(`offers:${network}`, () => fetchLiveP2POffersUncached(network), opts);
+}
+
+async function fetchLiveP2POffersUncached(network: SolanaNetwork): Promise<P2POffer[]> {
   const rpcConn = getConnection(network);
   try {
-    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
+    // RPC-side discriminator filter (modern CLK_PAWN) + legacy 162-byte
+    // dataSize query — only offer accounts cross the wire.
+    const accounts = await queryRpcWithFallback(network, async (c) => {
+      const [modern, legacy] = await Promise.all([
+        c.getProgramAccounts(PROGRAM_ID, { filters: [{ memcmp: { offset: 0, bytes: B58_CLK_PAWN } }] }),
+        // same cast as the pool scan: the RPC supports dataSize, the TS type
+        // in this web3.js version does not.
+        (c.getProgramAccounts(PROGRAM_ID, { filters: [{ dataSize: 162 }] } as any) as unknown) as Promise<
+          Awaited<ReturnType<Connection['getProgramAccounts']>>
+        >,
+      ]);
+      return [...modern, ...legacy];
+    });
     const offers: P2POffer[] = [];
 
     for (const acc of accounts) {
@@ -853,7 +961,7 @@ function getKnownTokenName(mint: string): string {
   return 'Solana Token';
 }
 
-function calculateTokenUsd(mint: string, amount: number, prices = livePrices): number {
+function calculateTokenUsd(mint: string, amount: number, prices: { sol: number; skr: number; usdc: number } = livePrices): number {
   if (mint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' || mint === '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU') {
     return parseFloat((amount * prices.usdc).toFixed(2));
   }
@@ -1015,13 +1123,11 @@ export async function buildBorrowTx(
   writeU64LE(BigInt(durationDays * 86400)).copy(data, 25);
 
   const borrowerUsdcAccount = getAssociatedTokenAddress(liquidityMint, borrower);
-  const isNativeSol = collateralName.toUpperCase().includes('SOL');
+  const isNativeSol = collateralName.toUpperCase() === 'SOL';
+  const collateralMint = isNativeSol ? SystemProgram.programId : SKR_MINT;
   const borrowerCollateralAccount = isNativeSol
     ? borrower
-    : getAssociatedTokenAddress(SKR_MINT, borrower);
-  const collateralMint = isNativeSol
-    ? SystemProgram.programId
-    : SKR_MINT;
+    : getAssociatedTokenAddress(collateralMint, borrower);
 
   const [treasuryPDA] = getTreasuryPDA();
   const treasuryUsdcAccount = getAssociatedTokenAddress(liquidityMint, treasuryPDA);
@@ -1065,6 +1171,19 @@ export async function buildBorrowTx(
   ];
   if (pythAccount) {
     keys.push({ pubkey: pythAccount, isSigner: false, isWritable: false });
+  }
+  // Route 50% of the origination fee to the SKR yield vault when it exists
+  // and is initialized. If the read fails or the vault is absent, the whole
+  // fee goes to the treasury (program behavior) — never revert the borrow
+  // over a missing vault.
+  try {
+    const yieldVault = await fetchSkrYieldVault('mainnet-beta', liquidityMint);
+    if (yieldVault?.initialized) {
+      keys.push({ pubkey: yieldVault.vaultPDA, isSigner: false, isWritable: true });
+      keys.push({ pubkey: yieldVault.vaultTokenPDA, isSigner: false, isWritable: true });
+    }
+  } catch (_e) {
+    // graceful: no fee split
   }
 
   const ix = new TransactionInstruction({
@@ -1292,22 +1411,36 @@ export async function buildCreateP2POfferTx(
 
   const tx = new Transaction();
 
-  // Check if asset specifies SOL collateral amount (e.g. "0.5 SOL", "1 SOL") or SKR
-  const solMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SOL/i);
-  const skrMatch = assetName.match(/([0-9]*\.?[0-9]+)\s*SKR/i);
-  const isNativeSol = solMatch !== null || !assetName.toUpperCase().includes('SKR');
+  // Check if asset specifies collateral amount (SOL or SKR)
+  // Collateral spec: an EXPLICIT "amount SYMBOL" with an allowlisted symbol.
+  // Free-text must never silently map to a different asset — "2 JitoSOL" used
+  // to escrow 1.0 native SOL, and a bare "SKR" used to escrow 1000 SKR.
+  const solMatch = assetName.match(/^([0-9]*\.?[0-9]+)\s*(SOL)\b/i);
+  const skrMatch = assetName.match(/^([0-9]*\.?[0-9]+)\s*(SKR)\b/i);
 
-  let collateralAmount = 1_000_000_000; // default 1 SOL
+  let isNativeSol: boolean;
+  let collateralMint: PublicKey;
+  let collateralAmount: number;
   if (solMatch && solMatch[1]) {
+    isNativeSol = true;
+    collateralMint = SystemProgram.programId;
     collateralAmount = Math.round(parseFloat(solMatch[1]) * 1_000_000_000);
   } else if (skrMatch && skrMatch[1]) {
+    isNativeSol = false;
+    collateralMint = SKR_MINT;
     collateralAmount = Math.round(parseFloat(skrMatch[1]) * 1_000_000);
+  } else {
+    throw new Error(
+      `Unsupported collateral: "${assetName}". Only explicit amounts of SOL or SKR are accepted (e.g. "1.5 SOL", "500 SKR").`
+    );
+  }
+  if (collateralAmount <= 0) {
+    throw new Error('Collateral amount must be positive');
   }
 
-  const collateralMint = isNativeSol ? SystemProgram.programId : SKR_MINT;
   const creatorCollateralAccount = isNativeSol
     ? creator
-    : getAssociatedTokenAddress(SKR_MINT, creator);
+    : getAssociatedTokenAddress(collateralMint, creator);
 
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
@@ -1699,17 +1832,29 @@ export async function buildUnstakeSkrTx(
   data.writeUInt8(11, 0); // Instruction 11: UnstakeSKR
   writeU64LE(BigInt(Math.round(amountSkr * 1_000_000))).copy(data, 1);
 
-  // Execute on-chain UnstakeSKR instruction
+  // Execute on-chain UnstakeSKR instruction. When the yield vault exists,
+  // append it + the user's position so the program syncs the position DOWN —
+  // a recycled stake must never keep earning ghost shares.
+  const keys: any[] = [
+    { pubkey: user, isSigner: true, isWritable: true },
+    { pubkey: profilePDA, isSigner: false, isWritable: true },
+    { pubkey: userSkrAccount, isSigner: false, isWritable: true },
+    { pubkey: escrowPDA, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+  ];
+  try {
+    const yieldVault = await fetchSkrYieldVault('mainnet-beta', USDC_MAINNET_MINT);
+    if (yieldVault?.initialized) {
+      keys.push({ pubkey: yieldVault.vaultPDA, isSigner: false, isWritable: true });
+      keys.push({ pubkey: getUserYieldPDA(user, new PublicKey(yieldVault.rewardMint)), isSigner: false, isWritable: true });
+    }
+  } catch (_e) {
+    // graceful: no position sync
+  }
   tx.add(
     new TransactionInstruction({
       programId: PROGRAM_ID,
-      keys: [
-        { pubkey: user, isSigner: true, isWritable: true },
-        { pubkey: profilePDA, isSigner: false, isWritable: true },
-        { pubkey: userSkrAccount, isSigner: false, isWritable: true },
-        { pubkey: escrowPDA, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      ],
+      keys,
       data,
     })
   );
@@ -1934,6 +2079,238 @@ export async function buildClaimDefaultTx(
   return tx;
 }
 
+// Build Claim SKR Protocol Fee Dividends Transaction (Zero Cooldown, Instant USDC Payout)
+// ---------------- SKR yield vault (round-9 hardened ABI) ----------------
 
+export interface SkrYieldVaultState {
+  vaultPDA: PublicKey;
+  vaultTokenPDA: PublicKey;
+  initialized: boolean;
+  authority: string;
+  rewardMint: string;
+  totalStakedSkr: number;        // SKR base units
+  accRewardPerShare: bigint;     // 1e12-scaled
+  totalRewardsDistributed: number;
+  pendingRewards: number;
+  unallocatedRewards: number;
+}
 
+export interface UserYieldPositionState {
+  positionPDA: PublicKey;
+  initialized: boolean;
+  stakedSkr: number;             // SKR base units
+  rewardDebt: bigint;            // 1e12-scaled
+  accruedRewards: number;        // reward-mint base units
+  totalClaimed: number;
+  lastInteractionTime: number;
+}
 
+export function getSkrYieldVaultPDA(rewardMint: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync([SKR_YIELD_VAULT_SEED, rewardMint.toBuffer()], PROGRAM_ID);
+  return pda;
+}
+export function getSkrYieldTokenPDA(rewardMint: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync([SKR_YIELD_TOKEN_SEED, rewardMint.toBuffer()], PROGRAM_ID);
+  return pda;
+}
+export function getUserYieldPDA(user: PublicKey, rewardMint: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync([USER_YIELD_SEED, user.toBuffer(), rewardMint.toBuffer()], PROGRAM_ID);
+  return pda;
+}
+
+/** Read the on-chain vault (121-byte CLK_SYLD layout); undefined if absent. */
+export async function fetchSkrYieldVault(
+  network: SolanaNetwork,
+  rewardMint: PublicKey,
+  opts?: { force?: boolean }
+): Promise<SkrYieldVaultState | undefined> {
+  return cachedFetch(`yieldvault:${network}:${rewardMint.toBase58()}`, () => fetchSkrYieldVaultUncached(network, rewardMint), opts);
+}
+
+async function fetchSkrYieldVaultUncached(
+  network: SolanaNetwork,
+  rewardMint: PublicKey
+): Promise<SkrYieldVaultState | undefined> {
+  try {
+    const vaultPDA = getSkrYieldVaultPDA(rewardMint);
+    const info = await queryRpcWithFallback(network, (c) => c.getAccountInfo(vaultPDA));
+    if (!info || info.data.length < 121 || Buffer.from(info.data.subarray(0, 8)).toString() !== 'CLK_SYLD') {
+      return undefined;
+    }
+    const d = Buffer.from(info.data);
+    return {
+      vaultPDA,
+      vaultTokenPDA: getSkrYieldTokenPDA(rewardMint),
+      initialized: d.readUInt8(8) === 1,
+      authority: new PublicKey(d.subarray(9, 41)).toBase58(),
+      rewardMint: new PublicKey(d.subarray(41, 73)).toBase58(),
+      totalStakedSkr: Number(d.readBigUInt64LE(73)),
+      accRewardPerShare: BigInt(d.readBigUInt64LE(81).toString()) + BigInt(d.readBigUInt64LE(89).toString()) * 18446744073709551616n,
+      totalRewardsDistributed: Number(d.readBigUInt64LE(97)),
+      pendingRewards: Number(d.readBigUInt64LE(105)),
+      unallocatedRewards: Number(d.readBigUInt64LE(113)),
+    };
+  } catch (err) {
+    console.warn('[Yield] vault read failed:', (err as any)?.message || err);
+    return undefined;
+  }
+}
+
+/** Read the user's yield position (121-byte CLK_UYLD layout); undefined if absent. */
+export async function fetchUserYieldPosition(
+  network: SolanaNetwork,
+  user: PublicKey,
+  rewardMint: PublicKey,
+  opts?: { force?: boolean }
+): Promise<UserYieldPositionState | undefined> {
+  return cachedFetch(
+    `yieldpos:${network}:${user.toBase58()}:${rewardMint.toBase58()}`,
+    () => fetchUserYieldPositionUncached(network, user, rewardMint),
+    opts
+  );
+}
+
+async function fetchUserYieldPositionUncached(
+  network: SolanaNetwork,
+  user: PublicKey,
+  rewardMint: PublicKey
+): Promise<UserYieldPositionState | undefined> {
+  try {
+    const positionPDA = getUserYieldPDA(user, rewardMint);
+    const info = await queryRpcWithFallback(network, (c) => c.getAccountInfo(positionPDA));
+    if (!info || info.data.length < 121 || Buffer.from(info.data.subarray(0, 8)).toString() !== 'CLK_UYLD') {
+      return undefined;
+    }
+    const d = Buffer.from(info.data);
+    return {
+      positionPDA,
+      initialized: d.readUInt8(8) === 1,
+      stakedSkr: Number(d.readBigUInt64LE(73)),
+      rewardDebt: BigInt(d.readBigUInt64LE(81).toString()) + BigInt(d.readBigUInt64LE(89).toString()) * 18446744073709551616n,
+      accruedRewards: Number(d.readBigUInt64LE(97)),
+      totalClaimed: Number(d.readBigUInt64LE(105)),
+      lastInteractionTime: Number(d.readBigInt64LE(113)),
+    };
+  } catch (err) {
+    console.warn('[Yield] position read failed:', (err as any)?.message || err);
+    return undefined;
+  }
+}
+
+/** Instruction 15: admin-gated vault init (requires AdminConfig PDA). */
+export async function buildInitializeSkrYieldVaultTx(
+  authority: PublicKey,
+  rewardMint: PublicKey = USDC_MAINNET_MINT
+): Promise<Transaction> {
+  const vaultPDA = getSkrYieldVaultPDA(rewardMint);
+  const vaultTokenPDA = getSkrYieldTokenPDA(rewardMint);
+  const [adminPDA] = getAdminPDA();
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: authority, isSigner: true, isWritable: true },
+        { pubkey: vaultPDA, isSigner: false, isWritable: true },
+        { pubkey: rewardMint, isSigner: false, isWritable: false },
+        { pubkey: vaultTokenPDA, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: adminPDA, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([15]),
+    })
+  );
+  return tx;
+}
+
+/** Instruction 16: authority-gated dividend deposit. */
+export async function buildDepositSkrYieldTx(
+  depositor: PublicKey,
+  amountUsdc: number,
+  rewardMint: PublicKey = USDC_MAINNET_MINT
+): Promise<Transaction> {
+  const vaultPDA = getSkrYieldVaultPDA(rewardMint);
+  const vaultTokenPDA = getSkrYieldTokenPDA(rewardMint);
+  const depositorToken = getAssociatedTokenAddress(rewardMint, depositor);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+  const data = Buffer.alloc(9);
+  data.writeUInt8(16, 0);
+  writeU64LE(BigInt(Math.round(amountUsdc * 1_000_000))).copy(data, 1);
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: depositor, isSigner: true, isWritable: true },
+        { pubkey: vaultPDA, isSigner: false, isWritable: true },
+        { pubkey: depositorToken, isSigner: false, isWritable: true },
+        { pubkey: vaultTokenPDA, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    })
+  );
+  return tx;
+}
+
+/** Instruction 17: claim dividends. Stake is read from the SKR escrow token
+ *  account (account 7). The reward ATA is created idempotently. */
+export async function buildClaimSkrYieldTx(
+  user: PublicKey,
+  rewardMint: PublicKey = USDC_MAINNET_MINT
+): Promise<Transaction> {
+  const vaultPDA = getSkrYieldVaultPDA(rewardMint);
+  const vaultTokenPDA = getSkrYieldTokenPDA(rewardMint);
+  const userYieldPDA = getUserYieldPDA(user, rewardMint);
+  const [escrowPDA] = getSkrEscrowPDA(user);
+  const userRewardAccount = getAssociatedTokenAddress(rewardMint, user);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 150_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+  // The program unpacks the reward account whenever there is something to
+  // claim — create it idempotently so the first real claim never reverts.
+  tx.add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      user,
+      userRewardAccount,
+      user,
+      rewardMint
+    )
+  );
+  // Instruction 17: ClaimSkrYield
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: vaultPDA, isSigner: false, isWritable: true },
+        { pubkey: userYieldPDA, isSigner: false, isWritable: true },
+        { pubkey: vaultTokenPDA, isSigner: false, isWritable: true },
+        { pubkey: userRewardAccount, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: escrowPDA, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([17]),
+    })
+  );
+
+  const memoText = `ClockLend: Claim SKR Protocol Fee Yield Dividends`;
+  tx.add(
+    new TransactionInstruction({
+      programId: MEMO_PROGRAM_ID,
+      keys: [{ pubkey: user, isSigner: true, isWritable: false }],
+      data: Buffer.from(memoText, 'utf-8'),
+    })
+  );
+
+  return tx;
+}

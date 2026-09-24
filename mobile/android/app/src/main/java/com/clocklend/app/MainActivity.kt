@@ -20,11 +20,13 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
 
-    // Defense-in-Depth: Prevent screenshots, screen recording, and task switcher snapshots
-    window.setFlags(
-      WindowManager.LayoutParams.FLAG_SECURE,
-      WindowManager.LayoutParams.FLAG_SECURE
-    )
+    // Defense-in-Depth: Prevent screenshots, screen recording, and task switcher snapshots (release only)
+    if (!BuildConfig.DEBUG) {
+      window.setFlags(
+        WindowManager.LayoutParams.FLAG_SECURE,
+        WindowManager.LayoutParams.FLAG_SECURE
+      )
+    }
 
     // Check device environment integrity (Anti-Emulator, Anti-Root, Anti-Frida)
     val isEmulator = SecurityIntegrity.isEmulator(this)

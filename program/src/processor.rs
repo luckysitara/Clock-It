@@ -20,8 +20,12 @@ use crate::{
     pyth::{try_verify_pyth_price, PythPrice, PYTH_RECEIVER_ID, SKR_MAX_AGE_SECS, SKR_USD_FEED_ID, SOL_MAX_AGE_SECS, SOL_USD_FEED_ID},
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
+        SkrYieldVault, UserYieldPosition,
         ADMIN_SEED, ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, TREASURY_SEED, VAULT_SEED,
-        SKR_MINT, USDC_DEVNET_MINT, USDC_MAINNET_MINT, DISCRIMINATOR_ADMIN, DISCRIMINATOR_FEED, DISCRIMINATOR_LOAN, DISCRIMINATOR_OFFER, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
+        SKR_YIELD_VAULT_SEED, SKR_YIELD_TOKEN_SEED, USER_YIELD_SEED,
+        SKR_MINT, USDC_DEVNET_MINT, USDC_MAINNET_MINT,
+        DISCRIMINATOR_ADMIN, DISCRIMINATOR_FEED, DISCRIMINATOR_LOAN, DISCRIMINATOR_OFFER, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
+        DISCRIMINATOR_SKR_YIELD, DISCRIMINATOR_USER_YIELD,
     },
 };
 
@@ -338,6 +342,15 @@ pub fn process_instruction(
         ClockLendInstruction::InitializeAdmin => process_initialize_admin(program_id, accounts),
         ClockLendInstruction::WithdrawTreasury { amount } => {
             process_withdraw_treasury(program_id, accounts, amount)
+        }
+        ClockLendInstruction::InitializeSkrYieldVault => {
+            process_initialize_skr_yield_vault(program_id, accounts)
+        }
+        ClockLendInstruction::DepositSkrYield { amount } => {
+            process_deposit_skr_yield(program_id, accounts, amount)
+        }
+        ClockLendInstruction::ClaimSkrYield => {
+            process_claim_skr_yield(program_id, accounts)
         }
     }
 }
@@ -797,6 +810,50 @@ pub fn process_unstake_skr(
         }
     }
 
+    // C-1 defense in depth: sync the user's SKR yield position down so a
+    // recycled stake cannot keep earning ghost shares. The client appends the
+    // canonical yield vault (USDC reward mint) and the user position as
+    // optional trailing accounts; both are matched by expected PDA.
+    let devnet_vault_pda = Pubkey::find_program_address(
+        &[SKR_YIELD_VAULT_SEED, USDC_DEVNET_MINT.as_ref()], program_id).0;
+    let mainnet_vault_pda = Pubkey::find_program_address(
+        &[SKR_YIELD_VAULT_SEED, USDC_MAINNET_MINT.as_ref()], program_id).0;
+    let yield_vault_acc = accounts.iter().find(|a| {
+        (*a.key == devnet_vault_pda || *a.key == mainnet_vault_pda)
+            && a.owner == program_id
+            && !a.data_is_empty()
+    });
+    if let Some(yv) = yield_vault_acc {
+        let mut vault = SkrYieldVault::unpack_from_slice(&yv.try_borrow_data()?)?;
+        if vault.is_initialized {
+            let (expected_pos, _) = Pubkey::find_program_address(
+                &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref()], program_id);
+            if let Some(pos_acc) = accounts.iter().find(|a| *a.key == expected_pos) {
+                if pos_acc.owner == program_id && !pos_acc.data_is_empty() {
+                    let mut position = UserYieldPosition::unpack_from_slice(&pos_acc.try_borrow_data()?)?;
+                    if position.user == *user.key && position.reward_mint == vault.reward_mint {
+                        let pending = ((position.staked_skr as u128)
+                            .checked_mul(vault.acc_reward_per_share)
+                            .ok_or(ClockLendError::AmountOverflow)?
+                            / YIELD_SCALE)
+                            .saturating_sub(position.reward_debt) as u64;
+                        position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
+                        let reduce = amount.min(position.staked_skr);
+                        vault.total_staked_skr = vault.total_staked_skr.saturating_sub(reduce);
+                        position.staked_skr = position.staked_skr.saturating_sub(reduce);
+                        position.reward_debt = ((position.staked_skr as u128)
+                            .checked_mul(vault.acc_reward_per_share)
+                            .ok_or(ClockLendError::AmountOverflow)?)
+                            / YIELD_SCALE;
+                        position.last_interaction_time = Clock::get()?.unix_timestamp;
+                        position.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
+                        vault.pack_into_slice(&mut yv.try_borrow_mut_data()?)?;
+                    }
+                }
+            }
+        }
+    }
+
     msg!("ClockLend: Unstaked {} SKR tokens successfully", amount);
     Ok(())
 }
@@ -1180,11 +1237,18 @@ pub fn process_borrow_from_pool(
     let (expected_global_pool_oracle2, _) =
         Pubkey::find_program_address(&[ORACLE_SEED, canonical_pool_mint.as_ref()], program_id);
 
+    let (expected_skr_yield_pda, _) =
+        Pubkey::find_program_address(&[SKR_YIELD_VAULT_SEED, pool.liquidity_mint.as_ref()], program_id);
+    let (expected_skr_yield_token_pda, _) =
+        Pubkey::find_program_address(&[SKR_YIELD_TOKEN_SEED, pool.liquidity_mint.as_ref()], program_id);
+
     let mut user_profile_opt: Option<&AccountInfo> = None;
     let mut treasury_account_opt: Option<&AccountInfo> = None;
     let mut collateral_oracle_opt: Option<&AccountInfo> = None;
     let mut pool_oracle_opt: Option<&AccountInfo> = None;
     let mut pyth_collateral_price_opt: Option<PythPrice> = None;
+    let mut skr_yield_vault_opt: Option<&AccountInfo> = None;
+    let mut skr_yield_token_opt: Option<&AccountInfo> = None;
 
     // Scan trailing optional accounts
     while let Ok(acc) = next_account_info(account_info_iter) {
@@ -1192,6 +1256,10 @@ pub fn process_borrow_from_pool(
             user_profile_opt = Some(acc);
         } else if *acc.key == expected_treasury_pda {
             treasury_account_opt = Some(acc);
+        } else if *acc.key == expected_skr_yield_pda {
+            skr_yield_vault_opt = Some(acc);
+        } else if *acc.key == expected_skr_yield_token_pda {
+            skr_yield_token_opt = Some(acc);
         } else if *acc.key == expected_pool_collateral_oracle1 || *acc.key == expected_pool_collateral_oracle2 {
             collateral_oracle_opt = Some(acc);
         } else if *acc.key == expected_global_collateral_oracle1 || *acc.key == expected_global_collateral_oracle2 {
@@ -1217,10 +1285,8 @@ pub fn process_borrow_from_pool(
             if pyth_collateral_price_opt.is_none() {
                 let (feed_id, max_age) = if is_native_sol {
                     (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
-                } else if is_skr {
-                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
                 } else {
-                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS) // unreachable (allowlist)
+                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
                 };
                 pyth_collateral_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
             }
@@ -1540,28 +1606,66 @@ pub fn process_borrow_from_pool(
                 &[&[VAULT_SEED, pool_account.key.as_ref(), &[vault_bump]]],
             )?;
 
-            // Route upfront origination fee directly to ClockLend Treasury
-            invoke_signed(
-                &spl_token::instruction::transfer(
-                    token_program.key,
-                    vault_account.key,
-                    treasury_account.key,
-                    vault_account.key,
-                    &[],
-                    origination_fee,
-                )?,
-                &[
-                    vault_account.clone(),
-                    treasury_account.clone(),
-                    token_program.clone(),
-                ],
-                &[&[VAULT_SEED, pool_account.key.as_ref(), &[vault_bump]]],
-            )?;
+            // Route origination fee: if skr_yield_vault is provided, split 50/50 with SKR holders
+            let (treasury_fee, yield_dividend) = if let (Some(yield_vault_acc), Some(yield_token_acc)) = (skr_yield_vault_opt, skr_yield_token_opt) {
+                let y_div = origination_fee / 2;
+                let t_fee = origination_fee.saturating_sub(y_div);
+                if y_div > 0 {
+                    invoke_signed(
+                        &spl_token::instruction::transfer(
+                            token_program.key,
+                            vault_account.key,
+                            yield_token_acc.key,
+                            vault_account.key,
+                            &[],
+                            y_div,
+                        )?,
+                        &[
+                            vault_account.clone(),
+                            yield_token_acc.clone(),
+                            token_program.clone(),
+                        ],
+                        &[&[VAULT_SEED, pool_account.key.as_ref(), &[vault_bump]]],
+                    )?;
+                    if yield_vault_acc.owner == program_id && !yield_vault_acc.data_is_empty() {
+                        let mut vault = SkrYieldVault::unpack_from_slice(&yield_vault_acc.try_borrow_data()?)?;
+                        if !vault.is_initialized {
+                            return Err(ClockLendError::PoolInactive.into());
+                        }
+                        accrue_yield(&mut vault, y_div)?;
+                        vault.pack_into_slice(&mut yield_vault_acc.try_borrow_mut_data()?)?;
+                    }
+                }
+                (t_fee, y_div)
+            } else {
+                (origination_fee, 0)
+            };
+
+            // Route treasury portion of origination fee directly to ClockLend Treasury
+            if treasury_fee > 0 {
+                invoke_signed(
+                    &spl_token::instruction::transfer(
+                        token_program.key,
+                        vault_account.key,
+                        treasury_account.key,
+                        vault_account.key,
+                        &[],
+                        treasury_fee,
+                    )?,
+                    &[
+                        vault_account.clone(),
+                        treasury_account.clone(),
+                        token_program.clone(),
+                    ],
+                    &[&[VAULT_SEED, pool_account.key.as_ref(), &[vault_bump]]],
+                )?;
+            }
 
             msg!(
-                "ClockLend: Origination fee {} ({} bps) routed to Treasury. Disbursed: {}",
+                "ClockLend: Origination fee {} (Treasury: {}, Yield: {}). Disbursed: {}",
                 origination_fee,
-                origination_fee_bps,
+                treasury_fee,
+                yield_dividend,
                 net_disbursement
             );
         } else {
@@ -1730,7 +1834,7 @@ pub fn process_create_p2p_offer(
         return Err(ClockLendError::InvalidEscrowAccount.into());
     }
 
-    // Escrow collateral: Native SOL or SPL token (SKR)
+    // Escrow collateral: Native SOL, canonical SKR, JitoSOL, or Sanctum INF
     let is_native_sol = *collateral_mint.key == Pubkey::default()
         || collateral_mint.key == &solana_program::system_program::ID
         || collateral_mint.key == &spl_token::native_mint::id();
@@ -3268,5 +3372,402 @@ pub fn process_withdraw_treasury(
     )?;
 
     msg!("ClockLend: Withdrew {} lamports native SOL from Treasury to {}", amount, destination_account.key);
+    Ok(())
+}
+
+/// Scale for acc_reward_per_share (dividend accounting).
+const YIELD_SCALE: u128 = 1_000_000_000_000;
+/// Minimum time a stake must be held before its dividends are claimable.
+/// Prevents stake-in-slot-N / claim-in-slot-N+1 yield sniping.
+const MIN_STAKE_AGE_SECS: i64 = 3600;
+
+/// Fold `amount` into acc_reward_per_share. Rewards deposited while no staker
+/// is synced are parked in `unallocated_rewards` and folded into the next
+/// allocation so they are never stranded.
+fn accrue_yield(vault: &mut SkrYieldVault, amount: u64) -> ProgramResult {
+    if vault.total_staked_skr > 0 {
+        let total_to_allocate = (amount as u128)
+            .checked_add(vault.unallocated_rewards as u128)
+            .ok_or(ClockLendError::AmountOverflow)?;
+        let reward_increase = total_to_allocate
+            .checked_mul(YIELD_SCALE)
+            .ok_or(ClockLendError::AmountOverflow)?
+            / (vault.total_staked_skr as u128);
+        vault.acc_reward_per_share = vault
+            .acc_reward_per_share
+            .checked_add(reward_increase)
+            .ok_or(ClockLendError::AmountOverflow)?;
+        vault.unallocated_rewards = 0;
+    } else {
+        vault.unallocated_rewards = vault
+            .unallocated_rewards
+            .checked_add(amount)
+            .ok_or(ClockLendError::AmountOverflow)?;
+    }
+    vault.total_rewards_distributed = vault
+        .total_rewards_distributed
+        .checked_add(amount)
+        .ok_or(ClockLendError::AmountOverflow)?;
+    vault.pending_rewards = vault
+        .pending_rewards
+        .checked_add(amount)
+        .ok_or(ClockLendError::AmountOverflow)?;
+    Ok(())
+}
+
+pub fn process_initialize_skr_yield_vault(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let authority = next_account_info(account_info_iter)?;
+    let yield_vault_account = next_account_info(account_info_iter)?;
+    let reward_mint = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let rent_sysvar = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let admin_account = next_account_info(account_info_iter)?;
+
+    assert_signer(authority)?;
+    assert_system_program(system_program)?;
+    assert_token_program(token_program)?;
+
+    // Only the protocol admin may initialize the vault — otherwise anyone
+    // could squat the canonical vault PDA (derived from reward_mint only)
+    // and become the recorded authority before the team does.
+    let (expected_admin_pda, _) =
+        Pubkey::find_program_address(&[ADMIN_SEED], program_id);
+    if *admin_account.key != expected_admin_pda || admin_account.owner != program_id {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+    let admin_config = AdminConfig::unpack_from_slice(&admin_account.try_borrow_data()?)?;
+    if !admin_config.is_initialized || admin_config.admin != *authority.key {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    // Reward mint allowlist: the vault's accounting assumes 6-decimal rewards.
+    if *reward_mint.key != USDC_DEVNET_MINT
+        && *reward_mint.key != USDC_MAINNET_MINT
+        && *reward_mint.key != SKR_MINT
+    {
+        return Err(ClockLendError::InvalidMint.into());
+    }
+
+    let (expected_vault_pda, vault_bump) =
+        Pubkey::find_program_address(&[SKR_YIELD_VAULT_SEED, reward_mint.key.as_ref()], program_id);
+    if expected_vault_pda != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidYieldVault.into());
+    }
+
+    let (expected_token_pda, token_bump) =
+        Pubkey::find_program_address(&[SKR_YIELD_TOKEN_SEED, reward_mint.key.as_ref()], program_id);
+    if expected_token_pda != *vault_token_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    // C-2: never re-initialize — a second call would zero acc_reward_per_share,
+    // total_staked_skr and pending_rewards while users' reward_debt stays,
+    // permanently stranding accrued dividends.
+    if yield_vault_account.owner == program_id && !yield_vault_account.data_is_empty() {
+        let existing = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
+        if existing.is_initialized {
+            return Err(ClockLendError::PoolAlreadyInitialized.into());
+        }
+    }
+
+    create_or_allocate_pda(
+        program_id,
+        authority,
+        yield_vault_account,
+        system_program,
+        SkrYieldVault::LEN,
+        &[SKR_YIELD_VAULT_SEED, reward_mint.key.as_ref(), &[vault_bump]],
+    )?;
+
+    if vault_token_account.owner == &solana_program::system_program::id() {
+        create_or_allocate_token_pda(
+            authority,
+            vault_token_account,
+            reward_mint,
+            yield_vault_account,
+            system_program,
+            token_program,
+            Some(rent_sysvar),
+            &[SKR_YIELD_TOKEN_SEED, reward_mint.key.as_ref(), &[token_bump]],
+        )?;
+    }
+
+    // Validate the vault token account on every path (mirror the deposit check).
+    let vault_token = spl_token::state::Account::unpack(&vault_token_account.try_borrow_data()?)?;
+    if vault_token.mint != *reward_mint.key || vault_token.owner != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    let vault = SkrYieldVault {
+        discriminator: DISCRIMINATOR_SKR_YIELD,
+        is_initialized: true,
+        authority: *authority.key,
+        reward_mint: *reward_mint.key,
+        total_staked_skr: 0,
+        acc_reward_per_share: 0,
+        total_rewards_distributed: 0,
+        pending_rewards: 0,
+        unallocated_rewards: 0,
+    };
+    vault.pack_into_slice(&mut yield_vault_account.try_borrow_mut_data()?)?;
+
+    msg!("ClockLend: Initialized SkrYieldVault for reward mint {}", reward_mint.key);
+    Ok(())
+}
+
+pub fn process_deposit_skr_yield(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    amount: u64,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let depositor = next_account_info(account_info_iter)?;
+    let yield_vault_account = next_account_info(account_info_iter)?;
+    let depositor_token_account = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    assert_signer(depositor)?;
+    assert_token_program(token_program)?;
+
+    if amount == 0 {
+        return Err(ClockLendError::InvalidInstruction.into());
+    }
+
+    let mut vault = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
+    if !vault.is_initialized {
+        return Err(ClockLendError::PoolInactive.into());
+    }
+
+    // Only the vault authority (set at admin-gated init) may push rewards —
+    // a permissionless deposit would let an attacker control exactly when
+    // acc_reward_per_share moves and thus who is entitled.
+    if *depositor.key != vault.authority {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    let (expected_vault_pda, _) =
+        Pubkey::find_program_address(&[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_vault_pda != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidYieldVault.into());
+    }
+
+    let (expected_token_pda, _) =
+        Pubkey::find_program_address(&[SKR_YIELD_TOKEN_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_token_pda != *vault_token_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    let dep_token = spl_token::state::Account::unpack(&depositor_token_account.try_borrow_data()?)?;
+    if dep_token.mint != vault.reward_mint {
+        return Err(ClockLendError::InvalidMint.into());
+    }
+    let vault_token = spl_token::state::Account::unpack(&vault_token_account.try_borrow_data()?)?;
+    if vault_token.mint != vault.reward_mint || vault_token.owner != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    invoke(
+        &spl_token::instruction::transfer(
+            token_program.key,
+            depositor_token_account.key,
+            vault_token_account.key,
+            depositor.key,
+            &[],
+            amount,
+        )?,
+        &[
+            depositor_token_account.clone(),
+            vault_token_account.clone(),
+            depositor.clone(),
+            token_program.clone(),
+        ],
+    )?;
+
+    accrue_yield(&mut vault, amount)?;
+
+    vault.pack_into_slice(&mut yield_vault_account.try_borrow_mut_data()?)?;
+
+    msg!(
+        "ClockLend: Distributed {} yield to SKR holders. acc_per_share: {}",
+        amount,
+        vault.acc_reward_per_share
+    );
+    Ok(())
+}
+
+pub fn process_claim_skr_yield(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let user = next_account_info(account_info_iter)?;
+    let yield_vault_account = next_account_info(account_info_iter)?;
+    let user_yield_position_account = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let user_reward_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let skr_escrow_token = next_account_info(account_info_iter)?;
+
+    assert_signer(user)?;
+    assert_token_program(token_program)?;
+    assert_system_program(system_program)?;
+
+    // C-1: the SKR escrow token account is the SINGLE SOURCE OF TRUTH for the
+    // user's stake. Deriving shares from a cached profile counter allowed a
+    // recycled stake to keep earning after UnstakeSKR (ghost shares).
+    let (expected_skr_escrow_pda, _) =
+        Pubkey::find_program_address(&[b"skr_escrow", user.key.as_ref()], program_id);
+    if *skr_escrow_token.key != expected_skr_escrow_pda {
+        return Err(ClockLendError::InvalidEscrowAccount.into());
+    }
+    let escrow_token = spl_token::state::Account::unpack(&skr_escrow_token.try_borrow_data()?)?;
+    if escrow_token.owner != expected_skr_escrow_pda || escrow_token.mint != SKR_MINT {
+        return Err(ClockLendError::InvalidEscrowAccount.into());
+    }
+
+    let mut vault = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
+    if !vault.is_initialized {
+        return Err(ClockLendError::PoolInactive.into());
+    }
+
+    let (expected_vault_pda, vault_bump) =
+        Pubkey::find_program_address(&[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_vault_pda != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidYieldVault.into());
+    }
+
+    let (expected_token_pda, _) =
+        Pubkey::find_program_address(&[SKR_YIELD_TOKEN_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_token_pda != *vault_token_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    let (expected_user_pda, user_bump) =
+        Pubkey::find_program_address(&[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref()], program_id);
+    if expected_user_pda != *user_yield_position_account.key {
+        return Err(ClockLendError::InvalidUserYieldPosition.into());
+    }
+
+    let is_new_position = user_yield_position_account.owner == &solana_program::system_program::id();
+    create_or_allocate_pda(
+        program_id,
+        user,
+        user_yield_position_account,
+        system_program,
+        UserYieldPosition::LEN,
+        &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref(), &[user_bump]],
+    )?;
+
+    if is_new_position {
+        let initial_pos = UserYieldPosition {
+            discriminator: DISCRIMINATOR_USER_YIELD,
+            is_initialized: true,
+            user: *user.key,
+            reward_mint: vault.reward_mint,
+            staked_skr: 0,
+            reward_debt: 0,
+            accrued_rewards: 0,
+            total_claimed: 0,
+            last_interaction_time: Clock::get()?.unix_timestamp,
+        };
+        initial_pos.pack_into_slice(&mut user_yield_position_account.try_borrow_mut_data()?)?;
+    }
+
+    let mut position = UserYieldPosition::unpack_from_slice(&user_yield_position_account.try_borrow_data()?)?;
+    if position.user != *user.key || position.reward_mint != vault.reward_mint {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    // Accumulate pending rewards on the previous (cached) stake, BOUNDED by
+    // the real escrow balance, then sync the position to the escrow. The
+    // delta keeps total_staked_skr consistent without ever trusting the
+    // cached value — a stale-high cached stake (only possible from pre-fix
+    // state) can never earn ghost shares.
+    let eff_staked = position.staked_skr.min(escrow_token.amount);
+    let gross = ((eff_staked as u128)
+        .checked_mul(vault.acc_reward_per_share)
+        .ok_or(ClockLendError::AmountOverflow)?)
+        / YIELD_SCALE;
+    let pending = gross.saturating_sub(position.reward_debt.min(gross)) as u64;
+    position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
+
+    let current_skr = escrow_token.amount;
+    let stake_changed = current_skr != position.staked_skr;
+    if current_skr > position.staked_skr {
+        let diff = current_skr - position.staked_skr;
+        vault.total_staked_skr = vault.total_staked_skr.saturating_add(diff);
+    } else if current_skr < position.staked_skr {
+        let diff = position.staked_skr - current_skr;
+        vault.total_staked_skr = vault.total_staked_skr.saturating_sub(diff);
+    }
+    position.staked_skr = current_skr;
+    position.reward_debt = ((position.staked_skr as u128)
+        .checked_mul(vault.acc_reward_per_share)
+        .ok_or(ClockLendError::AmountOverflow)?)
+        / YIELD_SCALE;
+
+    let claimable = position.accrued_rewards;
+    let mut paid = false;
+    if claimable > 0 {
+        // H-2: minimum hold before dividends are claimable. Without it a
+        // staker can register shares in slot N, collect the slot N+1 dividend
+        // and unstake in N+2 — a zero-risk yield snipe.
+        let now = Clock::get()?.unix_timestamp;
+        if now.saturating_sub(position.last_interaction_time) < MIN_STAKE_AGE_SECS {
+            return Err(ClockLendError::YieldCooldown.into());
+        }
+
+        let user_tok = spl_token::state::Account::unpack(&user_reward_account.try_borrow_data()?)?;
+        if user_tok.owner != *user.key || user_tok.mint != vault.reward_mint {
+            return Err(ClockLendError::InvalidMint.into());
+        }
+
+        let vault_tok = spl_token::state::Account::unpack(&vault_token_account.try_borrow_data()?)?;
+        let payout = claimable.min(vault_tok.amount);
+
+        if payout > 0 {
+            invoke_signed(
+                &spl_token::instruction::transfer(
+                    token_program.key,
+                    vault_token_account.key,
+                    user_reward_account.key,
+                    yield_vault_account.key,
+                    &[],
+                    payout,
+                )?,
+                &[
+                    vault_token_account.clone(),
+                    user_reward_account.clone(),
+                    yield_vault_account.clone(),
+                    token_program.clone(),
+                ],
+                &[&[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref(), &[vault_bump]]],
+            )?;
+
+            vault.pending_rewards = vault.pending_rewards.saturating_sub(payout);
+            position.total_claimed = position.total_claimed.saturating_add(payout);
+            position.accrued_rewards = position.accrued_rewards.saturating_sub(payout);
+            paid = true;
+        }
+    }
+
+    // The cooldown timer measures time since the last PAYOUT or STAKE CHANGE.
+    // Zero-payout syncs (share registration) do not refresh it — otherwise
+    // every sync would re-arm the full cooldown for long-term stakers.
+    if stake_changed || paid {
+        position.last_interaction_time = Clock::get()?.unix_timestamp;
+    }
+    position.pack_into_slice(&mut user_yield_position_account.try_borrow_mut_data()?)?;
+    vault.pack_into_slice(&mut yield_vault_account.try_borrow_mut_data()?)?;
+
+    msg!("ClockLend: Claimed {} yield ({}-second stake cooldown applies)", claimable, MIN_STAKE_AGE_SECS);
     Ok(())
 }
