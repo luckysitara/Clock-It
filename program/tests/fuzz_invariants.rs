@@ -7,6 +7,13 @@
 //   3. profile.locked_skr           <= profile.staked_skr        (lock <= stake)
 //   4. profile.locked_skr           == sum of live loan locks    (lock bookkeeping)
 //   5. loan.is_active               == status in {Active, InGracePeriod}
+//   6. yield vault total_staked_skr == sum of user yield positions (share coherence)
+//   7. yield vault token balance    >= pending_rewards            (dividend solvency)
+//   8. yield vault token balance    >= sum of accrued_rewards     (payable banked claims)
+//
+// Yield ops (round 11): stake/unstake WITH and WITHOUT the yield accounts
+// appended, authority reward deposits, and claims across a warped clock (so
+// the 1h cooldown both rejects and eventually pays).
 //
 // The default run is short so it stays cheap in CI. For a real campaign:
 //   FUZZ_STEPS=700 FUZZ_SEED=<n> cargo test --offline --test fuzz_invariants -- --nocapture
@@ -21,12 +28,15 @@
 use clock_lend::{
     instruction::ClockLendInstruction,
     processor::process_instruction,
-    state::{LendingPool, LoanOrder, LoanStatus, P2POffer, PoolType, UserProfile, ADMIN_SEED,
+    state::{LendingPool, LoanOrder, LoanStatus, P2POffer, PoolType, SkrYieldVault, UserProfile,
+            UserYieldPosition, ADMIN_SEED,
             DISCRIMINATOR_LOAN, DISCRIMINATOR_POOL, DISCRIMINATOR_PROFILE,
             ESCROW_SEED, LOAN_SEED, ORACLE_SEED, P2P_SEED, POOL_SEED, PROFILE_SEED, SKR_MINT,
-            TREASURY_SEED, USDC_DEVNET_MINT, VAULT_SEED},
+            SKR_YIELD_TOKEN_SEED, SKR_YIELD_VAULT_SEED, TREASURY_SEED, USDC_DEVNET_MINT,
+            USER_YIELD_SEED, VAULT_SEED},
 };
 use solana_program::{
+    clock::Clock,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
     pubkey::Pubkey,
@@ -129,6 +139,14 @@ struct Ctx {
     offers: Vec<(usize, u64, Pubkey, Pubkey)>,  // (creator_idx, offer_id, offer_pda, escrow_pda)
     next_offer_id: u64,
     interest_paid: u64,                          // total interest returned to the vault by repayments
+    // ---- round 11: yield vault driving (clock control needs the test context)
+    pctx: ProgramTestContext,
+    admin_pda: Pubkey,
+    yield_vault: Pubkey,
+    yield_token: Pubkey,
+    yield_deposits: u64,                         // total reward tokens pushed in
+    yield_payouts: u64,                          // total reward tokens paid out
+    clock_advances: u64,
 }
 
 // ---------------------------------------------------------------- invariant checks
@@ -214,6 +232,58 @@ async fn check_invariants(ctx: &mut Ctx, step: usize, op: &str) {
             }
         }
     }
+
+    // ---------------- round 11: SKR yield vault ----------------
+    if let Some(a) = ctx.bc.get_account(ctx.yield_vault).await.unwrap() {
+        if a.owner == pid && a.data.len() >= SkrYieldVault::LEN {
+            if let Ok(v) = SkrYieldVault::unpack_from_slice(&a.data) {
+                if v.is_initialized {
+                    let vbal = token_amount(&mut ctx.bc, ctx.yield_token).await;
+
+                    // 6. Share coherence: the vault's denominator must equal the
+                    //    sum of the per-user positions it is dividing among.
+                    let mut sum_positions: u64 = 0;
+                    let mut sum_accrued: u64 = 0;
+                    for u in ctx.users.iter() {
+                        let (pos_pda, _) = Pubkey::find_program_address(
+                            &[USER_YIELD_SEED, u.kp.pubkey().as_ref(), USDC_DEVNET_MINT.as_ref()], &pid);
+                        if let Some(pa) = ctx.bc.get_account(pos_pda).await.unwrap() {
+                            if pa.owner == pid && pa.data.len() >= UserYieldPosition::LEN {
+                                if let Ok(p) = UserYieldPosition::unpack_from_slice(&pa.data) {
+                                    sum_positions = sum_positions.saturating_add(p.staked_skr);
+                                    sum_accrued = sum_accrued.saturating_add(p.accrued_rewards);
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        v.total_staked_skr, sum_positions,
+                        "INVARIANT 6 VIOLATED at step {step} ({op}): vault total_staked_skr {} != \
+                         sum of positions {}", v.total_staked_skr, sum_positions
+                    );
+
+                    // 7. Dividend solvency: pending_rewards is an upper bound on
+                    //    what claimants can still take out.
+                    assert!(
+                        vbal >= v.pending_rewards,
+                        "INVARIANT 7 VIOLATED at step {step} ({op}): yield token balance {} < \
+                         pending_rewards {}", vbal, v.pending_rewards
+                    );
+
+                    // 8. Banked (harvested, unpaid) rewards must be payable.
+                    //    Tolerance: the S=1e12 share math floors twice per sync,
+                    //    which can credit each position at most 1 raw unit per
+                    //    harvest (dust, never exploitable).
+                    assert!(
+                        vbal.saturating_add(N_USERS as u64 * 1_000) >= sum_accrued,
+                        "INVARIANT 8 VIOLATED at step {step} ({op}): yield token balance {} < \
+                         sum accrued_rewards {} (vault is insolvent against banked claims)",
+                        vbal, sum_accrued
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- ops
@@ -245,37 +315,104 @@ async fn op_withdraw(ctx: &mut Ctx, rng: &mut Rng) {
     let _ = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.lp], &ctx.payer, ctx.bh).await;
 }
 
-async fn op_stake(ctx: &mut Ctx, rng: &mut Rng, ui: usize) {
+// ---------------------------------------------------------------- yield ops
+fn user_yield_pos(pid: Pubkey, user: Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[USER_YIELD_SEED, user.as_ref(), USDC_DEVNET_MINT.as_ref()], &pid).0
+}
+
+/// Yield-aware variants: the difference from op_stake/op_unstake is ONLY whether
+/// the SkrYieldVault + UserYieldPosition accounts are appended. Both variants
+/// must preserve the invariants — the unsynced one leaves a stale position,
+/// which is exactly the state the clamps exist for.
+async fn op_stake(ctx: &mut Ctx, rng: &mut Rng, ui: usize, sync: bool) {
     let amount = rng.range(10, 2_000) * USDC;
     let (user_pk, profile, skr, escrow) = {
         let u = &ctx.users[ui];
         (u.kp.pubkey(), u.profile, u.skr, u.skr_escrow)
     };
-    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+    let mut accounts = vec![
         AccountMeta::new(user_pk, true), AccountMeta::new(profile, false),
         AccountMeta::new(skr, false), AccountMeta::new(escrow, false),
         AccountMeta::new_readonly(SYS, false), AccountMeta::new_readonly(spl_token::id(), false),
         AccountMeta::new_readonly(SKR_MINT, false),
-    ], data: borsh::to_vec(&ClockLendInstruction::StakeSKR { amount }).unwrap() };
+    ];
+    if sync {
+        accounts.push(AccountMeta::new(ctx.yield_vault, false));
+        accounts.push(AccountMeta::new(user_yield_pos(ctx.pid, user_pk), false));
+    }
+    let ix = Instruction { program_id: ctx.pid, accounts,
+        data: borsh::to_vec(&ClockLendInstruction::StakeSKR { amount }).unwrap() };
     let _ = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.users[ui].kp], &ctx.payer, ctx.bh).await;
 }
 
-async fn op_unstake(ctx: &mut Ctx, rng: &mut Rng, ui: usize) {
+async fn op_unstake(ctx: &mut Ctx, rng: &mut Rng, ui: usize, sync: bool) {
     let (user_pk, profile, skr, escrow) = {
         let u = &ctx.users[ui];
         (u.kp.pubkey(), u.profile, u.skr, u.skr_escrow)
     };
     // deliberately overshoot sometimes, to exercise the lock guard
     let amount = rng.range(1, 2_100) * USDC;
-    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+    let mut accounts = vec![
         AccountMeta::new(user_pk, true), AccountMeta::new(profile, false),
         AccountMeta::new(skr, false), AccountMeta::new(escrow, false),
         AccountMeta::new_readonly(spl_token::id(), false),
-    ], data: borsh::to_vec(&ClockLendInstruction::UnstakeSKR { amount }).unwrap() };
+    ];
+    if sync {
+        accounts.push(AccountMeta::new(ctx.yield_vault, false));
+        accounts.push(AccountMeta::new(user_yield_pos(ctx.pid, user_pk), false));
+    }
+    let ix = Instruction { program_id: ctx.pid, accounts,
+        data: borsh::to_vec(&ClockLendInstruction::UnstakeSKR { amount }).unwrap() };
     let _ = send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.users[ui].kp], &ctx.payer, ctx.bh).await;
 }
 
-async fn op_borrow(ctx: &mut Ctx, rng: &mut Rng, ui: usize, step: usize) {
+/// Authority-only reward distribution (the borrow fee-split path shares this
+/// accrue code, and is exercised separately by op_borrow_with_yield).
+async fn op_yield_deposit(ctx: &mut Ctx, rng: &mut Rng) {
+    let amount = rng.range(1, 40) * USDC;
+    let lp_pk = ctx.lp.pubkey();
+    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+        AccountMeta::new(lp_pk, true), AccountMeta::new(ctx.yield_vault, false),
+        AccountMeta::new(ctx.lp_usdc, false), AccountMeta::new(ctx.yield_token, false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+    ], data: borsh::to_vec(&ClockLendInstruction::DepositSkrYield { amount }).unwrap() };
+    if send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.lp], &ctx.payer, ctx.bh).await.is_ok() {
+        ctx.yield_deposits = ctx.yield_deposits.saturating_add(amount);
+    }
+}
+
+/// Claim, sometimes after warping the clock past the 1h cooldown so BOTH the
+/// in-cooldown rejection and the real payout path get exercised.
+async fn op_yield_claim(ctx: &mut Ctx, rng: &mut Rng, ui: usize, advance_secs: i64) {
+    if advance_secs > 0 {
+        advance_clock(ctx, advance_secs).await;
+    }
+    let (user_pk, skr, escrow, usdc) = {
+        let u = &ctx.users[ui];
+        (u.kp.pubkey(), u.skr, u.skr_escrow, u.usdc)
+    };
+    let _ = skr;
+    let before = token_amount(&mut ctx.bc, usdc).await;
+    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+        AccountMeta::new(user_pk, true),
+        AccountMeta::new(ctx.yield_vault, false),
+        AccountMeta::new(user_yield_pos(ctx.pid, user_pk), false),
+        AccountMeta::new(ctx.yield_token, false),
+        AccountMeta::new(usdc, false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+        AccountMeta::new_readonly(SYS, false),
+        AccountMeta::new_readonly(escrow, false),
+    ], data: borsh::to_vec(&ClockLendInstruction::ClaimSkrYield).unwrap() };
+    if send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.users[ui].kp], &ctx.payer, ctx.bh).await.is_ok() {
+        let after = token_amount(&mut ctx.bc, usdc).await;
+        ctx.yield_payouts = ctx.yield_payouts.saturating_add(after.saturating_sub(before));
+    }
+}
+
+/// Borrow WITH the yield vault + token appended, so the 50/50 origination-fee
+/// split fires accrue_yield from a permissionless path.
+async fn op_borrow(ctx: &mut Ctx, rng: &mut Rng, ui: usize, step: usize, with_yield: bool) {
     let loan_id = ctx.next_loan_id;
     let (user_pk, usdc, profile) = { let u = &ctx.users[ui]; (u.kp.pubkey(), u.usdc, u.profile) };
     let (loan, _) = Pubkey::find_program_address(
@@ -290,7 +427,7 @@ async fn op_borrow(ctx: &mut Ctx, rng: &mut Rng, ui: usize, step: usize) {
     if borrow_amount == 0 { return; }
     let duration = (rng.range(1, 30) * 86_400) as i64;
 
-    let ix = Instruction { program_id: ctx.pid, accounts: vec![
+    let mut accounts = vec![
         AccountMeta::new(user_pk, true), AccountMeta::new(ctx.pool, false),
         AccountMeta::new(loan, false), AccountMeta::new(ctx.vault, false),
         AccountMeta::new(usdc, false), AccountMeta::new(user_pk, false),
@@ -298,7 +435,13 @@ async fn op_borrow(ctx: &mut Ctx, rng: &mut Rng, ui: usize, step: usize) {
         AccountMeta::new_readonly(spl_token::id(), false), AccountMeta::new_readonly(SYS, false),
         AccountMeta::new(profile, false), AccountMeta::new(ctx.treasury_tok, false),
         AccountMeta::new_readonly(ctx.sol_oracle, false),
-    ], data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
+    ];
+    if with_yield {
+        accounts.push(AccountMeta::new(ctx.yield_vault, false));
+        accounts.push(AccountMeta::new(ctx.yield_token, false));
+    }
+    let ix = Instruction { program_id: ctx.pid, accounts,
+        data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
         loan_id, borrow_amount, collateral_amount: lamports, duration_seconds: duration }).unwrap() };
 
     if send(&mut ctx.bc, &[ix], &[&ctx.payer, &ctx.users[ui].kp], &ctx.payer, ctx.bh).await.is_ok() {
@@ -306,6 +449,21 @@ async fn op_borrow(ctx: &mut Ctx, rng: &mut Rng, ui: usize, step: usize) {
         println!("      step {step}: user {ui} borrowed {borrow_amount} against {lamports} lamports");
     }
     ctx.next_loan_id += 1;
+}
+
+/// Advance the bank clock and keep the SOL admin feed inside its 3600s window.
+async fn advance_clock(ctx: &mut Ctx, secs: i64) {
+    let clock: Clock = ctx.bc.get_sysvar().await.unwrap();
+    ctx.pctx.set_sysvar(&Clock { unix_timestamp: clock.unix_timestamp + secs, ..clock });
+    ctx.clock_advances += 1;
+    let lp_pk = ctx.lp.pubkey();
+    let feed_ix = Instruction { program_id: ctx.pid, accounts: vec![
+        AccountMeta::new(lp_pk, true), AccountMeta::new(ctx.sol_oracle, false),
+        AccountMeta::new_readonly(NATIVE_MINT, false), AccountMeta::new_readonly(SYS, false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false), AccountMeta::new(ctx.admin_pda, false),
+    ], data: borsh::to_vec(&ClockLendInstruction::SetPriceFeed {
+        price_micro_usd: 150_000_000, decimals: 9 }).unwrap() };
+    let _ = send(&mut ctx.bc, &[feed_ix], &[&ctx.payer, &ctx.lp], &ctx.payer, ctx.bh).await;
 }
 
 async fn op_repay(ctx: &mut Ctx, rng: &mut Rng) {
@@ -463,7 +621,13 @@ async fn fuzz_sequence_invariants() {
             executable: false, rent_epoch: 0 });
     }
 
-    let (mut bc, payer, bh) = pt.start().await;
+    // start_with_context (not start) so the fuzzer can warp the bank clock: the
+    // yield cooldown is time-gated and a frozen clock would make every claim
+    // revert, leaving the payout path (and its accounting) untested.
+    let pctx = pt.start_with_context().await;
+    let mut bc = pctx.banks_client.clone();
+    let payer = pctx.payer.insecure_clone();
+    let bh = pctx.last_blockhash;
     send(&mut bc, &[
         system_instruction::transfer(&payer.pubkey(), &deployer.pubkey(), 30_000_000_000),
     ], &[&payer], &payer, bh).await.unwrap();
@@ -496,11 +660,28 @@ async fn fuzz_sequence_invariants() {
     }).unwrap() };
     send(&mut bc, &[init_ix], &[&payer, &deployer], &payer, bh).await.expect("pool");
 
+    // ---------- yield vault (round 11) ----------
+    // The pool's liquidity mint IS USDC_DEVNET_MINT, so the borrowing fee-split
+    // routes into this same vault.
+    let (yield_vault, _) = Pubkey::find_program_address(
+        &[SKR_YIELD_VAULT_SEED, usdc.as_ref()], &pid);
+    let (yield_token, _) = Pubkey::find_program_address(
+        &[SKR_YIELD_TOKEN_SEED, usdc.as_ref()], &pid);
+    let yv_ix = Instruction { program_id: pid, accounts: vec![
+        AccountMeta::new(deployer.pubkey(), true), AccountMeta::new(yield_vault, false),
+        AccountMeta::new_readonly(usdc, false), AccountMeta::new(yield_token, false),
+        AccountMeta::new_readonly(SYS, false), AccountMeta::new_readonly(sysvar::rent::id(), false),
+        AccountMeta::new_readonly(spl_token::id(), false), AccountMeta::new_readonly(admin_pda, false),
+    ], data: borsh::to_vec(&ClockLendInstruction::InitializeSkrYieldVault).unwrap() };
+    send(&mut bc, &[yv_ix], &[&payer, &deployer], &payer, bh).await.expect("yield vault");
+
     let mut ctx = Ctx { bc, payer, bh, pid, pool, vault, treasury_tok, sol_oracle,
         lp: deployer,   // moved in after the setup transactions above
         lp_usdc, users,
         loans: Vec::new(), next_loan_id: 1, offers: Vec::new(), next_offer_id: 1,
-        interest_paid: 0 };
+        interest_paid: 0,
+        pctx, admin_pda, yield_vault, yield_token,
+        yield_deposits: 0, yield_payouts: 0, clock_advances: 0 };
 
     // ---------- run ----------
     for step in 0..steps {
@@ -510,14 +691,25 @@ async fn fuzz_sequence_invariants() {
         let ui = rng.below(N_USERS as u64) as usize;
         let op = rng.below(100);
         let name = match op {
-            0..=18 => { op_deposit(&mut ctx, &mut rng, ui).await; "DepositLiquidity" }
-            19..=32 => { op_stake(&mut ctx, &mut rng, ui).await; "StakeSKR" }
-            33..=46 => { op_unstake(&mut ctx, &mut rng, ui).await; "UnstakeSKR" }
-            47..=70 => { op_borrow(&mut ctx, &mut rng, ui, step).await; "BorrowFromPool" }
-            71..=82 => { op_repay(&mut ctx, &mut rng).await; "RepayLoan" }
-            83..=88 => { op_p2p_create(&mut ctx, &mut rng, ui).await; "CreateP2POffer" }
-            89..=91 => { op_p2p_fund(&mut ctx, &mut rng).await; "FundP2POffer" }
-            92..=93 => { op_p2p_cancel(&mut ctx, &mut rng).await; "CancelP2POffer" }
+            0..=14 => { op_deposit(&mut ctx, &mut rng, ui).await; "DepositLiquidity" }
+            15..=23 => { op_stake(&mut ctx, &mut rng, ui, false).await; "StakeSKR" }
+            24..=30 => { op_stake(&mut ctx, &mut rng, ui, true).await; "StakeSKR+yield" }
+            31..=38 => { op_unstake(&mut ctx, &mut rng, ui, false).await; "UnstakeSKR" }
+            39..=44 => { op_unstake(&mut ctx, &mut rng, ui, true).await; "UnstakeSKR+yield" }
+            45..=60 => {
+                let with_yield = rng.below(100) < 50;
+                op_borrow(&mut ctx, &mut rng, ui, step, with_yield).await; "BorrowFromPool"
+            }
+            61..=70 => { op_repay(&mut ctx, &mut rng).await; "RepayLoan" }
+            71..=74 => { op_p2p_create(&mut ctx, &mut rng, ui).await; "CreateP2POffer" }
+            75..=76 => { op_p2p_fund(&mut ctx, &mut rng).await; "FundP2POffer" }
+            77..=77 => { op_p2p_cancel(&mut ctx, &mut rng).await; "CancelP2POffer" }
+            78..=85 => { op_yield_deposit(&mut ctx, &mut rng).await; "DepositSkrYield" }
+            86..=97 => {
+                // 60%: warp the clock past the cooldown so the claim pays.
+                let secs = if rng.below(100) < 60 { 3_601 + rng.below(7_200) as i64 } else { 0 };
+                op_yield_claim(&mut ctx, &mut rng, ui, secs).await; "ClaimSkrYield"
+            }
             _ => { op_withdraw(&mut ctx, &mut rng).await; "WithdrawLiquidity" }
         };
         check_invariants(&mut ctx, step, name).await;
@@ -541,6 +733,17 @@ async fn fuzz_sequence_invariants() {
             Some(pr) => println!("  user {i}: staked={} locked={} escrow={}", pr.staked_skr, pr.locked_skr, skr),
             None => println!("  user {i}: no profile (never staked)"),
         }
+    }
+    let yv = match ctx.bc.get_account(ctx.yield_vault).await.unwrap() {
+        Some(a) => SkrYieldVault::unpack_from_slice(&a.data).ok(),
+        None => None,
+    };
+    if let Some(yv) = yv {
+        println!("  yield vault: total_staked={} acc={} pending={} unallocated={}",
+            yv.total_staked_skr, yv.acc_reward_per_share, yv.pending_rewards, yv.unallocated_rewards);
+        println!("  yield token balance = {}", token_amount(&mut ctx.bc, ctx.yield_token).await);
+        println!("  yield deposits={} payouts={} clock_advances={}",
+            ctx.yield_deposits, ctx.yield_payouts, ctx.clock_advances);
     }
     println!("  all invariants held");
     let _ = P2POffer::LEN;
@@ -595,7 +798,9 @@ async fn is_oracle_free_is_authoritative_not_name_derived() {
             AccountMeta::new_readonly(SYS, false), AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ], data: borsh::to_vec(&ClockLendInstruction::InitializePool {
-            pool_id: 1, pool_type: PoolType::Individual, interest_rate_bps: 800, max_ltv_bps: 6500,
+            pool_id: 1, pool_type: PoolType::Individual, interest_rate_bps: 800,
+            // Round 11: oracle-free pools are capped at 30% LTV.
+            max_ltv_bps: if flag { 3000 } else { 6500 },
             min_duration: 86_400, max_duration: 86_400 * 30, name, is_oracle_free: flag }).unwrap() };
         send(&mut bc, &[ix], &[&payer, &authority], &payer, bh).await.expect("init pool");
 
@@ -623,7 +828,7 @@ async fn is_oracle_free_is_authoritative_not_name_derived() {
             AccountMeta::new_readonly(spl_token::id(), false), AccountMeta::new_readonly(SYS, false),
             AccountMeta::new(profile, false), AccountMeta::new(treasury_tok, false),
         ], data: borsh::to_vec(&ClockLendInstruction::BorrowFromPool {
-            loan_id: 1, borrow_amount: 90 * USDC, collateral_amount: 1_000_000_000,
+            loan_id: 1, borrow_amount: 40 * USDC, collateral_amount: 1_000_000_000, // 30% cap: $45 max at the $150 baseline
             duration_seconds: 86_400 * 7 }).unwrap() };
         let r = send(&mut bc, &[ix], &[&payer, &borrower], &payer, bh).await;
         println!("   [{label}] flag={flag} -> borrow w/o oracle: {}",

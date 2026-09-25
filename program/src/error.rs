@@ -76,10 +76,6 @@ pub enum ClockLendError {
     OfferAlreadyActive,
     #[error("Invalid Profile Account")]
     InvalidProfileAccount,
-    #[error("Oracle Price Dated In The Future")]
-    OraclePriceFromFuture,
-    #[error("Oracle Verification Level Insufficient")]
-    InsufficientVerificationLevel,
     #[error("Invalid SKR Yield Vault Account")]
     InvalidYieldVault,
     #[error("Invalid User Yield Position Account")]

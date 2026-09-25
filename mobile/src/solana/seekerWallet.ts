@@ -221,7 +221,6 @@ export const ALLOWED_PROGRAM_IDS = new Set<string>([
   MEMO_PROGRAM_ID.toBase58(),
   'ComputeBudget111111111111111111111111111111', // Compute Budget Program
   'rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ', // Pyth Solana Receiver (price updates)
-  'worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth', // Wormhole Core Bridge (Pyth VAA verification)
 ]);
 
 /**

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, ScrollView, ActivityIndicator, Image } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { LendingPool, UserProfile, WalletAssets } from '../types';
-import { livePrices, fetchLivePrices } from '../solana/onChainService';
+import { livePrices, fetchLivePrices, subscribeToPriceUpdates, getPriceSource } from '../solana/onChainService';
 
 const SOL_LOGO = require('../../assets/tokens/sol.png');
 const SKR_LOGO = require('../../assets/tokens/skr.png');
@@ -11,7 +11,7 @@ interface P2PExpressViewProps {
   pools: LendingPool[];
   userProfile: UserProfile;
   walletAssets?: WalletAssets;
-  onBorrow: (borrowAmount: number, collateralUnits: number, collateralName: string, pool: LendingPool) => void;
+  onBorrow: (borrowAmount: number, collateralUnits: number, collateralName: string, pool: LendingPool, durationDays: number) => void;
   onRequestAirdrop?: () => void;
   isLoadingPools?: boolean;
 }
@@ -29,14 +29,27 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
   const [collateralType, setCollateralType] = useState<'SKR' | 'SOL'>('SKR');
   const [durationDays, setDurationDays] = useState<number>(7);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [prices, setPrices] = useState(livePrices);
   // Collateral sizing MUST use a live price: sizing with a hardcoded price
   // reverts the borrow when the market moves up and silently over-locks when
-  // it moves down. If the price source is unavailable, borrowing is disabled.
-  const [priceAvailable, setPriceAvailable] = useState<boolean>(true);
+  // it moves down. If the price source is unavailable or only baseline-fallback, borrowing is disabled.
+  const [priceAvailable, setPriceAvailable] = useState<boolean>(false);
+
   useEffect(() => {
     fetchLivePrices()
-      .then(() => setPriceAvailable(true))
+      .then((p) => {
+        setPrices({ ...p });
+        const src = getPriceSource();
+        setPriceAvailable(src !== 'fallback-baseline');
+      })
       .catch(() => setPriceAvailable(false));
+
+    // Real-time Helius LaserStream WebSocket subscription
+    const unsubscribe = subscribeToPriceUpdates((updated, source) => {
+      setPrices({ ...updated });
+      setPriceAvailable(source !== 'fallback-baseline');
+    });
+    return () => unsubscribe();
   }, []);
 
   const numAmount = parseFloat(amountStr) || 0;
@@ -51,11 +64,9 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
   const solHolding = walletAssets?.tokenList?.find((t) => t.symbol === 'SOL');
   const skrHolding = walletAssets?.tokenList?.find((t) => t.symbol === 'SKR');
 
-  // Native SOL is never in tokenList (tokenList only contains SPL token
-  // accounts), so any tokenList lookup would silently fall back forever.
-  // Use the shared live-price cache (refreshed every 2 minutes).
-  const solPrice = livePrices.sol;
-  const skrPrice = livePrices.skr;
+  // Real-time on-chain prices pushed over Helius WebSocket (with Jupiter / CoinGecko fallbacks)
+  const solPrice = prices.sol;
+  const skrPrice = prices.skr;
 
   const collateralPrice = collateralType === 'SOL' ? solPrice : skrPrice;
   const userBalance = collateralType === 'SOL' ? solBalance : skrBalance;
@@ -99,7 +110,8 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
         numAmount,
         collUnits,
         collateralType,
-        bestPool
+        bestPool,
+        durationDays
       );
     } catch (e: any) {
       Alert.alert('Transaction Notice', e?.message || 'Failed to submit borrow transaction');
@@ -366,6 +378,8 @@ export const P2PExpressView: React.FC<P2PExpressViewProps> = ({
           <Text style={[styles.borrowButtonText, { color: colors.primaryText }]}>
             {isInsufficientCollateral
               ? `Insufficient ${collateralType} Collateral`
+              : !priceAvailable
+              ? 'Awaiting Live Price Feed...'
               : `⚡ Instant Borrow $${numAmount > 0 ? numAmount : 0} USDC`}
           </Text>
         )}

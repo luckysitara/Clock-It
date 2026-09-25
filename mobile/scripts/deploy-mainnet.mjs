@@ -4,11 +4,31 @@ import {
   SystemProgram, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
-import {
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccountIdempotentInstruction,
-} from '@solana/spl-token';
 import { execSync } from 'child_process';
+
+// No @solana/spl-token dependency: the ATA helpers are hand-rolled (the same
+// derivation the mobile app uses) so the script runs on a bare checkout.
+function getAssociatedTokenAddress(mint, owner) {
+  const [address] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOC_TOKEN_PROGRAM
+  );
+  return address;
+}
+function createAssociatedTokenAccountIdempotentInstruction(payer, ata, owner, mint) {
+  return new TransactionInstruction({
+    programId: ASSOC_TOKEN_PROGRAM,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]),
+  });
+}
 
 // Load the repo-root .env (no external deps) so server-side scripts can use
 // SOLANA_RPC_URL / HELIUS_RPC_URL without exporting them manually.
@@ -29,7 +49,7 @@ loadEnv();
 
 const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const ASSOC_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA7knL');
+const ASSOC_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const USDC_MAINNET_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 const SKR_MINT = new PublicKey('SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3');
 const NATIVE_MINT = new PublicKey('So11111111111111111111111111111111111111112');
@@ -96,30 +116,22 @@ async function main() {
     );
   }
 
-  const balance = await conn.getBalance(keypair.publicKey);
-  console.log(`Deployer ${keypair.publicKey.toBase58()} balance: ${balance / 1e9} SOL`);
-  if (balance < 1_700_000_000) {
-    throw new Error('Insufficient SOL — fund the deployer wallet (~2.0 SOL) first.');
-  }
-
   // 1. Deploy the program (write-buffer + upgrade) — same program id on mainnet
   const soPath = new URL('../program/target/deploy/clock_lend.so', import.meta.url).pathname;
-  if (!fs.existsSync(soPath)) {
-    throw new Error(`${soPath} not found — run: cd program && cargo build-sbf`);
-  }
 
   // C-3 (round 9): build + freshness preflight. Shipping a stale ELF silently
-  // omits whatever the sources gained since the last build — the previous
-  // artifact on this box predated BOTH the round-8 hardening and the yield
-  // feature. Hard-fail unless --skip-build is passed.
+  // omits whatever the sources gained since the last build. Hard-fail unless --skip-build is passed.
   const skipBuild = args.includes('--skip-build');
   if (!skipBuild) {
     console.log('Building the program from source (cargo build-sbf)...');
     execSync(`cd ${new URL('../program', import.meta.url).pathname} && cargo build-sbf`, { stdio: 'inherit' });
   }
+  if (!fs.existsSync(soPath)) {
+    throw new Error(`${soPath} not found — run: cd program && cargo build-sbf`);
+  }
   const soStat = fs.statSync(soPath);
   let newestSource = 0;
-  for (const dir of ['src', 'tests']) {
+  for (const dir of ['src']) {
     const walk = (d) => {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
         const p = `${d}/${e.name}`;
@@ -142,6 +154,19 @@ async function main() {
   }
   const soMd5 = execSync(`md5sum ${soPath}`, { encoding: 'utf8' }).split(' ')[0];
   console.log(`Artifact: ${soPath} (${soStat.size} bytes, md5 ${soMd5})`);
+
+  // Dynamic rent preflight: calculate exact required rent for the ProgramData buffer (size + 45 bytes header)
+  // plus 0.1 SOL buffer for write-buffer transaction fees and priority fees.
+  const requiredRent = await conn.getMinimumBalanceForRentExemption(soStat.size + 45);
+  const deployFloor = requiredRent + 100_000_000;
+  const balance = await conn.getBalance(keypair.publicKey);
+  console.log(`Deployer ${keypair.publicKey.toBase58()} balance: ${(balance / 1e9).toFixed(4)} SOL (min needed: ${(deployFloor / 1e9).toFixed(4)} SOL, rent: ${(requiredRent / 1e9).toFixed(4)} SOL)`);
+  if (balance < deployFloor) {
+    throw new Error(
+      `Insufficient SOL — deployer has ${(balance / 1e9).toFixed(4)} SOL, but required rent is ${(requiredRent / 1e9).toFixed(4)} SOL ` +
+      `(${(deployFloor / 1e9).toFixed(4)} SOL needed with tx buffer). Fund the deployer wallet first.`
+    );
+  }
 
   console.log('Writing program buffer...');
   const bufOut = execSync(`solana program write-buffer --url ${CLI_NETWORK} --keypair ${keypairPath} ${soPath}`, { encoding: 'utf8' });
@@ -182,7 +207,7 @@ async function main() {
     await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true }, // writable: first-time feed creation pays rent
         { pubkey: adminPda, isSigner: false, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: programDataPda, isSigner: false, isWritable: false },
@@ -196,12 +221,11 @@ async function main() {
 
   // 3. Create the treasury USDC token account (owner = treasury PDA)
   const [treasuryPda] = PublicKey.findProgramAddressSync([TREASURY_SEED], PROGRAM_ID);
-  const treasuryAta = await getAssociatedTokenAddress(USDC_MAINNET_MINT, treasuryPda, true);
+  const treasuryAta = await getAssociatedTokenAddress(USDC_MAINNET_MINT, treasuryPda);
   console.log('Creating treasury USDC ATA...');
   await sendAndConfirmTransaction(conn, new Transaction().add(
     createAssociatedTokenAccountIdempotentInstruction(
-      keypair.publicKey, treasuryAta, treasuryPda, USDC_MAINNET_MINT,
-      TOKEN_PROGRAM_ID, ASSOC_TOKEN_PROGRAM,
+      keypair.publicKey, treasuryAta, treasuryPda, USDC_MAINNET_MINT
     )
   ), [keypair], { commitment: 'confirmed' });
   console.log(`Treasury USDC ATA: ${treasuryAta.toBase58()}`);
@@ -290,7 +314,7 @@ async function setFeed(mint, priceMicroUsd, decimals, adminPda) {
   await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: true }, // writable: first-time feed creation pays rent
       { pubkey: oraclePda, isSigner: false, isWritable: true },
       { pubkey: mint, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

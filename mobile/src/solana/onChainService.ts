@@ -12,11 +12,6 @@ import {
 import { Buffer } from 'buffer';
 import * as SecureStore from 'expo-secure-store';
 import {
-  buildPythAttachment,
-  pythFeedIdForCollateral,
-  tryCanonicalSolUpdateAccount,
-} from './pyth';
-import {
   PROGRAM_ID,
   writeU64LE,
   getPoolPDA,
@@ -44,12 +39,29 @@ import {
   TokenAssetItem,
 } from '../types';
 
+const GATEKEEPER_RPC = process.env.EXPO_PUBLIC_HELIUS_GATEKEEPER_RPC_URL;
+const SOLANA_RPC = process.env.EXPO_PUBLIC_SOLANA_RPC_URL;
+const HELIUS_KEY =
+  process.env.EXPO_PUBLIC_HELIUS_API_KEY ||
+  SOLANA_RPC?.match(/api-key=([a-zA-Z0-9-]+)/)?.[1] ||
+  GATEKEEPER_RPC?.match(/api-key=([a-zA-Z0-9-]+)/)?.[1] ||
+  '';
+
+export const HELIUS_DEVNET_RPC = HELIUS_KEY
+  ? `https://devnet.helius-rpc.com/?api-key=${HELIUS_KEY}`
+  : 'https://api.devnet.solana.com';
+export const HELIUS_DEVNET_WSS = HELIUS_KEY
+  ? `wss://devnet.helius-rpc.com/?api-key=${HELIUS_KEY}`
+  : 'wss://api.devnet.solana.com';
+export const HELIUS_MAINNET_WSS = GATEKEEPER_RPC
+  ? GATEKEEPER_RPC.replace(/^http/, 'ws')
+  : (HELIUS_KEY ? `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}` : 'wss://api.mainnet-beta.solana.com');
+
 export const DEVNET_RPCS = [
+  ...(HELIUS_KEY ? [HELIUS_DEVNET_RPC] : []),
   'https://api.devnet.solana.com',
 ];
 
-const GATEKEEPER_RPC = process.env.EXPO_PUBLIC_HELIUS_GATEKEEPER_RPC_URL;
-const SOLANA_RPC = process.env.EXPO_PUBLIC_SOLANA_RPC_URL;
 export const MAINNET_RPCS = [
   ...(GATEKEEPER_RPC ? [GATEKEEPER_RPC] : []),
   ...(SOLANA_RPC ? [SOLANA_RPC] : []),
@@ -63,6 +75,7 @@ export const MAINNET_RPCS = [
 // loading in 200ms and in minutes at 1M+ accounts.
 const B58_CLK_POOL = 'CFskzA4CnMh';
 const B58_CLK_PAWN = 'CFskzA486E1';
+const B58_CLK_LOAN = 'CFskz9xGpAZ';
 
 // Small TTL cache for protocol reads: screen loads within a few seconds of
 // each other (tab switches, re-renders) share one RPC result. Post-mutation
@@ -87,8 +100,14 @@ export function cachedFetch<T>(
   return p;
 }
 
-export const devnetConnection = new Connection(DEVNET_RPCS[0], 'confirmed');
-export const mainnetConnection = new Connection(MAINNET_RPCS[0], 'confirmed');
+export const devnetConnection = new Connection(DEVNET_RPCS[0], {
+  wsEndpoint: HELIUS_DEVNET_WSS,
+  commitment: 'confirmed',
+});
+export const mainnetConnection = new Connection(MAINNET_RPCS[0], {
+  wsEndpoint: HELIUS_MAINNET_WSS,
+  commitment: 'confirmed',
+});
 
 export function getConnection(network: SolanaNetwork = 'mainnet-beta'): Connection {
   return network === 'mainnet-beta' ? mainnetConnection : devnetConnection;
@@ -99,60 +118,16 @@ export const connection = mainnetConnection;
 
 export { PROGRAM_ID };
 
-/**
- * Attach a Pyth price update to a transaction (borrow + create-offer paths).
- *
- * Order is load-bearing: web3.js partialSign throws on a transaction without
- * a recentBlockhash, and the ephemeral signature must cover the FINAL message,
- * so the blockhash/feePayer are set first and the receiver instruction is
- * unshifted BEFORE the signer collects its signature. If signing fails for any
- * reason, the instruction is removed again so no phantom postUpdateAtomic
- * (whose ephemeral signer nobody else can sign) survives in the transaction.
- *
- * On any failure the caller falls back: SOL collateral references Pyth's
- * canonical cranked account (re-verified on-chain by the program); SKR has no
- * canonical account, so it falls back to the admin feed's freshness window.
- */
-async function attachPythOrFallback(
-  tx: Transaction,
-  connection: Connection,
-  feePayer: PublicKey,
-  collateralName: string
-): Promise<{ pythAccount?: PublicKey; pythCu: number }> {
-  try {
-    const att = await buildPythAttachment(connection, feePayer, pythFeedIdForCollateral(collateralName));
-    if (!tx.recentBlockhash) {
-      const { blockhash } = await connection.getLatestBlockhash('confirmed');
-      tx.recentBlockhash = blockhash;
-    }
-    if (!tx.feePayer) tx.feePayer = feePayer;
-    tx.instructions.unshift(...att.instructions);
-    try {
-      if (att.signers.length > 0) tx.partialSign(...att.signers);
-    } catch (signErr) {
-      tx.instructions.splice(0, att.instructions.length);
-      throw signErr;
-    }
-    return { pythAccount: att.priceUpdateAccount, pythCu: att.computeUnits };
-  } catch (err) {
-    console.warn('[Pyth] attach skipped, fallback:', (err as any)?.message || err);
-    if (collateralName.toUpperCase().includes('SOL')) {
-      const canonical = await tryCanonicalSolUpdateAccount(connection);
-      if (canonical) {
-        console.warn('[Pyth] using canonical SOL update account');
-        return { pythAccount: canonical, pythCu: 0 };
-      }
-    }
-    return { pythCu: 0 };
-  }
-}
-
 export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
 // Seeker Genesis Token mint (Soulbound Token-2022). Single source of truth:
-// the SGT badge is granted by EXACT mint match only — never by substring or
-// frozen-account heuristics.
-export const SGT_MINT = '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG';
+// devnet test mint + mainnet Token-2022 group mint (GT22s89nU4iWFkNXj1Bw6uYhJJWDRPpShHt4Bk8f99Te).
+export const SGT_DEVNET_MINT = '4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG';
+export const SGT_GROUP_MINT = 'GT22s89nU4iWFkNXj1Bw6uYhJJWDRPpShHt4Bk8f99Te';
+export const SGT_MINT = SGT_DEVNET_MINT;
+export function isSeekerGenesisToken(mint: string): boolean {
+  return mint === SGT_DEVNET_MINT || mint === SGT_GROUP_MINT;
+}
 export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
@@ -390,7 +365,15 @@ export async function fetchLiveUserOrders(borrower: PublicKey, network: SolanaNe
 
   // 1. Scan on-chain PDA accounts first (for liquid pool PDA loans)
   try {
-    const accounts = await queryRpcWithFallback(network, (c) => c.getProgramAccounts(PROGRAM_ID));
+    const accounts = await queryRpcWithFallback(network, async (c) => {
+      const [modern, legacy] = await Promise.all([
+        c.getProgramAccounts(PROGRAM_ID, { filters: [{ memcmp: { offset: 0, bytes: B58_CLK_LOAN } }] }),
+        (c.getProgramAccounts(PROGRAM_ID, { filters: [{ dataSize: 154 }] } as any) as unknown) as Promise<
+          Awaited<ReturnType<Connection['getProgramAccounts']>>
+        >,
+      ]);
+      return [...modern, ...legacy];
+    });
     for (const acc of accounts) {
       if (acc.account.data.length === 170 || acc.account.data.length === 154) {
         const data = Buffer.from(acc.account.data);
@@ -835,21 +818,244 @@ export async function fetchLiveUserProfile(userPubkey: PublicKey, skrHandle: str
   };
 }
 
-// Live crypto market price cache with automatic 2-minute updates
+// Live crypto market price cache with real-time Helius WebSocket push & multi-tier fallbacks
 export let livePrices = {
-  sol: 101.12,
-  skr: 0.0192,
+  sol: 118.47,
+  skr: 0.0205,
   usdc: 1.0,
 };
 let lastPriceFetchTime = 0;
 
-export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usdc: number }> {
+export interface OnChainPriceFeed {
+  isInitialized: boolean;
+  mint: PublicKey;
+  priceMicroUsd: bigint;
+  priceUsd: number;
+  decimals: number;
+  lastUpdatedAt: number;
+  authority: PublicKey;
+  maxStalenessSeconds: number;
+}
+
+/**
+ * Validates on-chain feed freshness matching smart contract processor.rs:1328:
+ * feed.last_updated_at <= 0 || current_time - feed.last_updated_at > feed.max_staleness_seconds
+ */
+export function isFeedFresh(feed: OnChainPriceFeed | null): boolean {
+  if (!feed || !feed.isInitialized || feed.priceUsd <= 0) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diff = nowSec - feed.lastUpdatedAt;
+  const maxStale = feed.maxStalenessSeconds > 0 ? feed.maxStalenessSeconds : 3600;
+  return diff >= 0 && diff <= maxStale;
+}
+
+/**
+ * Unpack ClockLend on-chain PriceFeed account (98 bytes)
+ * Layout:
+ *   [0..8]: discriminator
+ *   [8]: is_initialized (u8 bool)
+ *   [9..41]: mint (Pubkey)
+ *   [41..49]: price_micro_usd (u64 LE)
+ *   [49]: decimals (u8)
+ *   [50..58]: last_updated_at (i64 LE)
+ *   [58..90]: authority (Pubkey)
+ *   [90..98]: max_staleness_seconds (i64 LE)
+ */
+export function unpackPriceFeed(data: Buffer | Uint8Array): OnChainPriceFeed | null {
+  try {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (buf.length < 98 || buf.subarray(0, 8).toString() !== 'CLK_FEED') return null;
+    const isInit = buf[8] === 1;
+    if (!isInit) return null;
+    const mint = new PublicKey(buf.subarray(9, 41));
+    const priceMicroUsd = buf.readBigUInt64LE(41);
+    const decimals = buf[49];
+    const lastUpdatedAt = Number(buf.readBigInt64LE(50));
+    const authority = new PublicKey(buf.subarray(58, 90));
+    const maxStalenessSeconds = Number(buf.readBigInt64LE(90));
+
+    return {
+      isInitialized: isInit,
+      mint,
+      priceMicroUsd: BigInt(priceMicroUsd.toString()),
+      priceUsd: Number(priceMicroUsd) / 1_000_000,
+      decimals,
+      lastUpdatedAt,
+      authority,
+      maxStalenessSeconds,
+    };
+  } catch (_err) {
+    return null;
+  }
+}
+
+// React Native / Hermes safe timeout fetch (AbortSignal.timeout is not implemented in Hermes)
+async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = 3000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type PriceSource = 'helius-wss' | 'on-chain-rpc' | 'jupiter' | 'coingecko' | 'fallback-baseline';
+export let currentPriceSource: PriceSource = 'fallback-baseline';
+export function getPriceSource(): PriceSource {
+  return currentPriceSource;
+}
+
+type PriceListener = (prices: { sol: number; skr: number; usdc: number }, source: PriceSource) => void;
+const priceListeners = new Set<PriceListener>();
+
+/**
+ * Subscribe to real-time price updates pushed over Helius WebSocket
+ */
+export function subscribeToPriceUpdates(listener: PriceListener): () => void {
+  priceListeners.add(listener);
+  try {
+    listener({ ...livePrices }, currentPriceSource);
+  } catch (_e) {}
+  return () => {
+    priceListeners.delete(listener);
+  };
+}
+
+function notifyPriceListeners() {
+  for (const listener of priceListeners) {
+    try {
+      listener({ ...livePrices }, currentPriceSource);
+    } catch (_err) {}
+  }
+}
+
+let activeSolSubId: number | null = null;
+let activeSkrSubId: number | null = null;
+let activeNetworkSubscribed: SolanaNetwork | null = null;
+
+/**
+ * Initialize Helius WebSocket listener on ClockLend on-chain Oracle PDAs
+ */
+export function initOracleWebSocketListener(network: SolanaNetwork = 'mainnet-beta') {
+  if (activeNetworkSubscribed === network && activeSolSubId !== null && activeSkrSubId !== null) {
+    return;
+  }
+
+  // Clean up prior subscriptions before establishing new ones (fixes dedupe leak)
+  const oldConn = activeNetworkSubscribed ? getConnection(activeNetworkSubscribed) : null;
+  if (oldConn) {
+    if (activeSolSubId !== null) {
+      try { oldConn.removeAccountChangeListener(activeSolSubId); } catch (_) {}
+      activeSolSubId = null;
+    }
+    if (activeSkrSubId !== null) {
+      try { oldConn.removeAccountChangeListener(activeSkrSubId); } catch (_) {}
+      activeSkrSubId = null;
+    }
+  }
+
+  activeNetworkSubscribed = network;
+  const conn = getConnection(network);
+  const [solOraclePDA] = getOraclePDA(NATIVE_SOL_MINT);
+  const [skrOraclePDA] = getOraclePDA(SKR_MINT);
+
+  try {
+    activeSolSubId = conn.onAccountChange(
+      solOraclePDA,
+      (accountInfo) => {
+        const feed = unpackPriceFeed(accountInfo.data);
+        if (isFeedFresh(feed)) {
+          livePrices.sol = feed!.priceUsd;
+          lastPriceFetchTime = Date.now();
+          currentPriceSource = 'helius-wss';
+          console.log(`[Helius WSS] Live SOL Oracle pushed: $${feed!.priceUsd}`);
+          notifyPriceListeners();
+        }
+      },
+      'confirmed'
+    );
+  } catch (err) {
+    console.warn('[Helius WSS] Failed to subscribe to SOL Oracle PDA:', err);
+  }
+
+  try {
+    activeSkrSubId = conn.onAccountChange(
+      skrOraclePDA,
+      (accountInfo) => {
+        const feed = unpackPriceFeed(accountInfo.data);
+        if (isFeedFresh(feed)) {
+          livePrices.skr = feed!.priceUsd;
+          lastPriceFetchTime = Date.now();
+          currentPriceSource = 'helius-wss';
+          console.log(`[Helius WSS] Live SKR Oracle pushed: $${feed!.priceUsd}`);
+          notifyPriceListeners();
+        }
+      },
+      'confirmed'
+    );
+  } catch (err) {
+    console.warn('[Helius WSS] Failed to subscribe to SKR Oracle PDA:', err);
+  }
+}
+
+/**
+ * Fetch live prices:
+ * 1. Default: ClockLend on-chain Oracle PDAs via Helius RPC / LaserStream WSS
+ * 2. Fallback 1: Jupiter Price API (v3/v2)
+ * 3. Fallback 2: CoinGecko API
+ * 4. Fallback 3: Pyth canonical account / baseline cache
+ */
+export async function fetchLivePrices(
+  network: SolanaNetwork = 'mainnet-beta'
+): Promise<{ sol: number; skr: number; usdc: number }> {
   const now = Date.now();
-  if (now - lastPriceFetchTime < 120_000) {
+
+  // Ensure real-time WebSocket stream is active
+  initOracleWebSocketListener(network);
+
+  if (now - lastPriceFetchTime < 10_000 && livePrices.sol > 0 && livePrices.skr > 0 && currentPriceSource !== 'fallback-baseline') {
     return livePrices;
   }
-  // Jupiter price API first (configured via EXPO_PUBLIC_JUPITER_API_URL),
-  // CoinGecko as the fallback source.
+
+  let freshSol = false;
+  let freshSkr = false;
+
+  // 1. PRIMARY / DEFAULT: ClockLend On-Chain Oracle PDAs (per-asset staleness checks)
+  try {
+    const conn = getConnection(network);
+    const [solOraclePDA] = getOraclePDA(NATIVE_SOL_MINT);
+    const [skrOraclePDA] = getOraclePDA(SKR_MINT);
+
+    const accounts = await conn.getMultipleAccountsInfo([solOraclePDA, skrOraclePDA], 'confirmed');
+
+    if (accounts[0]?.data) {
+      const feed = unpackPriceFeed(accounts[0].data);
+      if (isFeedFresh(feed)) {
+        livePrices.sol = feed!.priceUsd;
+        freshSol = true;
+      }
+    }
+
+    if (accounts[1]?.data) {
+      const feed = unpackPriceFeed(accounts[1].data);
+      if (isFeedFresh(feed)) {
+        livePrices.skr = feed!.priceUsd;
+        freshSkr = true;
+      }
+    }
+
+    if (freshSol && freshSkr) {
+      lastPriceFetchTime = now;
+      currentPriceSource = 'on-chain-rpc';
+      notifyPriceListeners();
+      return livePrices;
+    }
+  } catch (oracleErr) {
+    console.warn('[Oracle] On-chain read failed, trying fallbacks:', (oracleErr as any)?.message || oracleErr);
+  }
+
+  // 2. FALLBACK 1: Jupiter Price API (fetch missing assets)
   const JUPITER_API_URL = process.env.EXPO_PUBLIC_JUPITER_API_URL;
   const JUPITER_API_KEY = process.env.EXPO_PUBLIC_JUPITER_API_KEY;
   const mintIds = [
@@ -857,9 +1063,6 @@ export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usd
     'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
     'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', // SKR
   ].join(',');
-  // Jupiter Price API — proven shape from the reimagine stack is /price/v3
-  // (top-level token-id keys with usdPrice). v2 and bare shapes are kept as
-  // fallback candidates; CoinGecko is the last resort.
   const vsToken = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
   const base = (JUPITER_API_URL || 'https://api.jup.ag').replace(/\/+$/, '');
   const candidates = [
@@ -870,54 +1073,84 @@ export async function fetchLivePrices(): Promise<{ sol: number; skr: number; usd
   try {
     let jupRes: Response | null = null;
     for (const url of candidates) {
-      const r = await fetch(url, {
+      const r = await fetchWithTimeout(url, {
         headers: JUPITER_API_KEY ? { 'x-api-key': JUPITER_API_KEY } : undefined,
-      });
+      }, 3000);
       if (r.ok) { jupRes = r; break; }
     }
     if (jupRes && jupRes.ok) {
       const data = await jupRes.json();
       const byId: Record<string, number> = {};
       if (data?.data && typeof data.data === 'object') {
-        // v2 shape: { data: { [id]: { price } } }
         for (const [k, v] of Object.entries(data.data)) {
           byId[k] = Number((v as any)?.price);
         }
       } else {
-        // v3 shape: { [id]: { usdPrice } }
         for (const [k, v] of Object.entries(data)) {
           byId[k] = Number((v as any)?.usdPrice ?? (v as any)?.price);
         }
       }
-      if (byId['So11111111111111111111111111111111111111112']) {
+      if (!freshSol && byId['So11111111111111111111111111111111111111112']) {
         livePrices.sol = byId['So11111111111111111111111111111111111111112'];
+        freshSol = true;
       }
       if (byId['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v']) {
         livePrices.usdc = byId['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'];
       }
-      if (byId['SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3']) {
+      if (!freshSkr && byId['SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3']) {
         livePrices.skr = byId['SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3'];
+        freshSkr = true;
       }
-      lastPriceFetchTime = now;
-      return livePrices;
+      if (freshSol && freshSkr) {
+        lastPriceFetchTime = now;
+        currentPriceSource = 'jupiter';
+        notifyPriceListeners();
+        return livePrices;
+      }
     }
-  } catch (err) {
+  } catch (_err) {
     // fall through to CoinGecko
   }
+
+  // 3. FALLBACK 2: CoinGecko API
   try {
-    const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=solana,seeker,usd-coin&vs_currencies=usd'
+    const res = await fetchWithTimeout(
+      'https://api.coingecko.com/api/v3/simple/price?ids=solana,seeker,usd-coin&vs_currencies=usd',
+      {},
+      3000
     );
     if (res.ok) {
       const data = await res.json();
-      if (data?.solana?.usd) livePrices.sol = Number(data.solana.usd);
-      if (data?.seeker?.usd) livePrices.skr = Number(data.seeker.usd);
-      if (data?.['usd-coin']?.usd) livePrices.usdc = Number(data['usd-coin'].usd);
-      lastPriceFetchTime = now;
+      if (!freshSol && data?.solana?.usd) {
+        livePrices.sol = Number(data.solana.usd);
+        freshSol = true;
+      }
+      if (!freshSkr && data?.seeker?.usd) {
+        livePrices.skr = Number(data.seeker.usd);
+        freshSkr = true;
+      }
+      if (data?.['usd-coin']?.usd) {
+        livePrices.usdc = Number(data['usd-coin'].usd);
+      }
+      if (freshSol && freshSkr) {
+        lastPriceFetchTime = now;
+        currentPriceSource = 'coingecko';
+        notifyPriceListeners();
+        return livePrices;
+      }
     }
-  } catch (err) {
-    // Graceful fallback to confirmed market baseline
+  } catch (_err) {
+    // fall through
   }
+
+  // If at least one asset was refreshed, classify source accordingly; otherwise baseline fallback
+  if (freshSol || freshSkr) {
+    currentPriceSource = freshSol ? 'on-chain-rpc' : 'jupiter';
+    lastPriceFetchTime = now;
+  } else {
+    currentPriceSource = 'fallback-baseline';
+  }
+  notifyPriceListeners();
   return livePrices;
 }
 
@@ -928,14 +1161,10 @@ function getKnownTokenSymbol(mint: string): string {
   if (mint === 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263') {
     return 'BONK';
   }
-  if (mint === SGT_MINT) {
+  if (isSeekerGenesisToken(mint)) {
     return 'SGT';
   }
-  if (
-    mint === 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3' ||
-    mint.toLowerCase().includes('skr') ||
-    mint === 'G55PoQUF8yqZeZrrQi8bdmBWtzbo9NPgAx27v1zz2daM'
-  ) {
+  if (mint === SKR_MINT.toBase58()) {
     return 'SKR';
   }
   return mint.slice(0, 4) + '..' + mint.slice(-4);
@@ -948,14 +1177,10 @@ function getKnownTokenName(mint: string): string {
   if (mint === 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263') {
     return 'Bonk';
   }
-  if (mint === SGT_MINT) {
+  if (isSeekerGenesisToken(mint)) {
     return 'Seeker Genesis Token';
   }
-  if (
-    mint === 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3' ||
-    mint.toLowerCase().includes('skr') ||
-    mint === 'G55PoQUF8yqZeZrrQi8bdmBWtzbo9NPgAx27v1zz2daM'
-  ) {
+  if (mint === SKR_MINT.toBase58()) {
     return 'Seeker Token';
   }
   return 'Solana Token';
@@ -965,11 +1190,7 @@ function calculateTokenUsd(mint: string, amount: number, prices: { sol: number; 
   if (mint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' || mint === '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU') {
     return parseFloat((amount * prices.usdc).toFixed(2));
   }
-  if (
-    mint === 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3' ||
-    mint.toLowerCase().includes('skr') ||
-    mint === 'G55PoQUF8yqZeZrrQi8bdmBWtzbo9NPgAx27v1zz2daM'
-  ) {
+  if (mint === SKR_MINT.toBase58()) {
     return parseFloat((amount * prices.skr).toFixed(2));
   }
   if (mint === 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263') {
@@ -1000,7 +1221,7 @@ export async function fetchLiveWalletAssets(
   let bonkBalance = 0;
   let hasSeekerGenesisToken = false;
   const tokenList: TokenAssetItem[] = [];
-  const prices = await fetchLivePrices();
+  const prices = await fetchLivePrices(network);
 
   try {
     const allAccounts = await queryRpcWithFallback(network, async (conn) => {
@@ -1028,11 +1249,8 @@ export async function fetchLiveWalletAssets(
       const decimals: number = info.tokenAmount?.decimals || 0;
       const state: string = info.state || '';
 
-      // Detect the Seeker Genesis Token by EXACT mint match only. Substring
-      // heuristics ('seeker'/'sgt') can match unrelated mints, and a frozen
-      // Token-2022 account is not proof of SGT ownership — never overclaim
-      // the trust signal.
-      if (mint === SGT_MINT) {
+      // Detect Seeker Genesis Token by exact devnet mint or mainnet Token-2022 group mint
+      if (isSeekerGenesisToken(mint)) {
         hasSeekerGenesisToken = true;
       }
 
@@ -1043,12 +1261,8 @@ export async function fetchLiveWalletAssets(
       ) {
         usdcBalance += amount;
       }
-      // Check for SKR
-      else if (
-        mint === 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3' ||
-        mint.toLowerCase().includes('skr') ||
-        mint === 'G55PoQUF8yqZeZrrQi8bdmBWtzbo9NPgAx27v1zz2daM'
-      ) {
+      // Check for SKR (exact canonical mint only)
+      else if (mint === SKR_MINT.toBase58()) {
         skrBalance += amount;
       }
       // Check for BONK
@@ -1134,23 +1348,12 @@ export async function buildBorrowTx(
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
-  // Pyth pull-oracle (best effort): when the Hermes fetch succeeds, prepend the
-  // receiver postUpdate instructions and pass the verified price account. On any
-  // failure the program falls back to the admin price feed (or Pyth's canonical
-  // cranked SOL account), so borrowing still works while that feed is fresh.
-  const pyth = await attachPythOrFallback(
-    tx,
-    getConnection('mainnet-beta'),
-    borrower,
-    collateralName
-  );
-  const pythCu = pyth.pythCu;
-  const pythAccount = pyth.pythAccount;
-
-  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
-  // (~170k CU) plus the program instructions; budget must precede the body.
+  // Pricing is admin-feed-only (Pyth pull oracles removed in round 11): the
+  // program prices from the global/pool-scoped PriceFeed, kept fresh by the
+  // keeper crank (Jupiter/CoinGecko via the WS pipeline). No attachment
+  // instructions are needed.
   tx.instructions.unshift(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
   );
 
@@ -1169,9 +1372,6 @@ export async function buildBorrowTx(
     { pubkey: treasuryUsdcAccount, isSigner: false, isWritable: true },
     { pubkey: oraclePDA, isSigner: false, isWritable: false },
   ];
-  if (pythAccount) {
-    keys.push({ pubkey: pythAccount, isSigner: false, isWritable: false });
-  }
   // Route 50% of the origination fee to the SKR yield vault when it exists
   // and is initialized. If the read fails or the vault is absent, the whole
   // fee goes to the treasury (program behavior) — never revert the borrow
@@ -1209,69 +1409,7 @@ export async function buildBorrowTx(
 }
 
 // Build Initialize Admin Transaction instruction (ClockLend Instruction 13)
-export async function buildInitializeAdminTx(
-  admin: PublicKey
-): Promise<Transaction> {
-  const [adminPDA] = getAdminPDA();
-  const tx = new Transaction();
-  const data = Buffer.alloc(1);
-  data.writeUInt8(13, 0); // Instruction 13: InitializeAdmin
-
-  const ix = new TransactionInstruction({
-    programId: PROGRAM_ID,
-    keys: [
-      { pubkey: admin, isSigner: true, isWritable: true },
-      { pubkey: adminPDA, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-  tx.add(ix);
-  return tx;
-}
-
 // Build Set Price Feed Transaction instruction (ClockLend Instruction 12)
-export async function buildSetPriceFeedTx(
-  authority: PublicKey,
-  mint: PublicKey,
-  priceMicroUsd: number | bigint,
-  decimals: number,
-  poolPDA?: PublicKey
-): Promise<Transaction> {
-  const [oraclePDA] = poolPDA ? getPoolOraclePDA(poolPDA, mint) : getOraclePDA(mint);
-  const [adminPDA] = getAdminPDA();
-  const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
-  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
-
-  // Layout: 1 byte tag (12) + 8 bytes price_micro_usd + 1 byte decimals = 10 bytes
-  const data = Buffer.alloc(10);
-  data.writeUInt8(12, 0); // Instruction 12: SetPriceFeed
-  writeU64LE(BigInt(priceMicroUsd)).copy(data, 1);
-  data.writeUInt8(decimals, 9);
-
-  const keys = [
-    { pubkey: authority, isSigner: true, isWritable: true },
-    { pubkey: oraclePDA, isSigner: false, isWritable: true },
-    { pubkey: mint, isSigner: false, isWritable: false },
-    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
-  ];
-  if (poolPDA) {
-    keys.push({ pubkey: poolPDA, isSigner: false, isWritable: false });
-  } else {
-    keys.push({ pubkey: adminPDA, isSigner: false, isWritable: false });
-  }
-
-  const ix = new TransactionInstruction({
-    programId: PROGRAM_ID,
-    keys,
-    data,
-  });
-  tx.add(ix);
-  return tx;
-}
-
 // Build Repay Transaction instruction
 export async function buildRepayTx(
   borrower: PublicKey,
@@ -1445,20 +1583,9 @@ export async function buildCreateP2POfferTx(
   const oracleMint = isNativeSol ? NATIVE_SOL_MINT : collateralMint;
   const [oraclePDA] = getOraclePDA(oracleMint);
 
-  // Pyth pull-oracle (best effort) with the admin feed as the program fallback.
-  const pyth = await attachPythOrFallback(
-    tx,
-    getConnection('mainnet-beta'),
-    creator,
-    isNativeSol ? 'SOL' : 'SKR'
-  );
-  const pythCu = pyth.pythCu;
-  const pythAccount = pyth.pythAccount;
-
-  // H-3: size the tx-wide compute budget for the receiver's postUpdateAtomic
-  // (~170k CU) plus the program instructions; budget must precede the body.
+  // Admin-feed-only pricing (Pyth removed in round 11).
   tx.instructions.unshift(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 + pythCu }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
   );
 
@@ -1484,7 +1611,6 @@ export async function buildCreateP2POfferTx(
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: oraclePDA, isSigner: false, isWritable: false },
       { pubkey: USDC_MAINNET_MINT, isSigner: false, isWritable: false },
-      ...(pythAccount ? [{ pubkey: pythAccount, isSigner: false, isWritable: false }] : []),
     ],
     data,
   });

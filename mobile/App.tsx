@@ -46,6 +46,7 @@ import {
   getCachedOrders,
   setCachedOrders,
   USDC_MAINNET_MINT,
+  livePrices,
   fetchSkrYieldVault,
   fetchUserYieldPosition,
   buildClaimSkrYieldTx,
@@ -295,7 +296,8 @@ function MainApp() {
     borrowAmount: number,
     collateralUnits: number,
     collateralName: string,
-    pool: LendingPool
+    pool: LendingPool,
+    durationDays: number
   ) => {
     if (!session) return;
 
@@ -306,13 +308,19 @@ function MainApp() {
       : Math.round(collateralUnits * 1_000_000);
     const isPoolLiquid = pool.totalLiquidity >= borrowAmount;
 
+    // Clamp the selected term into the pool's on-chain duration bounds so the
+    // signed loan matches what the UI promised.
+    const clampedDays = Math.min(
+      Math.max(durationDays, pool.minDurationDays),
+      pool.maxDurationDays
+    );
     const { tx, escrowPDA, loanId } = await buildBorrowTx(
       session.publicKey,
       poolAuthority,
       pool.id,
       borrowAmount,
       collateralLamports,
-      7,
+      clampedDays,
       collateralName,
       isPoolLiquid,
       new PublicKey(pool.liquidityMint)
@@ -449,7 +457,7 @@ function MainApp() {
           usdcBalance: currentUsdc,
           solBalance: currentSol,
           skrBalance: currentSkr,
-          totalUsdValue: parseFloat((currentSol * 101.12 + currentUsdc + currentSkr * 0.0192).toFixed(2)),
+          totalUsdValue: parseFloat((currentSol * livePrices.sol + currentUsdc + currentSkr * livePrices.skr).toFixed(2)),
         };
       });
 
@@ -606,7 +614,7 @@ function MainApp() {
           ...prev,
           solBalance: newSol,
           skrBalance: newSkr,
-          totalUsdValue: parseFloat((newSol * 101.12 + prev.usdcBalance + newSkr * 0.0192).toFixed(2)),
+          totalUsdValue: parseFloat((newSol * livePrices.sol + prev.usdcBalance + newSkr * livePrices.skr).toFixed(2)),
         };
       });
 
@@ -678,7 +686,7 @@ function MainApp() {
         return {
           ...prev,
           usdcBalance: newUsdc,
-          totalUsdValue: parseFloat((prev.solBalance * 101.12 + newUsdc + prev.skrBalance * 0.0192).toFixed(2)),
+          totalUsdValue: parseFloat((prev.solBalance * livePrices.sol + newUsdc + prev.skrBalance * livePrices.skr).toFixed(2)),
         };
       });
 

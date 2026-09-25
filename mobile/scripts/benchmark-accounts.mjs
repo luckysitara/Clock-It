@@ -16,7 +16,8 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 
 const RPC = process.argv[2] || process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
-const BORROWER = process.argv[3] || 'BEmX1nfeZT5i4VpSEeZmhiYxpZ9z4Y1LQLjAtPR9c3re';
+const BORROWER = process.argv[3];
+if (!BORROWER) { console.error('Usage: node benchmark-accounts.mjs [rpcUrl] [borrowerPubkey]'); process.exit(1); }
 const PROGRAM_ID = new PublicKey('HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3');
 const B58_CLK_POOL = 'CFskzA4CnMh';
 const B58_CLK_PAWN = 'CFskzA486E1';

@@ -17,7 +17,7 @@ use solana_program::system_instruction;
 use crate::{
     error::ClockLendError,
     instruction::ClockLendInstruction,
-    pyth::{try_verify_pyth_price, PythPrice, PYTH_RECEIVER_ID, SKR_MAX_AGE_SECS, SKR_USD_FEED_ID, SOL_MAX_AGE_SECS, SOL_USD_FEED_ID},
+
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
         SkrYieldVault, UserYieldPosition,
@@ -349,6 +349,7 @@ pub fn process_instruction(
         ClockLendInstruction::DepositSkrYield { amount } => {
             process_deposit_skr_yield(program_id, accounts, amount)
         }
+        ClockLendInstruction::WithdrawUnusedYield => process_withdraw_unused_yield(program_id, accounts),
         ClockLendInstruction::ClaimSkrYield => {
             process_claim_skr_yield(program_id, accounts)
         }
@@ -386,6 +387,12 @@ pub fn process_initialize_pool(
         return Err(ClockLendError::InvalidDuration.into());
     }
     if max_ltv_bps == 0 || max_ltv_bps > 9500 {
+        return Err(ClockLendError::InvalidCollateralRatio.into());
+    }
+    // Round 11: oracle-free pools price from hardcoded baselines with no
+    // update path — cap their LTV so a stale baseline cannot create
+    // unrecoverable bad debt (SKR's baseline has been 3.2x off within months).
+    if is_oracle_free && max_ltv_bps > 3000 {
         return Err(ClockLendError::InvalidCollateralRatio.into());
     }
     if interest_rate_bps > 10000 {
@@ -705,7 +712,10 @@ pub fn process_stake_skr(
     // If pool is also provided, update pool's staked_skr (for verified merchant status)
     // Security check: Only the pool authority can stake SKR to back their own pool
     if let Some(pool_account) = pool_account_opt {
-        if pool_account.owner == program_id && !pool_account.data_is_empty() {
+        if pool_account.owner == program_id
+            && !pool_account.data_is_empty()
+            && (pool_account.data_len() == LendingPool::LEN || get_account_kind(pool_account) == AccountKind::LendingPool)
+        {
             let mut pool = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?)?;
             if pool.authority != *user.key {
                 return Err(ClockLendError::Unauthorized.into());
@@ -715,6 +725,107 @@ pub fn process_stake_skr(
                 .checked_add(amount)
                 .ok_or(ClockLendError::AmountOverflow)?;
             pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
+        }
+    }
+
+    // Critical fix: sync user yield position immediately upon staking.
+    // Scans accounts for any SkrYieldVault and corresponding UserYieldPosition.
+    let escrow_post = spl_token::state::Account::unpack(&skr_escrow_account.try_borrow_data()?)?;
+    let current_escrow_skr = escrow_post.amount;
+    let pre_stake_escrow = current_escrow_skr.saturating_sub(amount);
+
+    for acc in accounts.iter() {
+        if acc.owner == program_id
+            && !acc.data_is_empty()
+            && (acc.data_len() == SkrYieldVault::LEN || get_account_kind(acc) == AccountKind::SkrYieldVault)
+        {
+            let vault_res = SkrYieldVault::unpack_from_slice(&acc.try_borrow_data()?);
+            if let Ok(mut vault) = vault_res {
+                if !vault.is_initialized {
+                    continue;
+                }
+                let (expected_vault_pda, _) = Pubkey::find_program_address(
+                    &[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()],
+                    program_id,
+                );
+                if expected_vault_pda != *acc.key {
+                    continue;
+                }
+
+                let (expected_pos, pos_bump) = Pubkey::find_program_address(
+                    &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref()],
+                    program_id,
+                );
+
+                if let Some(pos_acc) = accounts.iter().find(|a| *a.key == expected_pos) {
+                    let is_new_position = pos_acc.owner == &solana_program::system_program::id();
+                    if is_new_position {
+                        create_or_allocate_pda(
+                            program_id,
+                            user,
+                            pos_acc,
+                            system_program,
+                            UserYieldPosition::LEN,
+                            &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref(), &[pos_bump]],
+                        )?;
+                        let initial_pos = UserYieldPosition {
+                            discriminator: DISCRIMINATOR_USER_YIELD,
+                            is_initialized: true,
+                            user: *user.key,
+                            reward_mint: vault.reward_mint,
+                            staked_skr: 0,
+                            reward_debt: 0,
+                            accrued_rewards: 0,
+                            total_claimed: 0,
+                            last_interaction_time: Clock::get()?.unix_timestamp,
+                        };
+                        initial_pos.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
+                    }
+
+                    if pos_acc.owner == program_id && !pos_acc.data_is_empty() {
+                        let pos_res = UserYieldPosition::unpack_from_slice(&pos_acc.try_borrow_data()?);
+                        if let Ok(mut position) = pos_res {
+                            if position.user == *user.key && position.reward_mint == vault.reward_mint {
+                                // Harvest pending rewards on pre-stake escrow
+                                let eff_staked = position.staked_skr.min(pre_stake_escrow);
+                                let gross = ((eff_staked as u128)
+                                    .checked_mul(vault.acc_reward_per_share)
+                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                    / YIELD_SCALE;
+                                let pending = gross.saturating_sub(position.reward_debt.min(gross)) as u64;
+                                // Round 11: harvest only if the stake was held for the cooldown
+                                // period. A stake cycled in under MIN_STAKE_AGE forfeits its
+                                // interim accrual (the debt still rebases, so nothing is paid).
+                                let held_ok = Clock::get()?.unix_timestamp
+                                    .saturating_sub(position.last_interaction_time) >= MIN_STAKE_AGE_SECS;
+                                if held_ok {
+                                    position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
+                                }
+
+                                // Update position & vault total staked SKR
+                                if current_escrow_skr > position.staked_skr {
+                                    let diff = current_escrow_skr - position.staked_skr;
+                                    vault.total_staked_skr = vault.total_staked_skr.saturating_add(diff);
+                                } else if current_escrow_skr < position.staked_skr {
+                                    let diff = position.staked_skr - current_escrow_skr;
+                                    vault.total_staked_skr = vault.total_staked_skr.saturating_sub(diff);
+                                }
+                                position.staked_skr = current_escrow_skr;
+                                position.reward_debt = ((position.staked_skr as u128)
+                                    .checked_mul(vault.acc_reward_per_share)
+                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                    / YIELD_SCALE;
+                                position.last_interaction_time = Clock::get()?.unix_timestamp;
+
+                                position.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
+                                vault.pack_into_slice(&mut acc.try_borrow_mut_data()?)?;
+                                msg!("ClockLend: Synced yield shares on stake: total_staked={}, user_staked={}",
+                                    vault.total_staked_skr, position.staked_skr);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -800,54 +911,90 @@ pub fn process_unstake_skr(
     profile.pack_into_slice(&mut user_profile_account.try_borrow_mut_data()?)?;
 
     // Informational 1: If pool is also provided, update pool's staked_skr_amount (to keep in sync)
+    // High-3 Slot Collision Fix: Only unpack if account is actually a LendingPool (length & kind check).
     if let Some(pool_account) = pool_account_opt {
-        if pool_account.owner == program_id && !pool_account.data_is_empty() {
-            let mut pool = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?)?;
-            if pool.authority == *user.key {
-                pool.staked_skr_amount = pool.staked_skr_amount.saturating_sub(amount);
-                pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
+        if pool_account.owner == program_id
+            && !pool_account.data_is_empty()
+            && (pool_account.data_len() == LendingPool::LEN || get_account_kind(pool_account) == AccountKind::LendingPool)
+        {
+            let pool_res = LendingPool::unpack_from_slice(&pool_account.try_borrow_data()?);
+            if let Ok(mut pool) = pool_res {
+                if pool.authority == *user.key {
+                    pool.staked_skr_amount = pool.staked_skr_amount.saturating_sub(amount);
+                    pool.pack_into_slice(&mut pool_account.try_borrow_mut_data()?)?;
+                }
             }
         }
     }
 
-    // C-1 defense in depth: sync the user's SKR yield position down so a
-    // recycled stake cannot keep earning ghost shares. The client appends the
-    // canonical yield vault (USDC reward mint) and the user position as
-    // optional trailing accounts; both are matched by expected PDA.
-    let devnet_vault_pda = Pubkey::find_program_address(
-        &[SKR_YIELD_VAULT_SEED, USDC_DEVNET_MINT.as_ref()], program_id).0;
-    let mainnet_vault_pda = Pubkey::find_program_address(
-        &[SKR_YIELD_VAULT_SEED, USDC_MAINNET_MINT.as_ref()], program_id).0;
-    let yield_vault_acc = accounts.iter().find(|a| {
-        (*a.key == devnet_vault_pda || *a.key == mainnet_vault_pda)
-            && a.owner == program_id
-            && !a.data_is_empty()
-    });
-    if let Some(yv) = yield_vault_acc {
-        let mut vault = SkrYieldVault::unpack_from_slice(&yv.try_borrow_data()?)?;
-        if vault.is_initialized {
-            let (expected_pos, _) = Pubkey::find_program_address(
-                &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref()], program_id);
-            if let Some(pos_acc) = accounts.iter().find(|a| *a.key == expected_pos) {
-                if pos_acc.owner == program_id && !pos_acc.data_is_empty() {
-                    let mut position = UserYieldPosition::unpack_from_slice(&pos_acc.try_borrow_data()?)?;
-                    if position.user == *user.key && position.reward_mint == vault.reward_mint {
-                        let pending = ((position.staked_skr as u128)
-                            .checked_mul(vault.acc_reward_per_share)
-                            .ok_or(ClockLendError::AmountOverflow)?
-                            / YIELD_SCALE)
-                            .saturating_sub(position.reward_debt) as u64;
-                        position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
-                        let reduce = amount.min(position.staked_skr);
-                        vault.total_staked_skr = vault.total_staked_skr.saturating_sub(reduce);
-                        position.staked_skr = position.staked_skr.saturating_sub(reduce);
-                        position.reward_debt = ((position.staked_skr as u128)
-                            .checked_mul(vault.acc_reward_per_share)
-                            .ok_or(ClockLendError::AmountOverflow)?)
-                            / YIELD_SCALE;
-                        position.last_interaction_time = Clock::get()?.unix_timestamp;
-                        position.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
-                        vault.pack_into_slice(&mut yv.try_borrow_mut_data()?)?;
+    // C-1 / High-1 defense in depth: sync the user's SKR yield position down so a
+    // recycled or slashed stake cannot keep earning ghost shares.
+    // Clamps effective stake to pre-unstake escrow, and clamps new stake to post-unstake escrow.
+    // Covers all initialized SkrYieldVault accounts in accounts.
+    let escrow_token_post = spl_token::state::Account::unpack(&skr_escrow_account.try_borrow_data()?)?;
+    let post_unstake_escrow = escrow_token_post.amount;
+    let pre_unstake_escrow = post_unstake_escrow.saturating_add(amount);
+
+    for acc in accounts.iter() {
+        if acc.owner == program_id
+            && !acc.data_is_empty()
+            && (acc.data_len() == SkrYieldVault::LEN || get_account_kind(acc) == AccountKind::SkrYieldVault)
+        {
+            let vault_res = SkrYieldVault::unpack_from_slice(&acc.try_borrow_data()?);
+            if let Ok(mut vault) = vault_res {
+                if !vault.is_initialized {
+                    continue;
+                }
+                let (expected_vault_pda, _) = Pubkey::find_program_address(
+                    &[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()],
+                    program_id,
+                );
+                if expected_vault_pda != *acc.key {
+                    continue;
+                }
+
+                let (expected_pos, _) = Pubkey::find_program_address(
+                    &[USER_YIELD_SEED, user.key.as_ref(), vault.reward_mint.as_ref()],
+                    program_id,
+                );
+                if let Some(pos_acc) = accounts.iter().find(|a| *a.key == expected_pos) {
+                    if pos_acc.owner == program_id && !pos_acc.data_is_empty() {
+                        let pos_res = UserYieldPosition::unpack_from_slice(&pos_acc.try_borrow_data()?);
+                        if let Ok(mut position) = pos_res {
+                            if position.user == *user.key && position.reward_mint == vault.reward_mint {
+                                // High-1: clamp pending reward calculation to real pre-unstake escrow balance
+                                let eff_staked = position.staked_skr.min(pre_unstake_escrow);
+                                let gross = ((eff_staked as u128)
+                                    .checked_mul(vault.acc_reward_per_share)
+                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                    / YIELD_SCALE;
+                                let pending = gross.saturating_sub(position.reward_debt.min(gross)) as u64;
+                                // Round 11: harvest only if the stake was held for the cooldown
+                                // period. A stake cycled in under MIN_STAKE_AGE forfeits its
+                                // interim accrual (the debt still rebases, so nothing is paid).
+                                let held_ok = Clock::get()?.unix_timestamp
+                                    .saturating_sub(position.last_interaction_time) >= MIN_STAKE_AGE_SECS;
+                                if held_ok {
+                                    position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
+                                }
+
+                                // Clamp target staked SKR to post-unstake escrow
+                                let target_staked = position.staked_skr.saturating_sub(amount).min(post_unstake_escrow);
+                                let shares_removed = position.staked_skr.saturating_sub(target_staked);
+                                vault.total_staked_skr = vault.total_staked_skr.saturating_sub(shares_removed);
+                                position.staked_skr = target_staked;
+                                position.reward_debt = ((position.staked_skr as u128)
+                                    .checked_mul(vault.acc_reward_per_share)
+                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                    / YIELD_SCALE;
+                                position.last_interaction_time = Clock::get()?.unix_timestamp;
+
+                                position.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
+                                vault.pack_into_slice(&mut acc.try_borrow_mut_data()?)?;
+                                msg!("ClockLend: Synced yield shares down on unstake: total_staked={}, user_staked={}",
+                                    vault.total_staked_skr, position.staked_skr);
+                            }
+                        }
                     }
                 }
             }
@@ -923,6 +1070,28 @@ pub fn process_initialize_admin(
                     existing.oracle_authority = *new_oracle_acc.key;
                 }
                 existing.pack_into_slice(&mut admin_account.try_borrow_mut_data()?)?;
+
+                // P1: Rotate SkrYieldVault authority if any yield vault accounts are passed
+                for acc in accounts.iter() {
+                    if acc.owner == program_id
+                        && !acc.data_is_empty()
+                        && (acc.data_len() == SkrYieldVault::LEN || get_account_kind(acc) == AccountKind::SkrYieldVault)
+                    {
+                        let vault_res = SkrYieldVault::unpack_from_slice(&acc.try_borrow_data()?);
+                        if let Ok(mut vault) = vault_res {
+                            let (expected_vault_pda, _) = Pubkey::find_program_address(
+                                &[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()],
+                                program_id,
+                            );
+                            if expected_vault_pda == *acc.key {
+                                vault.authority = existing.admin;
+                                vault.pack_into_slice(&mut acc.try_borrow_mut_data()?)?;
+                                msg!("ClockLend: SkrYieldVault authority rotated to: {}", vault.authority);
+                            }
+                        }
+                    }
+                }
+
                 msg!("ClockLend: AdminConfig rotated. New admin: {}, Oracle: {}", existing.admin, existing.oracle_authority);
                 return Ok(());
             }
@@ -1246,7 +1415,6 @@ pub fn process_borrow_from_pool(
     let mut treasury_account_opt: Option<&AccountInfo> = None;
     let mut collateral_oracle_opt: Option<&AccountInfo> = None;
     let mut pool_oracle_opt: Option<&AccountInfo> = None;
-    let mut pyth_collateral_price_opt: Option<PythPrice> = None;
     let mut skr_yield_vault_opt: Option<&AccountInfo> = None;
     let mut skr_yield_token_opt: Option<&AccountInfo> = None;
 
@@ -1278,18 +1446,6 @@ pub fn process_borrow_from_pool(
                     treasury_account_opt = Some(acc);
                 }
             }
-        } else if acc.owner == &PYTH_RECEIVER_ID {
-            // Pyth pull-oracle price account for the collateral mint. Any
-            // receiver-owned account is validated against the canonical feed
-            // id here; a bad account fails the whole instruction.
-            if pyth_collateral_price_opt.is_none() {
-                let (feed_id, max_age) = if is_native_sol {
-                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
-                } else {
-                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
-                };
-                pyth_collateral_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
-            }
         }
     }
 
@@ -1312,11 +1468,11 @@ pub fn process_borrow_from_pool(
     // Resolve dynamic collateral price & decimals (mandatory unless pool.is_oracle_free)
     // Pyth (verified pull oracle) takes precedence; the admin feed remains the
     // fallback for pools that don't pass a Pyth account.
-    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_collateral_price_opt {
-        // C-1: native SOL collateral is denominated in lamports (9 decimals),
-        // SKR in 6 — the scale must match the collateral, not the feed.
-        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
-    } else if let Some(oracle_acc) = collateral_oracle_opt {
+    // Pricing is admin-feed-only (Pyth pull oracles removed in round 11): the
+    // collateral price comes from the pool-scoped feed when the pool opted
+    // into one, otherwise the global feed, otherwise (oracle-free pools) the
+    // hardcoded baselines.
+    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(oracle_acc) = collateral_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
             if !feed.is_initialized || feed.price_micro_usd == 0 {
@@ -1325,7 +1481,9 @@ pub fn process_borrow_from_pool(
             if feed.mint != *collateral_mint.key && feed.mint != canonical_collateral_mint {
                 return Err(ClockLendError::InvalidOracleAccount.into());
             }
-            if feed.last_updated_at <= 0 || current_time.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds {
+            // Round 11: pricing reads are bounded to 600s regardless of the
+            // feed's stored window (3600s is retained for monitoring).
+            if feed.last_updated_at <= 0 || current_time.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS) {
                 return Err(ClockLendError::StaleOraclePrice.into());
             }
             (feed.price_micro_usd, feed.decimals)
@@ -1366,6 +1524,18 @@ pub fn process_borrow_from_pool(
     }
 
     // Resolve dynamic pool liquidity price & decimals (mandatory for non-USD unless pool.is_oracle_free)
+    // Round 11: when the pool opted into its own feeds, the pool-scoped
+    // liquidity feed is REQUIRED (mirror of the collateral-side H-3 gate) —
+    // except for native-SOL pools with native-SOL collateral, where the
+    // valuation short-circuits and never reads the pool price (and the pool
+    // oracle PDA is the same account the scan already assigned to the
+    // collateral slot).
+    if pool.has_custom_oracle && !(is_pool_native_sol && is_native_sol) {
+        match pool_oracle_opt {
+            Some(acc) if *acc.key == expected_pool_liq_oracle1 || *acc.key == expected_pool_liq_oracle2 => {}
+            _ => return Err(ClockLendError::InvalidOracleAccount.into()),
+        }
+    }
     let (pool_price_micro_usd, pool_decimals): (u64, u8) = if let Some(oracle_acc) = pool_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
@@ -1375,7 +1545,8 @@ pub fn process_borrow_from_pool(
             if feed.mint != pool.liquidity_mint && feed.mint != canonical_pool_mint {
                 return Err(ClockLendError::InvalidOracleAccount.into());
             }
-            if feed.last_updated_at <= 0 || current_time.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds {
+            // Round 11: 600s pricing bound (see collateral feed above).
+            if feed.last_updated_at <= 0 || current_time.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS) {
                 return Err(ClockLendError::StaleOraclePrice.into());
             }
             (feed.price_micro_usd, feed.decimals)
@@ -1406,6 +1577,13 @@ pub fn process_borrow_from_pool(
 
     // H-6: Validate decimal bounds and use checked exponentiation
     if collateral_decimals == 0 || collateral_decimals > 18 || pool_decimals == 0 || pool_decimals > 18 {
+        return Err(ClockLendError::InvalidOracleAccount.into());
+    }
+    // Round 11: the pool-side scale must match the liquidity mint (the C-1
+    // guard mirrored) — a feed declaring the wrong decimals for the pool mint
+    // re-values every collateral by 10^delta.
+    let expected_pool_decimals: u8 = if is_pool_native_sol { 9 } else { 6 };
+    if pool_decimals != expected_pool_decimals {
         return Err(ClockLendError::InvalidOracleAccount.into());
     }
     let col_scale = 10u128.checked_pow(collateral_decimals as u32).ok_or(ClockLendError::AmountOverflow)?;
@@ -1610,7 +1788,16 @@ pub fn process_borrow_from_pool(
             let (treasury_fee, yield_dividend) = if let (Some(yield_vault_acc), Some(yield_token_acc)) = (skr_yield_vault_opt, skr_yield_token_opt) {
                 let y_div = origination_fee / 2;
                 let t_fee = origination_fee.saturating_sub(y_div);
-                if y_div > 0 {
+                // The yield token account must be denominated in the POOL's
+                // liquidity mint, otherwise the transfer below would revert
+                // every borrow (e.g. a wrapped-SOL pool whose yield vault PDA
+                // can never be initialized — the reward-mint allowlist is
+                // USDC/SKR only). Fail open to the treasury instead.
+                let mint_matches = spl_token::state::Account::unpack(&yield_token_acc.try_borrow_data()?)
+                    .ok()
+                    .map(|yt| yt.mint == pool.liquidity_mint)
+                    .unwrap_or(false);
+                if y_div > 0 && mint_matches {
                     invoke_signed(
                         &spl_token::instruction::transfer(
                             token_program.key,
@@ -1854,7 +2041,6 @@ pub fn process_create_p2p_offer(
 
     // Optional accounts: oracle feed account and/or liquidity mint account
     let mut oracle_feed_opt: Option<&AccountInfo> = None;
-    let mut pyth_price_opt: Option<PythPrice> = None;
     let mut liquidity_mint = USDC_DEVNET_MINT;
 
     while let Ok(acc) = next_account_info(account_info_iter) {
@@ -1864,16 +2050,6 @@ pub fn process_create_p2p_offer(
             liquidity_mint = *acc.key;
         } else if *acc.key == USDC_DEVNET_MINT {
             liquidity_mint = *acc.key;
-        } else if acc.owner == &PYTH_RECEIVER_ID {
-            // Pyth pull-oracle price account for the collateral mint.
-            if pyth_price_opt.is_none() {
-                let (feed_id, max_age) = if is_native_sol {
-                    (&SOL_USD_FEED_ID, SOL_MAX_AGE_SECS)
-                } else {
-                    (&SKR_USD_FEED_ID, SKR_MAX_AGE_SECS)
-                };
-                pyth_price_opt = Some(try_verify_pyth_price(acc, feed_id, max_age)?);
-            }
         } else if oracle_feed_opt.is_none() && (acc.owner == program_id || acc.data_len() == PriceFeed::LEN) {
             oracle_feed_opt = Some(acc);
         } else if oracle_feed_opt.is_none() {
@@ -1892,10 +2068,8 @@ pub fn process_create_p2p_offer(
 
     // Price resolution: Pyth (verified pull oracle) takes precedence when
     // present; otherwise the H-3 fail-closed admin feed is required.
-    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(pyth_price) = pyth_price_opt {
-        // C-1: same lamports-vs-6-decimal scale rule as the borrow path.
-        (pyth_price.price_micro_usd, if is_native_sol { 9 } else { 6 })
-    } else {
+    // Admin-feed-only pricing (Pyth removed in round 11).
+    let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = {
         // H-3: Fail closed when canonical price feed is missing or unprovisioned on value-authorizing paths
         let oracle_acc = oracle_feed_opt.ok_or(ClockLendError::InvalidOracleAccount)?;
         if *oracle_acc.key != expected_oracle_pda || oracle_acc.owner != program_id || oracle_acc.data_is_empty() {
@@ -1911,7 +2085,8 @@ pub fn process_create_p2p_offer(
         if feed.decimals == 0 || feed.decimals > 18 {
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
-        if now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds {
+        // Round 11: 600s pricing bound.
+        if now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS) {
             return Err(ClockLendError::StaleOraclePrice.into());
         }
         (feed.price_micro_usd, feed.decimals)
@@ -2168,6 +2343,17 @@ pub fn process_repay_loan(
             // Security check: only the borrower can repay
             if *borrower.key != loan.borrower {
                 return Err(ClockLendError::Unauthorized.into());
+            }
+
+            // Round 11: the grace window closes the repayment option (mirror
+            // of the P2P branch) — after expiry only ClaimDefault may resolve
+            // the loan, so a borrower cannot hold a perpetual redemption
+            // option that front-runs the liquidator.
+            if loan.status == LoanStatus::InGracePeriod {
+                let now = Clock::get()?.unix_timestamp;
+                if now >= loan.grace_period_expires {
+                    return Err(ClockLendError::GracePeriodExpired.into());
+                }
             }
 
             if !loan.is_active || loan.status == LoanStatus::Repaid {
@@ -2916,9 +3102,17 @@ pub fn process_claim_default(
                 profile.total_loans_defaulted = profile.total_loans_defaulted.saturating_add(1);
                 profile.reputation_score = profile.reputation_score.saturating_sub(1000); // severe penalty
 
-                // F-06: Slash locked SKR bond (or 20% of staked SKR, whichever is greater)
+                // F-06: Slash locked SKR bond (or 20% of staked SKR, whichever is
+                // greater) — but never consume stake that backs OTHER live
+                // loans, or locked_skr would exceed staked_skr and freeze the
+                // remainder of the borrower's stake forever (round-11 PoC).
                 let base_slash = profile.staked_skr.saturating_mul(20) / 100;
-                let slash_amount = loan_locked_skr.max(base_slash).min(profile.staked_skr);
+                let max_slashable = profile
+                    .staked_skr
+                    .saturating_sub(profile.locked_skr.saturating_sub(loan_locked_skr));
+                let slash_amount = loan_locked_skr
+                    .max(base_slash.min(max_slashable))
+                    .min(profile.staked_skr);
                 if slash_amount > 0 {
                     let skr_escrow = skr_escrow_opt.ok_or(ClockLendError::InvalidInstruction)?;
                     let token_program = token_program_opt.ok_or(ClockLendError::InvalidInstruction)?;
@@ -2958,6 +3152,73 @@ pub fn process_claim_default(
                     // Only debit profile.staked_skr AFTER transfer completes successfully
                     profile.staked_skr = profile.staked_skr.saturating_sub(slash_amount);
                     msg!("ClockLend: Slashed & transferred {} SKR to lender ({})", slash_amount, slash_dest.key);
+
+                    // High-2: Sync borrower's yield position down to reflect slashed SKR
+                    let post_slash_escrow = spl_token::state::Account::unpack(&skr_escrow.try_borrow_data()?)
+                        .map(|t| t.amount)
+                        .unwrap_or(0);
+                    let pre_slash_escrow = post_slash_escrow.saturating_add(slash_amount);
+
+                    for acc in accounts.iter() {
+                        if acc.owner == program_id
+                            && !acc.data_is_empty()
+                            && (acc.data_len() == SkrYieldVault::LEN || get_account_kind(acc) == AccountKind::SkrYieldVault)
+                        {
+                            let vault_res = SkrYieldVault::unpack_from_slice(&acc.try_borrow_data()?);
+                            if let Ok(mut vault) = vault_res {
+                                if !vault.is_initialized {
+                                    continue;
+                                }
+                                let (expected_vault_pda, _) = Pubkey::find_program_address(
+                                    &[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()],
+                                    program_id,
+                                );
+                                if expected_vault_pda != *acc.key {
+                                    continue;
+                                }
+
+                                let (expected_pos, _) = Pubkey::find_program_address(
+                                    &[USER_YIELD_SEED, loan.borrower.as_ref(), vault.reward_mint.as_ref()],
+                                    program_id,
+                                );
+                                if let Some(pos_acc) = accounts.iter().find(|a| *a.key == expected_pos) {
+                                    if pos_acc.owner == program_id && !pos_acc.data_is_empty() {
+                                        let pos_res = UserYieldPosition::unpack_from_slice(&pos_acc.try_borrow_data()?);
+                                        if let Ok(mut position) = pos_res {
+                                            if position.user == loan.borrower && position.reward_mint == vault.reward_mint {
+                                                let eff_staked = position.staked_skr.min(pre_slash_escrow);
+                                                let gross = ((eff_staked as u128)
+                                                    .checked_mul(vault.acc_reward_per_share)
+                                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                                    / YIELD_SCALE;
+                                                let pending = gross.saturating_sub(position.reward_debt.min(gross)) as u64;
+                                                let held_ok = Clock::get()?.unix_timestamp
+                                                    .saturating_sub(position.last_interaction_time) >= MIN_STAKE_AGE_SECS;
+                                                if held_ok {
+                                                    position.accrued_rewards = position.accrued_rewards.saturating_add(pending);
+                                                }
+
+                                                let target_staked = position.staked_skr.saturating_sub(slash_amount).min(post_slash_escrow);
+                                                let shares_removed = position.staked_skr.saturating_sub(target_staked);
+                                                vault.total_staked_skr = vault.total_staked_skr.saturating_sub(shares_removed);
+                                                position.staked_skr = target_staked;
+                                                position.reward_debt = ((position.staked_skr as u128)
+                                                    .checked_mul(vault.acc_reward_per_share)
+                                                    .ok_or(ClockLendError::AmountOverflow)?)
+                                                    / YIELD_SCALE;
+                                                position.last_interaction_time = Clock::get()?.unix_timestamp;
+
+                                                position.pack_into_slice(&mut pos_acc.try_borrow_mut_data()?)?;
+                                                vault.pack_into_slice(&mut acc.try_borrow_mut_data()?)?;
+                                                msg!("ClockLend: Slashed borrower yield shares: total_staked={}, borrower_staked={}",
+                                                    vault.total_staked_skr, position.staked_skr);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if loan_locked_skr > 0 {
                     profile.locked_skr = profile.locked_skr.saturating_sub(loan_locked_skr);
@@ -3380,14 +3641,22 @@ const YIELD_SCALE: u128 = 1_000_000_000_000;
 /// Minimum time a stake must be held before its dividends are claimable.
 /// Prevents stake-in-slot-N / claim-in-slot-N+1 yield sniping.
 const MIN_STAKE_AGE_SECS: i64 = 3600;
+/// Admin feeds older than this cannot price loans (the stored 3600s window is
+/// for monitoring only). Kept fresh by the keeper crank (Jupiter/CoinGecko).
+const ADMIN_FEED_MAX_PRICE_AGE_SECS: i64 = 600;
 
 /// Fold `amount` into acc_reward_per_share. Rewards deposited while no staker
 /// is synced are parked in `unallocated_rewards` and folded into the next
 /// allocation so they are never stranded.
 fn accrue_yield(vault: &mut SkrYieldVault, amount: u64) -> ProgramResult {
     if vault.total_staked_skr > 0 {
+        // Round 11: the parked backlog is dripped (a quarter per accrue) so a
+        // just-in-time staker cannot capture 100% of it with a single dust
+        // borrow-triggered fold; long-term stakers receive the rest over the
+        // following accrues.
+        let fold = vault.unallocated_rewards.saturating_add(3) / 4;
         let total_to_allocate = (amount as u128)
-            .checked_add(vault.unallocated_rewards as u128)
+            .checked_add(fold as u128)
             .ok_or(ClockLendError::AmountOverflow)?;
         let reward_increase = total_to_allocate
             .checked_mul(YIELD_SCALE)
@@ -3397,7 +3666,7 @@ fn accrue_yield(vault: &mut SkrYieldVault, amount: u64) -> ProgramResult {
             .acc_reward_per_share
             .checked_add(reward_increase)
             .ok_or(ClockLendError::AmountOverflow)?;
-        vault.unallocated_rewards = 0;
+        vault.unallocated_rewards = vault.unallocated_rewards.saturating_sub(fold);
     } else {
         vault.unallocated_rewards = vault
             .unallocated_rewards
@@ -3599,6 +3868,81 @@ pub fn process_deposit_skr_yield(
         amount,
         vault.acc_reward_per_share
     );
+    Ok(())
+}
+
+/// Tag 18: authority-only recovery of tokens beyond pending_rewards. Covers
+/// stranded dust, forfeited harvests and phantom-share residue — bounded so
+/// user entitlements can never be touched.
+pub fn process_withdraw_unused_yield(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let authority = next_account_info(account_info_iter)?;
+    let yield_vault_account = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let authority_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    assert_signer(authority)?;
+    assert_token_program(token_program)?;
+
+    let mut vault = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
+    if !vault.is_initialized {
+        return Err(ClockLendError::PoolInactive.into());
+    }
+    if *authority.key != vault.authority {
+        return Err(ClockLendError::Unauthorized.into());
+    }
+
+    let (expected_vault_pda, vault_bump) = Pubkey::find_program_address(
+        &[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_vault_pda != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidYieldVault.into());
+    }
+    let (expected_token_pda, _) = Pubkey::find_program_address(
+        &[SKR_YIELD_TOKEN_SEED, vault.reward_mint.as_ref()], program_id);
+    if expected_token_pda != *vault_token_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+
+    let vault_token = spl_token::state::Account::unpack(&vault_token_account.try_borrow_data()?)?;
+    if vault_token.mint != vault.reward_mint || vault_token.owner != *yield_vault_account.key {
+        return Err(ClockLendError::InvalidVaultAccount.into());
+    }
+    let auth_token = spl_token::state::Account::unpack(&authority_token_account.try_borrow_data()?)?;
+    if auth_token.owner != *authority.key || auth_token.mint != vault.reward_mint {
+        return Err(ClockLendError::InvalidMint.into());
+    }
+
+    // Only the excess over pending_rewards is withdrawable: pending tracks
+    // every deposit minus payouts and upper-bounds the sum of user
+    // entitlements (share sums <= total by the fuzz-pinned invariant).
+    let withdrawable = vault_token.amount.saturating_sub(vault.pending_rewards);
+    if withdrawable == 0 {
+        return Err(ClockLendError::InvalidInstruction.into());
+    }
+
+    invoke_signed(
+        &spl_token::instruction::transfer(
+            token_program.key,
+            vault_token_account.key,
+            authority_token_account.key,
+            yield_vault_account.key,
+            &[],
+            withdrawable,
+        )?,
+        &[
+            vault_token_account.clone(),
+            authority_token_account.clone(),
+            yield_vault_account.clone(),
+            token_program.clone(),
+        ],
+        &[&[SKR_YIELD_VAULT_SEED, vault.reward_mint.as_ref(), &[vault_bump]]],
+    )?;
+
+    msg!("ClockLend: Withdrew {} unused yield-vault tokens", withdrawable);
     Ok(())
 }
 

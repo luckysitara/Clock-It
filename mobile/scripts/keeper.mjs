@@ -73,7 +73,7 @@ async function setFeed(mint, priceMicroUsd, decimals, adminPda, label) {
     const sig = await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true }, // writable: first-time feed creation pays rent
         { pubkey: oraclePda, isSigner: false, isWritable: true },
         { pubkey: mint, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
