@@ -5296,6 +5296,7 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+#[tokio::test]
 async fn test_bank_withdraw_liquidity_authority_only_and_success() {
     let program_id = Pubkey::new_unique();
     let usdc_mint = Pubkey::new_unique();
@@ -5429,6 +5430,7 @@ async fn test_bank_withdraw_liquidity_authority_only_and_success() {
 // admin rotation, InitializePool guards, DepositLiquidity effects.
 // ============================================================================
 
+#[tokio::test]
 async fn test_bank_admin_rotation_transfers_oracle_authority() {
     let program_id = Pubkey::new_unique();
     let admin_authority = Keypair::new();

@@ -1,11 +1,11 @@
 # ClockLend — Mainnet Runbook
 
-Status: program v10 (round-8 hardening + round-9 SKR yield vault + round-10 reaudit fixes:
-immediate StakeSKR yield registration, unstake clamping & slot-collision fix, ClaimDefault
-yield down-sync, admin vault-authority rotation, Hermes fetch timeout & price provenance).
-**Devnet runs the round-10 build** — ProgramData `76MvPRVKdsthzyBQhFnfqgd7QtjebiAGCLNTA56nCgMB`,
-ELF 354,712 bytes, md5 `540edc5c` (byte-verified against the local .so; upgrade tx
-`4L2nAvLzqP2qTrh9JdswRj5kCNpB4vYcd3VxzfUXyKj6Kno6TzvkPqr9wwjn6vegY2UkS1qBtLr3K3Zfvy5KDAMy`).
+Status: program v13 (round-8/9 hardening + round-10/11 fixes + round-12 Pyth removal +
+round-13 tag pinning; admin-feed-only pricing, 600s staleness, oracle-free 30% LTV cap,
+yield rescue instruction).
+**Devnet runs the round-12 build** — ProgramData `76MvPRVKdsthzyBQhFnfqgd7QtjebiAGCLNTA56nCgMB`
+(366,389 B total / 357,501 B used / 8,888 B zero padding), ELF 357,456 bytes,
+md5 `a2986fde` (byte-verified; extend tx `63mmLPNK…` +10,240 B, upgrade tx `5joqBgtE…`).
 Mainnet bootstrap is prepared but **not executed** (deployer wallet has 0 mainnet SOL).
 Follow this checklist in order.
 
@@ -21,10 +21,10 @@ Follow this checklist in order.
       `program.ts`, this runbook, and all seed scripts.)
 - [ ] **Fund the deployer wallet with ~2.5 SOL on mainnet-beta.** Breakdown: program rent
       is dynamically verified by `deploy-mainnet.mjs` against `getMinimumBalanceForRentExemption(soStat.size + 45)`
-      (~1.73 SOL for the compiled ELF + 45-byte ProgramData header; permanent buffer transfer),
-      plus ~0.1 SOL buffer for write-buffer transaction fees and priority fees,
-      PDAs + feeds + first desk ~0.05 SOL. `solana balance -u m` should show
-      ≥ 2.0 SOL (script dynamically enforces `rent + 0.1 SOL`).
+      (1.8168 SOL for the 357,501-byte ProgramData = 357,456-byte ELF + 45-byte header;
+      permanent buffer transfer), plus ~0.1 SOL buffer for write-buffer transaction
+      fees and priority fees, PDAs + feeds + first desk ~0.05 SOL. `solana balance -u m`
+      should show ≥ 2.5 SOL (the script dynamically enforces `rent + 0.1 SOL`).
 - [x] **Fresh mainnet keypairs generated** (`~/.config/solana/`, chmod 600):
       - Deployer (upgrade authority / admin): `5avuk58DjBwBsyWkhgp6efC5WbnUKTFA5iLkbS8Aqv29`
       - Keeper (oracle_authority after `--rotate-oracle`): `HtiDpTkcWDDaQeRLSBvYDdw2sRJb5VvkD7EMvr5JWVzJ`
@@ -39,7 +39,7 @@ Follow this checklist in order.
       script seeds the SKR feed from Jupiter's Price API v3 automatically; the keeper
       refreshes both SOL and SKR feeds from the same source every run.
       `--skr-price <usd>` still overrides manually if you want a policy floor.
-- [ ] `cd program && cargo build-sbf && cargo test` (97/97 incl. fuzz invariants).
+- [ ] `cd program && cargo build-sbf && cargo test` (100/100 incl. fuzz invariants + wire-tag pinning).
       Note: the deploy script now builds the ELF itself (`cargo build-sbf`) and hard-fails
       if the artifact is older than the sources — `--skip-build` overrides.
 
@@ -68,8 +68,10 @@ borrower-picks-the-price risk). Pricing is now **admin-feed-only**:
   devnet) / `mobile/scripts/keeper.mjs` (mainnet), fed by **Jupiter + CoinGecko**
   (the same sources drive the app's WebSocket price pipeline).
 - **Pricing staleness is 600s** regardless of the feed's stored 3600s window
-  (round 11) — keep the crank cadence under 10 minutes. There is no scheduler in
-  the tree: run it from cron/Actions with the exact command below.
+  (round 11) — keep the crank cadence under 10 minutes.
+  `.github/workflows/keeper.yml` schedules the devnet crank every 10 minutes
+  (configure the `KEEPER_KEYPAIR_JSON` repo secret); mainnet should use cron or
+  the same workflow with the keeper key.
 - Pool authorities can publish **pool-scoped feeds** (`[b"oracle", pool, mint]`,
   via SetPriceFeed with the pool account appended); when `has_custom_oracle` is
   set the pool-scoped feed is REQUIRED and authoritative (a borrower cannot
@@ -102,9 +104,12 @@ revert borrows with `StaleOraclePrice` (fail-closed, no loss).
   (tag 16, authority-gated).
 - Claims: tag 17. The stake is read from the SKR escrow token account (the single
   source of truth — unstaking immediately removes shares). A **1-hour cooldown**
-  applies after each payout or stake change (`YieldCooldown`, error 40). Deposits made
+  applies after each payout or stake change (`YieldCooldown`, error 38). Deposits made
   while nobody is staked are parked in `unallocated_rewards` and folded into the next
   allocation — never stranded.
+- Rescue: tag 18 `WithdrawUnusedYield` (authority-only) recovers EXTERNALLY-DONATED
+  vault tokens beyond `pending_rewards`; program-internal stranding (forfeits,
+  phantom shares) is not reachable by it by design.
 - Note: the SKR mint does not exist on devnet, so devnet yield testing requires a
   devnet SKR mint; mainnet has `SKRbvo6Gf…` (6 decimals).
 
@@ -120,9 +125,6 @@ revert borrows with `StaleOraclePrice` (fail-closed, no loss).
   `admin = 5avuk58D…Qv29` (deployer) and `oracle_authority = HtiDpTk…JWVzJ` (keeper).
 - Global SOL feed PDA `A4hjbxYH…oBXu` (same PDA address on mainnet) is fresh.
 - Treasury ATA for `EPjFWdd5` owned by treasury PDA `6yY4P4x2…L4dq` exists.
-- The canonical Pyth SOL account `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE` exists and
-  is receiver-owned with `verification_level = Full` (this is the app's Hermes-less
-  fallback for SOL borrows).
 - The SkrYieldVault PDA (CLK_SYLD, 121 bytes, `is_initialized = 1`, `authority` =
   deployer key) and its vault token account exist and are owned by the program / token
   program respectively.
@@ -136,13 +138,23 @@ revert borrows with `StaleOraclePrice` (fail-closed, no loss).
 | Risk | Mitigation |
 |---|---|
 | Single admin/oracle key can move all global prices | Keep the key offline; keeper uses a **separate** `oracle_authority` (rotate via `InitializeAdmin` with the upgrade-authority key) |
-| Price manipulation / stale SOL price | Keeper cadence < 1 h; bounded price (≤ $1M/token) and decimals (1–18); pool-scoped feeds exist for pools that want their own pricing |
+| Price manipulation / stale SOL price | Keeper cadence < 10 min (600 s pricing bound, fail-closed); bounded price (≤ $1M/token) and decimals (1–18); pool-scoped feeds exist for pools that want their own pricing |
 | P2P funders must verify the offer's on-chain `liquidity_mint` | Show mint in the UI before funding (mobile TODO) |
 | Pool authority keys are irrevocable (no rotation instruction) | Deploy desks with durable keys |
 | No LP shares — only the pool authority can deposit/withdraw | Document as single-owner desks (product decision) |
 | Upgrade authority = deployer key | Store offline; rotate via `set-upgrade-authority` if needed — `InitializeAdmin` stays valid (ProgramData-derived) |
 
 ## 5. Upgrading the program later
+
+If the new ELF is LARGER than the current ProgramData allocation, extend first
+(agave caps additional bytes at 10,240 per call — repeat as needed):
+
+```bash
+solana program extend --url mainnet-beta --keypair $DEPLOYER_KEY \
+  HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3 10240
+```
+
+Then:
 
 ```bash
 cd program && cargo build-sbf

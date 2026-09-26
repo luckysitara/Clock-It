@@ -1086,3 +1086,41 @@ async fn test_skr_yield_unused_rescue_authority_only() {
     assert_eq!(read_token_amount(&mut ctx, auth_tok.pubkey()).await, 40_000_000, "rescue must recover the excess only");
     assert_eq!(read_token_amount(&mut ctx, vault_token_pda).await, 60_000_000, "pending must remain untouched");
 }
+
+#[test]
+fn test_wire_tags_are_pinned() {
+    // Round-13 regression: borsh discriminants are positional — inserting a
+    // variant before an existing one silently shifts every wire tag behind it
+    // (the tag-17/18 claim break). Pin the byte encoding of EVERY variant so
+    // a future insertion cannot move a tag without failing this test.
+    use clock_lend::instruction::ClockLendInstruction as I;
+    use clock_lend::state::PoolType;
+    let name = [0u8; 32];
+    let cases: Vec<(u8, Vec<u8>)> = vec![
+        (0, borsh::to_vec(&I::InitializePool { pool_id: 0, pool_type: PoolType::Individual, interest_rate_bps: 0, max_ltv_bps: 0, min_duration: 0, max_duration: 0, name, is_oracle_free: false }).unwrap()),
+        (1, borsh::to_vec(&I::DepositLiquidity { amount: 0 }).unwrap()),
+        (2, borsh::to_vec(&I::StakeSKR { amount: 0 }).unwrap()),
+        (3, borsh::to_vec(&I::BorrowFromPool { loan_id: 0, borrow_amount: 0, collateral_amount: 0, duration_seconds: 0 }).unwrap()),
+        (4, borsh::to_vec(&I::CreateP2POffer { offer_id: 0, requested_amount: 0, collateral_amount: 0, interest_offered: 0, duration_seconds: 0 }).unwrap()),
+        (5, borsh::to_vec(&I::FundP2POffer).unwrap()),
+        (6, borsh::to_vec(&I::RepayLoan { repay_amount: 0 }).unwrap()),
+        (7, borsh::to_vec(&I::TriggerGracePeriod).unwrap()),
+        (8, borsh::to_vec(&I::ClaimDefault).unwrap()),
+        (9, borsh::to_vec(&I::WithdrawLiquidity { amount: 0 }).unwrap()),
+        (10, borsh::to_vec(&I::CancelP2POffer).unwrap()),
+        (11, borsh::to_vec(&I::UnstakeSKR { amount: 0 }).unwrap()),
+        (12, borsh::to_vec(&I::SetPriceFeed { price_micro_usd: 0, decimals: 0 }).unwrap()),
+        (13, borsh::to_vec(&I::InitializeAdmin).unwrap()),
+        (14, borsh::to_vec(&I::WithdrawTreasury { amount: 0 }).unwrap()),
+        (15, borsh::to_vec(&I::InitializeSkrYieldVault).unwrap()),
+        (16, borsh::to_vec(&I::DepositSkrYield { amount: 0 }).unwrap()),
+        (17, borsh::to_vec(&I::ClaimSkrYield).unwrap()),
+        (18, borsh::to_vec(&I::WithdrawUnusedYield).unwrap()),
+    ];
+    for (tag, bytes) in cases {
+        assert_eq!(bytes[0], tag, "wire tag for variant must equal {tag}; got {}", bytes[0]);
+    }
+    // Cross-check: the claim tag must match the mobile client's raw byte.
+    assert_eq!(borsh::to_vec(&I::ClaimSkrYield).unwrap(), vec![17u8], "ClaimSkrYield MUST stay at tag 17 (mobile client contract)");
+    assert_eq!(borsh::to_vec(&I::WithdrawUnusedYield).unwrap(), vec![18u8], "WithdrawUnusedYield MUST stay at tag 18 (appended last)");
+}

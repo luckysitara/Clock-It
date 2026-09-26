@@ -15,6 +15,7 @@ import {
 import { PublicKey } from '@solana/web3.js';
 import { useTheme } from '../theme/ThemeContext';
 import { WalletAssets, SolanaNetwork } from '../types';
+import { livePrices } from '../solana/onChainService';
 
 const SOL_LOGO = require('../../assets/tokens/sol.png');
 const SKR_LOGO = require('../../assets/tokens/skr.png');
@@ -52,8 +53,8 @@ export const WalletAssetsModal: React.FC<WalletAssetsModalProps> = ({
 
   const solHolding = assets.tokenList?.find((t) => t.symbol === 'SOL');
   const skrHolding = assets.tokenList?.find((t) => t.symbol === 'SKR');
-  const solPrice = solHolding && solHolding.amount > 0 ? solHolding.usdValue / solHolding.amount : 101.12;
-  const skrPrice = skrHolding && skrHolding.amount > 0 ? skrHolding.usdValue / skrHolding.amount : 0.0192;
+  const solPrice = livePrices.sol;
+  const skrPrice = livePrices.skr;
   const solUsd = assets.solBalance * solPrice;
   const skrUsd = assets.skrBalance * skrPrice;
 

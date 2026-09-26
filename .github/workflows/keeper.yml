@@ -1,0 +1,27 @@
+# ClockLend price keeper — refreshes the admin PriceFeeds (the sole pricing
+# source since Pyth was removed). Cadence MUST stay under the 600s pricing
+# staleness bound; 10-minute cron gives ~2x headroom.
+name: ClockLend Keeper
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  crank:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm --prefix mobile ci --ignore-scripts
+      - name: Run keeper (devnet)
+        env:
+          ORACLE_KEY: ${{ secrets.KEEPER_KEYPAIR_JSON }}
+          CRANK_RPC: https://api.devnet.solana.com
+        run: |
+          echo "$ORACLE_KEY" > "$RUNNER_TEMP/oracle.json"
+          NODE_PATH=mobile/node_modules ORACLE_KEY="$RUNNER_TEMP/oracle.json" node scripts/crank_oracles.mjs

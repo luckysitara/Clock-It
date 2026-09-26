@@ -333,8 +333,9 @@ function MainApp() {
 
       const solscanUrl = `https://solscan.io/tx/${sig}`;
 
-      // 2. Create active loan order in state
-      const interestDue = parseFloat((borrowAmount * (pool.interestRateBps / 10000) * (7 / 365)).toFixed(2));
+      // 2. Create active loan order in state — same term the signed loan uses.
+      const termDays = Math.min(Math.max(durationDays, pool.minDurationDays), pool.maxDurationDays);
+      const interestDue = parseFloat((borrowAmount * (pool.interestRateBps / 10000) * (termDays / 365)).toFixed(2));
       const collateralMintStr = isSol
         ? 'So11111111111111111111111111111111111111112'
         : 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3';
@@ -349,7 +350,7 @@ function MainApp() {
         collateralAmount: collateralUnits,
         interestDue,
         originationTime: Math.floor(Date.now() / 1000),
-        dueTime: Math.floor(Date.now() / 1000) + 7 * 86400,
+        dueTime: Math.floor(Date.now() / 1000) + termDays * 86400,
         gracePeriodExpires: 0,
         status: 'Active',
         txSignature: sig,
@@ -921,7 +922,9 @@ function MainApp() {
     } catch (err: any) {
       console.warn('Claim yield error:', err);
       const message =
-        err?.message?.includes('Custom(40)') || err?.message?.includes('cooldown')
+        err?.message?.includes('Custom(38)') ||
+        err?.message?.includes('0x26') ||
+        err?.message?.includes('cooldown')
           ? 'The 1-hour stake cooldown is still active. Try again later.'
           : err?.message || 'Could not claim yield on-chain.';
       setTransactionNotice({

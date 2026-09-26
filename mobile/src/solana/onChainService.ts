@@ -1317,7 +1317,8 @@ export async function buildBorrowTx(
   durationDays: number,
   collateralName: string = 'SOL',
   isPoolLiquid: boolean = true,
-  liquidityMint: PublicKey = USDC_MAINNET_MINT
+  liquidityMint: PublicKey = USDC_MAINNET_MINT,
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<{ tx: Transaction; escrowPDA: PublicKey; loanId: number }> {
   const [poolPDA] = getPoolPDA(poolAuthority, poolId);
   const [vaultPDA] = getVaultPDA(poolPDA);
@@ -1353,7 +1354,7 @@ export async function buildBorrowTx(
   // keeper crank (Jupiter/CoinGecko via the WS pipeline). No attachment
   // instructions are needed.
   tx.instructions.unshift(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 150_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
   );
 
@@ -1377,7 +1378,7 @@ export async function buildBorrowTx(
   // fee goes to the treasury (program behavior) — never revert the borrow
   // over a missing vault.
   try {
-    const yieldVault = await fetchSkrYieldVault('mainnet-beta', liquidityMint);
+    const yieldVault = await fetchSkrYieldVault(network, liquidityMint);
     if (yieldVault?.initialized) {
       keys.push({ pubkey: yieldVault.vaultPDA, isSigner: false, isWritable: true });
       keys.push({ pubkey: yieldVault.vaultTokenPDA, isSigner: false, isWritable: true });
@@ -1408,8 +1409,8 @@ export async function buildBorrowTx(
   return { tx, escrowPDA, loanId };
 }
 
-// Build Initialize Admin Transaction instruction (ClockLend Instruction 13)
-// Build Set Price Feed Transaction instruction (ClockLend Instruction 12)
+// (InitializeAdmin and SetPriceFeed builders were removed as dead code —
+// the deploy/keeper scripts and the smoke encode them directly.)
 // Build Repay Transaction instruction
 export async function buildRepayTx(
   borrower: PublicKey,
@@ -1420,7 +1421,8 @@ export async function buildRepayTx(
   isPoolLiquid: boolean = true,
   collateralName: string = 'SOL',
   poolPubkeyOverride?: PublicKey,
-  liquidityMint: PublicKey = USDC_MAINNET_MINT
+  liquidityMint: PublicKey = USDC_MAINNET_MINT,
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<Transaction> {
   // NEW-2: bind repayment to the loan's actual pool pubkey (read from the loan
   // PDA) instead of re-deriving the pool PDA from a menu-driven (authority, id).
@@ -1447,7 +1449,7 @@ export async function buildRepayTx(
   // Query on-chain loan state to guarantee exact repayment down to the micro-unit
   let exactRepayLamports = BigInt(Math.round(repayAmountUsdc * 1_000_000));
   try {
-    const loanInfo = await getConnection('mainnet-beta').getAccountInfo(loanPDA);
+    const loanInfo = await getConnection(network).getAccountInfo(loanPDA);
     const loanData = loanInfo?.data;
     // NEW-4: discriminator-gated read of the loan PDA for the exact amount
     if (loanData && loanData.length === 170 && loanData.subarray(0, 8).toString() === 'CLK_LOAN') {
@@ -1585,7 +1587,7 @@ export async function buildCreateP2POfferTx(
 
   // Admin-feed-only pricing (Pyth removed in round 11).
   tx.instructions.unshift(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 140_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })
   );
 
@@ -1675,7 +1677,8 @@ export async function buildFundP2POfferTx(
 // Build Repay P2P Pawn Offer Transaction (Borrower repays principal + yield to release collateral)
 export async function buildRepayPawnOfferTx(
   borrower: PublicKey,
-  offer: P2POffer
+  offer: P2POffer,
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<Transaction> {
   if (!offer.funder) {
     throw new Error('Offer has not been funded yet');
@@ -1704,7 +1707,7 @@ export async function buildRepayPawnOfferTx(
       ? BigInt(offer.requestedAmountRaw) + BigInt(offer.interestOfferedRaw)
       : BigInt(Math.round((offer.requestedAmount + offer.interestOffered) * 1_000_000));
   try {
-    const offerInfo = await getConnection('mainnet-beta').getAccountInfo(offerPDA);
+    const offerInfo = await getConnection(network).getAccountInfo(offerPDA);
     const data = offerInfo?.data;
     // NEW-1: read the CURRENT (202-byte) offer layout — requested_amount @153,
     // interest_offered @161 — with the discriminator gate. The legacy 170-byte
@@ -1823,7 +1826,7 @@ export async function buildCreatePoolTx(
   const [vaultPDA] = getVaultPDA(poolPDA);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 140_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // ClockLendInstruction::InitializePool:
@@ -1889,14 +1892,15 @@ export async function buildCreatePoolTx(
 // Build Stake SKR Reputation Bond Transaction
 export async function buildStakeSkrTx(
   user: PublicKey,
-  amountSkr: number
+  amountSkr: number,
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
   const [escrowPDA] = getSkrEscrowPDA(user);
   const userSkrAccount = getAssociatedTokenAddress(SKR_MINT, user);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 150_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // ClockLendInstruction::StakeSKR (Variant 2):
@@ -1909,19 +1913,32 @@ export async function buildStakeSkrTx(
   // skr_escrow PDAs itself (create_or_allocate_pda from the signer's wallet).
   // An extra transfer here would be a permanent, unrecoverable donation.
 
-  // Execute on-chain StakeSKR instruction
+  // Execute on-chain StakeSKR instruction. When the yield vault exists,
+  // append it + the user's position so the program registers the stake's
+  // yield shares IMMEDIATELY (round-10 critical fix) — a staker who never
+  // appends is invisible to the dividend denominator.
+  const stakeKeys: any[] = [
+    { pubkey: user, isSigner: true, isWritable: true },
+    { pubkey: profilePDA, isSigner: false, isWritable: true },
+    { pubkey: userSkrAccount, isSigner: false, isWritable: true },
+    { pubkey: escrowPDA, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SKR_MINT, isSigner: false, isWritable: false },
+  ];
+  try {
+    const yieldVault = await fetchSkrYieldVault(network, USDC_MAINNET_MINT);
+    if (yieldVault?.initialized) {
+      stakeKeys.push({ pubkey: yieldVault.vaultPDA, isSigner: false, isWritable: true });
+      stakeKeys.push({ pubkey: getUserYieldPDA(user, new PublicKey(yieldVault.rewardMint)), isSigner: false, isWritable: true });
+    }
+  } catch (_e) {
+    // graceful: no share registration on this stake
+  }
   tx.add(
     new TransactionInstruction({
       programId: PROGRAM_ID,
-      keys: [
-        { pubkey: user, isSigner: true, isWritable: true },
-        { pubkey: profilePDA, isSigner: false, isWritable: true },
-        { pubkey: userSkrAccount, isSigner: false, isWritable: true },
-        { pubkey: escrowPDA, isSigner: false, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SKR_MINT, isSigner: false, isWritable: false },
-      ],
+      keys: stakeKeys,
       data,
     })
   );
@@ -1942,14 +1959,15 @@ export async function buildStakeSkrTx(
 // Build Unstake SKR Reputation Bond Transaction
 export async function buildUnstakeSkrTx(
   user: PublicKey,
-  amountSkr: number
+  amountSkr: number,
+  network: SolanaNetwork = 'mainnet-beta'
 ): Promise<{ tx: Transaction; profilePDA: PublicKey; escrowPDA: PublicKey }> {
   const [profilePDA] = getProfilePDA(user);
   const [escrowPDA] = getSkrEscrowPDA(user);
   const userSkrAccount = getAssociatedTokenAddress(SKR_MINT, user);
 
   const tx = new Transaction();
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 120_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
 
   // ClockLendInstruction::UnstakeSKR (Variant 11):
@@ -1969,7 +1987,7 @@ export async function buildUnstakeSkrTx(
     { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
   ];
   try {
-    const yieldVault = await fetchSkrYieldVault('mainnet-beta', USDC_MAINNET_MINT);
+    const yieldVault = await fetchSkrYieldVault(network, USDC_MAINNET_MINT);
     if (yieldVault?.initialized) {
       keys.push({ pubkey: yieldVault.vaultPDA, isSigner: false, isWritable: true });
       keys.push({ pubkey: getUserYieldPDA(user, new PublicKey(yieldVault.rewardMint)), isSigner: false, isWritable: true });
@@ -2386,6 +2404,35 @@ export async function buildDepositSkrYieldTx(
   return tx;
 }
 
+/** Instruction 18: authority-only recovery of externally-donated vault
+ *  tokens (balance - pending_rewards). */
+export async function buildWithdrawUnusedYieldTx(
+  authority: PublicKey,
+  rewardMint: PublicKey = USDC_MAINNET_MINT
+): Promise<Transaction> {
+  const vaultPDA = getSkrYieldVaultPDA(rewardMint);
+  const vaultTokenPDA = getSkrYieldTokenPDA(rewardMint);
+  const authorityToken = getAssociatedTokenAddress(rewardMint, authority);
+
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }));
+  tx.add(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: authority, isSigner: true, isWritable: true },
+        { pubkey: vaultPDA, isSigner: false, isWritable: true },
+        { pubkey: vaultTokenPDA, isSigner: false, isWritable: true },
+        { pubkey: authorityToken, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([18]),
+    })
+  );
+  return tx;
+}
+
 /** Instruction 17: claim dividends. Stake is read from the SKR escrow token
  *  account (account 7). The reward ATA is created idempotently. */
 export async function buildClaimSkrYieldTx(
@@ -2429,7 +2476,7 @@ export async function buildClaimSkrYieldTx(
     })
   );
 
-  const memoText = `ClockLend: Claim SKR Protocol Fee Yield Dividends`;
+  const memoText = `ClockLend: Claim SKR Protocol Fee Yield Dividends (1h cooldown applies)`;
   tx.add(
     new TransactionInstruction({
       programId: MEMO_PROGRAM_ID,

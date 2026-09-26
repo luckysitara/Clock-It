@@ -241,16 +241,6 @@ pub enum ClockLendInstruction {
     DepositSkrYield {
         amount: u64,
     },
-    /// 18. Withdraw unused yield-vault tokens (authority only).
-    /// Recovers tokens beyond pending_rewards (e.g. stranded dust, phantom
-    /// shares, forfeited harvests). Bounded by vault_token.amount - pending.
-    /// Accounts:
-    /// 0. `[signer]` Vault Authority (must equal vault.authority)
-    /// 1. `[writable]` SkrYieldVault PDA `[b"skr_yield_vault", reward_mint]`
-    /// 2. `[writable]` Vault Token Account `[b"skr_yield_token", reward_mint]`
-    /// 3. `[writable]` Authority Reward Token Account
-    /// 4. `[]` Token Program
-    WithdrawUnusedYield,
     /// 17. Claim SKR Protocol Fee Dividends (1-hour stake cooldown)
     /// The stake is read from the SKR escrow token account (single source of
     /// truth). Payouts are blocked within MIN_STAKE_AGE_SECS of the last
@@ -265,4 +255,15 @@ pub enum ClockLendInstruction {
     /// 6. `[]` System Program
     /// 7. `[]` SKR Escrow Token Account `[b"skr_escrow", user]`
     ClaimSkrYield,
+    /// 18. Withdraw unused yield-vault tokens (authority only).
+    /// Recovers EXTERNALLY-DONATED tokens beyond pending_rewards (program-
+    /// internal flows keep balance == pending, so stranding from forfeits or
+    /// phantom shares is not reachable by this instruction).
+    /// Accounts:
+    /// 0. `[signer]` Vault Authority (must equal vault.authority)
+    /// 1. `[writable]` SkrYieldVault PDA `[b"skr_yield_vault", reward_mint]`
+    /// 2. `[writable]` Vault Token Account `[b"skr_yield_token", reward_mint]`
+    /// 3. `[writable]` Authority Reward Token Account
+    /// 4. `[]` Token Program
+    WithdrawUnusedYield,
 }

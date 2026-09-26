@@ -17,7 +17,6 @@ use solana_program::system_instruction;
 use crate::{
     error::ClockLendError,
     instruction::ClockLendInstruction,
-
     state::{
         AccountKind, AdminConfig, LendingPool, LoanOrder, LoanStatus, OfferStatus, P2POffer, PoolType, PriceFeed, UserProfile,
         SkrYieldVault, UserYieldPosition,
@@ -1468,10 +1467,9 @@ pub fn process_borrow_from_pool(
     // Resolve dynamic collateral price & decimals (mandatory unless pool.is_oracle_free)
     // Pyth (verified pull oracle) takes precedence; the admin feed remains the
     // fallback for pools that don't pass a Pyth account.
-    // Pricing is admin-feed-only (Pyth pull oracles removed in round 11): the
-    // collateral price comes from the pool-scoped feed when the pool opted
-    // into one, otherwise the global feed, otherwise (oracle-free pools) the
-    // hardcoded baselines.
+    // Pricing is admin-feed-only: the collateral price comes from the pool-
+    // scoped feed when the pool opted into one, otherwise the global feed,
+    // otherwise (oracle-free pools) the hardcoded baselines.
     let (collateral_price_micro_usd, collateral_decimals): (u64, u8) = if let Some(oracle_acc) = collateral_oracle_opt {
         if oracle_acc.owner == program_id && !oracle_acc.data_is_empty() {
             let feed = PriceFeed::unpack_from_slice(&oracle_acc.try_borrow_data()?)?;
@@ -1545,7 +1543,7 @@ pub fn process_borrow_from_pool(
             if feed.mint != pool.liquidity_mint && feed.mint != canonical_pool_mint {
                 return Err(ClockLendError::InvalidOracleAccount.into());
             }
-            // Round 11: 600s pricing bound (see collateral feed above).
+            // 600s pricing bound (see collateral feed above).
             if feed.last_updated_at <= 0 || current_time.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS) {
                 return Err(ClockLendError::StaleOraclePrice.into());
             }
@@ -2085,8 +2083,10 @@ pub fn process_create_p2p_offer(
         if feed.decimals == 0 || feed.decimals > 18 {
             return Err(ClockLendError::InvalidOracleAccount.into());
         }
-        // Round 11: 600s pricing bound.
-        if now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS) {
+        // 600s pricing bound.
+        if feed.last_updated_at <= 0
+            || now.saturating_sub(feed.last_updated_at) > feed.max_staleness_seconds.min(ADMIN_FEED_MAX_PRICE_AGE_SECS)
+        {
             return Err(ClockLendError::StaleOraclePrice.into());
         }
         (feed.price_micro_usd, feed.decimals)
@@ -3871,9 +3871,10 @@ pub fn process_deposit_skr_yield(
     Ok(())
 }
 
-/// Tag 18: authority-only recovery of tokens beyond pending_rewards. Covers
-/// stranded dust, forfeited harvests and phantom-share residue — bounded so
-/// user entitlements can never be touched.
+/// Tag 18: authority-only recovery of EXTERNALLY-DONATED tokens beyond
+/// pending_rewards. Program-internal flows keep balance == pending, so
+/// forfeits and phantom-share stranding are NOT reachable here — the bound
+/// guarantees user entitlements can never be touched.
 pub fn process_withdraw_unused_yield(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -3888,7 +3889,7 @@ pub fn process_withdraw_unused_yield(
     assert_signer(authority)?;
     assert_token_program(token_program)?;
 
-    let mut vault = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
+    let vault = SkrYieldVault::unpack_from_slice(&yield_vault_account.try_borrow_data()?)?;
     if !vault.is_initialized {
         return Err(ClockLendError::PoolInactive.into());
     }
