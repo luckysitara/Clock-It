@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy | ClockLend Protocol</title>
+  <meta name="description" content="ClockLend Privacy Policy. Learn how our non-custodial decentralized credit protocol interacts with your wallet, data, and the Solana blockchain.">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="index.html" class="brand">
+        <img src="assets/logo.png" alt="ClockLend Logo">
+        <span>ClockLend</span>
+        <span class="badge-seeker">Seeker</span>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="index.html#how-it-works">How It Works</a></li>
+        <li><a href="index.html#economics">SKR Staking</a></li>
+        <li><a href="terms.html">Terms</a></li>
+        <li><a href="legal.html">Legal</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="index.html" class="btn btn-secondary btn-sm">← Back to Home</a>
+        <a href="index.html#download" class="btn btn-primary btn-sm">Launch App</a>
+      </div>
+
+      <button class="mobile-toggle" id="menuOpen" aria-label="Open Navigation">☰</button>
+    </div>
+  </nav>
+
+  <!-- Mobile Drawer -->
+  <div class="mobile-nav-drawer" id="mobileDrawer">
+    <button class="close-btn" id="menuClose" aria-label="Close Navigation">✕</button>
+    <a href="index.html" class="mobile-link">Home</a>
+    <a href="terms.html" class="mobile-link">Terms & Conditions</a>
+    <a href="privacy.html" class="mobile-link" style="color: var(--accent);">Privacy Policy</a>
+    <a href="legal.html" class="mobile-link">Legal Notice</a>
+  </div>
+
+  <main class="container policy-page">
+    <div class="policy-card">
+      <h1>Privacy Policy</h1>
+      <span class="policy-date">Last Updated: September 26, 2026</span>
+
+      <div class="policy-alert">
+        <p><strong>NON-CUSTODIAL NOTICE:</strong> ClockLend is a decentralized, non-custodial software protocol deployed on the Solana blockchain. We never hold your private keys, custody your funds, or maintain centralized user account databases.</p>
+      </div>
+
+      <div class="policy-body">
+        <p>ClockLend ("we", "us", or "our") is committed to transparent and privacy-preserving data practices. This Privacy Policy details the types of information generated, processed, or collected when you interact with the ClockLend decentralized application, website, smart contracts, and mobile software.</p>
+
+        <h2>1. Nature of Decentralized Technology</h2>
+        <p>ClockLend operates as a client-side interface communicating directly with autonomous smart contracts on the Solana public blockchain. When you execute an action—such as initiating a borrow, funding a P2P offer, or staking SKR—that transaction is broadcast to independent, decentralized Solana validator nodes.</p>
+        <p>Transactions recorded on the Solana blockchain are <strong>permanent, immutable, and publicly visible</strong> to anyone worldwide. ClockLend does not have the technical ability to delete, modify, or conceal on-chain transaction records.</p>
+
+        <h2>2. Information We Do Not Collect</h2>
+        <p>In accordance with the fundamental principles of Web3 and non-custodial financial sovereignty:</p>
+        <ul>
+          <li><strong>Zero Private Key Access:</strong> We never generate, ask for, transmit, or store your private cryptographic keys, seed phrases, or Seed Vault credentials.</li>
+          <li><strong>No KYC or Real-World Identity Data:</strong> We do not collect your real name, physical address, passport, driver's license, phone number, or government identification number.</li>
+          <li><strong>No Credit Card or Banking Credentials:</strong> ClockLend operates entirely in digital assets (SOL, SKR, USDC) via public key addresses.</li>
+        </ul>
+
+        <h2>3. Information We Collect or Process</h2>
+
+        <h3>3.1. Public Ledger Information</h3>
+        <p>When you connect your Solana wallet (such as via the Solana Mobile Wallet Adapter 2.0 or Seed Vault), the protocol reads publicly available ledger information associated with your public key, including:</p>
+        <ul>
+          <li>Your public wallet address (Base58 encoded).</li>
+          <li>Token account balances (SOL, SKR, USDC) necessary to determine loan eligibility.</li>
+          <li>Ownership of Seeker Genesis Tokens (SGT) or other on-chain credentials used for loyalty tier computation.</li>
+          <li>Historical loan and pawn interactions associated with your Program Derived Address (PDA) profile.</li>
+        </ul>
+
+        <h3>3.2. Device & Hardware Integrity Data</h3>
+        <p>To ensure application security, prevent exploit bots, and protect borrower collateral, the ClockLend Android mobile client locally verifies hardware attestation parameters:</p>
+        <ul>
+          <li>Android environment attestation (detecting rooted devices, emulators, or dynamic instrumentation hooks such as Frida and Xposed).</li>
+          <li>Operating system version and Solana Mobile Stack (SMS) feature support.</li>
+          <li>Local hardware Seed Vault capability detection.</li>
+        </ul>
+        <p>This verification occurs entirely on your device and is not exfiltrated to central telemetry servers.</p>
+
+        <h3>3.3. Local Device Storage</h3>
+        <p>The ClockLend application stores non-sensitive operational preferences locally on your device (using secure encrypted local storage), including:</p>
+        <ul>
+          <li>Selected display theme (dark/light) and visual settings.</li>
+          <li>Cached on-chain orders and pool directory metadata to optimize loading speeds.</li>
+          <li>Recently selected RPC endpoint preference.</li>
+        </ul>
+
+        <h2>4. How Information Is Used</h2>
+        <p>Any technical data processed by the protocol interface is utilized solely to:</p>
+        <ul>
+          <li>Construct and format valid Solana blockchain transactions for your cryptographic signature.</li>
+          <li>Calculate exact loan sizing, interest rates, and loan-to-value (LTV) limits using pure fixed-point integer mathematics.</li>
+          <li>Enforce the 24-hour Social Grace Period and liquidation timers accurately against cluster clock slots.</li>
+          <li>Maintain real-time price awareness through decentralized oracle feeds (Jupiter, CoinGecko, and on-chain PDAs).</li>
+        </ul>
+
+        <h2>5. Third-Party RPC Providers & WebSockets</h2>
+        <p>ClockLend utilizes reputable infrastructure providers (such as Helius and public Solana RPC nodes) to transmit transactions and stream real-time account state changes via WebSocket. When your device connects to an RPC node, that node may log your IP address in accordance with standard internet networking protocols. Users who desire additional IP masking are encouraged to utilize a VPN or decentralized privacy network.</p>
+
+        <h2>6. Security of Your Assets</h2>
+        <p>ClockLend is built with defense-in-depth security principles:</p>
+        <ul>
+          <li><strong>Hardware Isolation:</strong> On Solana Seeker devices, private keys remain isolated in the physical Secure Enclave / Seed Vault.</li>
+          <li><strong>Screen Protection:</strong> The mobile app enables Android <code>FLAG_SECURE</code> to prevent background screen recording or screenshot leakage.</li>
+          <li><strong>Audit Trail:</strong> The protocol smart contracts have undergone 10 rigorous security audit rounds with 103 passing deterministic regression tests.</li>
+        </ul>
+
+        <h2>7. Children's Privacy</h2>
+        <p>ClockLend is strictly intended for individuals who are at least 18 years of age (or the age of legal majority in their jurisdiction). We do not knowingly facilitate interactions for minors.</p>
+
+        <h2>8. Updates to this Policy</h2>
+        <p>We may periodically update this Privacy Policy to reflect protocol upgrades or regulatory changes. Any modifications will be posted to this page with an updated "Last Updated" timestamp.</p>
+
+        <h2>9. Contact & Inquiries</h2>
+        <p>For open-source code verification, security vulnerability disclosures, or inquiries, please consult our official repository on <a href="https://github.com/luckysitara/Clock-It" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline;">GitHub</a>.</p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-bottom" style="border-top: none; padding-top: 0;">
+        <div>© 2026 ClockLend Protocol. Released under MIT Open Source License.</div>
+        <div style="display: flex; gap: 20px;">
+          <a href="terms.html">Terms & Conditions</a>
+          <a href="privacy.html">Privacy Policy</a>
+          <a href="legal.html">Legal Notice</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const drawer = document.getElementById('mobileDrawer');
+    const openBtn = document.getElementById('menuOpen');
+    const closeBtn = document.getElementById('menuClose');
+    openBtn.addEventListener('click', () => drawer.classList.add('open'));
+    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+  </script>
+</body>
+</html>

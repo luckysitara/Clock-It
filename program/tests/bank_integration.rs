@@ -10,6 +10,7 @@ use clock_lend::{
     },
 };
 use solana_program::{
+    clock::Clock,
     instruction::{AccountMeta, Instruction, InstructionError},
     program_pack::Pack,
     pubkey::Pubkey,
@@ -2191,7 +2192,8 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         },
     );
 
-    let (banks_client, payer, recent_blockhash) = program_test.start().await;
+    let mut ctx = program_test.start_with_context().await;
+    let payer = ctx.payer.insecure_clone();
 
     // 1. Borrower borrows from pool using SOL collateral and provides user profile for 50% discount
     let borrow_ix = Instruction {
@@ -2218,18 +2220,19 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         }).unwrap(),
     };
 
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
     let mut tx = Transaction::new_with_payer(&[borrow_ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &borrower], recent_blockhash);
-    banks_client.process_transaction(tx).await.unwrap();
+    tx.sign(&[&payer, &borrower], blockhash);
+    ctx.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify loan was created with 1,000 SKR locked bond
-    let loan_acc = banks_client.get_account(loan_pda).await.unwrap().unwrap();
+    let loan_acc = ctx.banks_client.get_account(loan_pda).await.unwrap().unwrap();
     let loan = LoanOrder::unpack_from_slice(&loan_acc.data).unwrap();
     assert_eq!(loan.locked_skr, 1_000_000_000, "Loan order must have 1000 SKR locked");
     assert!(loan.is_active);
 
     // Verify profile has locked_skr == 1_000_000_000
-    let profile_acc = banks_client.get_account(profile_pda).await.unwrap().unwrap();
+    let profile_acc = ctx.banks_client.get_account(profile_pda).await.unwrap().unwrap();
     let prof = UserProfile::unpack_from_slice(&profile_acc.data).unwrap();
     assert_eq!(prof.locked_skr, 1_000_000_000, "User profile locked_skr must be 1000 SKR");
 
@@ -2248,10 +2251,12 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         }).unwrap(),
     };
 
-    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+    ctx.warp_to_slot(clock.slot + 1).expect("warp");
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
     let mut tx = Transaction::new_with_payer(&[unstake_ix.clone()], Some(&payer.pubkey()));
     tx.sign(&[&payer, &borrower], blockhash);
-    let res = banks_client.process_transaction(tx).await;
+    let res = ctx.banks_client.process_transaction(tx).await;
     expect_custom_error(&res, 30, "Borrower MUST NOT be able to unstake SKR while loan is active!");
     match res.unwrap_err() {
         BanksClientError::TransactionError(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
@@ -2274,10 +2279,12 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
             amount: 1,
         }).unwrap(),
     };
-    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+    ctx.warp_to_slot(clock.slot + 1).expect("warp");
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
     let mut tx = Transaction::new_with_payer(&[unstake_1_ix], Some(&payer.pubkey()));
     tx.sign(&[&payer, &borrower], blockhash);
-    let res = banks_client.process_transaction(tx).await;
+    let res = ctx.banks_client.process_transaction(tx).await;
     expect_custom_error(&res, 30, "unpinned assertion");
 
     // 3. Borrower repays loan -> releases locked SKR bond
@@ -2302,25 +2309,29 @@ async fn test_bank_skr_bond_cannot_be_withdrawn_while_loan_is_active() {
         }).unwrap(),
     };
 
-    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+    ctx.warp_to_slot(clock.slot + 1).expect("warp");
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
     let mut tx = Transaction::new_with_payer(&[repay_ix], Some(&payer.pubkey()));
     tx.sign(&[&payer, &borrower], blockhash);
-    banks_client.process_transaction(tx).await.unwrap();
+    ctx.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify profile locked_skr is released to 0
-    let profile_acc = banks_client.get_account(profile_pda).await.unwrap().unwrap();
+    let profile_acc = ctx.banks_client.get_account(profile_pda).await.unwrap().unwrap();
     let prof = UserProfile::unpack_from_slice(&profile_acc.data).unwrap();
     assert_eq!(prof.locked_skr, 0, "User profile locked_skr must be 0 after repayment");
 
     // 4. Now unstake succeeds!
-    let blockhash = banks_client.get_latest_blockhash().await.unwrap();
+    let clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+    ctx.warp_to_slot(clock.slot + 1).expect("warp");
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
     let mut tx = Transaction::new_with_payer(&[unstake_ix], Some(&payer.pubkey()));
     tx.sign(&[&payer, &borrower], blockhash);
-    let res = banks_client.process_transaction(tx).await;
+    let res = ctx.banks_client.process_transaction(tx).await;
     assert!(res.is_ok(), "Unstake must succeed once loan is repaid! Result: {:?}", res);
 
     // Verify tokens were transferred to borrower wallet
-    let borrower_skr_acc = banks_client.get_account(borrower_skr.pubkey()).await.unwrap().unwrap();
+    let borrower_skr_acc = ctx.banks_client.get_account(borrower_skr.pubkey()).await.unwrap().unwrap();
     let tok = spl_token::state::Account::unpack(&borrower_skr_acc.data).unwrap();
     assert_eq!(tok.amount, 1_000_000_000, "Borrower must have received unstaked tokens");
 }

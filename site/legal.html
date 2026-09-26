@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Legal & Compliance | ClockLend Protocol</title>
+  <meta name="description" content="ClockLend Legal, Compliance, and Risk Disclosure statement. Review regulatory disclaimers, smart contract risks, and financial disclosures.">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="index.html" class="brand">
+        <img src="assets/logo.png" alt="ClockLend Logo">
+        <span>ClockLend</span>
+        <span class="badge-seeker">Seeker</span>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="index.html#how-it-works">How It Works</a></li>
+        <li><a href="index.html#economics">SKR Staking</a></li>
+        <li><a href="terms.html">Terms</a></li>
+        <li><a href="privacy.html">Privacy</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="index.html" class="btn btn-secondary btn-sm">← Back to Home</a>
+        <a href="index.html#download" class="btn btn-primary btn-sm">Launch App</a>
+      </div>
+
+      <button class="mobile-toggle" id="menuOpen" aria-label="Open Navigation">☰</button>
+    </div>
+  </nav>
+
+  <!-- Mobile Drawer -->
+  <div class="mobile-nav-drawer" id="mobileDrawer">
+    <button class="close-btn" id="menuClose" aria-label="Close Navigation">✕</button>
+    <a href="index.html" class="mobile-link">Home</a>
+    <a href="terms.html" class="mobile-link">Terms & Conditions</a>
+    <a href="privacy.html" class="mobile-link">Privacy Policy</a>
+    <a href="legal.html" class="mobile-link" style="color: var(--accent);">Legal Notice</a>
+  </div>
+
+  <main class="container policy-page">
+    <div class="policy-card">
+      <h1>Legal & Compliance</h1>
+      <span class="policy-date">Last Updated: September 26, 2026</span>
+
+      <div class="policy-alert" style="background: rgba(20, 241, 149, 0.08); border-color: rgba(20, 241, 149, 0.3);">
+        <p><strong style="color: #6ee7b7;">REGULATORY NOTICE:</strong> ClockLend is a decentralized, open-source software experiment. ClockLend is not a registered financial intermediary, investment advisor, bank, broker, or securities exchange. Engaging with decentralized credit protocols involves substantial financial and technical risks.</p>
+      </div>
+
+      <div class="policy-body">
+        <h2>1. Regulatory & Operational Status</h2>
+        <p>ClockLend operates strictly as open-source code deployed to the Solana blockchain. The protocol is controlled exclusively by deterministic mathematical rules encoded within smart contract bytecodes (Program ID: <code>HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3</code>).</p>
+        <ul>
+          <li><strong>No Custodial Control:</strong> ClockLend contributors and maintainers do not hold, control, or transmit digital assets on your behalf. All assets reside in Program Derived Addresses (PDAs) with cryptographic seed derivations.</li>
+          <li><strong>No Banking or Broker Services:</strong> The protocol does not offer banking deposits, custodial savings accounts, or insurance coverage (such as FDIC or SIPC insurance). Digital asset lending and borrowing is conducted peer-to-peer or pool-to-peer.</li>
+          <li><strong>No Security Offerings:</strong> Nothing on this website or in the application constitutes an offer to sell, a solicitation to buy, or a recommendation for any security, financial instrument, or investment product.</li>
+        </ul>
+
+        <h2>2. No Financial, Investment, or Legal Advice</h2>
+        <p>The information provided on this website, within the documentation, and through application interfaces is provided solely for informational and educational purposes. It does not constitute investment advice, financial advice, trading advice, or legal counsel.</p>
+        <p>You are solely responsible for conducting your own independent research and assessing the suitability of any protocol action before committing digital assets.</p>
+
+        <h2>3. Comprehensive Risk Disclosures</h2>
+
+        <h3>3.1. Smart Contract & Execution Risks</h3>
+        <p>While the ClockLend smart contracts have undergone 10 comprehensive re-audits with 103 passing deterministic regression tests, all software carries inherent risks of unexpected edge cases, compiler errors, or unforeseen protocol bugs. You acknowledge that you interact with the software at your own risk.</p>
+
+        <h3>3.2. Blockchain Network & Cluster Halts</h3>
+        <p>ClockLend depends on the continuous operational performance of the Solana blockchain network. Network congestion, consensus failures, validator bifurcation, or cluster downtime may delay transaction processing, prevent loan repayments, or impact the execution of liquidation checks. ClockLend is not liable for losses caused by underlying blockchain disruptions.</p>
+
+        <h3>3.3. Price Oracle & Volatility Risk</h3>
+        <p>ClockLend utilizes on-chain price feeds cranked from decentralized aggregators (Jupiter and CoinGecko). Although the protocol enforces a strict <strong>600-second fail-closed staleness bound</strong> to prevent trading on obsolete prices, extreme market flash-crashes, oracle latency, or liquidity evaporation can cause rapid changes in your Loan-to-Value (LTV) ratio, potentially resulting in collateral liquidation.</p>
+
+        <h3>3.4. Collateral Liquidation & Slashing Risk</h3>
+        <p>Borrowers who fail to repay their loans prior to the expiration of the loan duration plus the <strong>24-Hour Social Grace Period</strong> are subject to complete collateral forfeiture to the lending desk or P2P funder. Additionally, borrowers utilizing reputation staking may suffer an automated <strong>20% slash</strong> of their staked SKR reputation bond.</p>
+
+        <h2>4. Sanctions & Anti-Money Laundering (AML) Compliance</h2>
+        <p>The ClockLend protocol is committed to legitimate, open, and lawful financial participation. Users are strictly prohibited from utilizing the protocol if they are:</p>
+        <ul>
+          <li>A person, entity, or organization subject to economic or trade sanctions administered by the U.S. Department of the Treasury's Office of Foreign Assets Control (OFAC), the United Nations Security Council, or the European Union.</li>
+          <li>A citizen, national, or resident of Cuba, Iran, North Korea, Syria, or the Crimea, Donetsk, or Luhansk regions.</li>
+          <li>Attempting to route funds derived from illegal narcotics, illicit arms trafficking, ransomware extortion, cyber warfare, or terrorist financing.</li>
+        </ul>
+
+        <h2>5. Open Source Licensing & DMCA Takedown Notice</h2>
+        <p>The ClockLend core program and smart contracts are licensed under the <strong>MIT License</strong>:</p>
+        <div style="background: rgba(0, 0, 0, 0.4); padding: 18px; border-radius: 8px; font-family: monospace; font-size: 0.85rem; margin-bottom: 20px;">
+          Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies...
+        </div>
+        <p>If you believe that any material available through our web interfaces infringes upon your copyright, please file a DMCA notice via our official open-source GitHub repository detailing the copyrighted work, the infringing URL or content, and your authorized signature.</p>
+
+        <h2>6. Trademarks & Brand Usage</h2>
+        <p>The "ClockLend" name, wordmark, logo, and visual design assets are the exclusive intellectual property of the ClockLend open-source project. Community members may use the brand assets solely to refer accurately to the protocol without implying official partnership or sponsorship.</p>
+
+        <h2>7. Contact & Security Disclosures</h2>
+        <p>To report potential security vulnerabilities or review audit documentation, please visit our repository: <a href="https://github.com/luckysitara/Clock-It" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline;">ClockLend GitHub</a>.</p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-bottom" style="border-top: none; padding-top: 0;">
+        <div>© 2026 ClockLend Protocol. Released under MIT Open Source License.</div>
+        <div style="display: flex; gap: 20px;">
+          <a href="terms.html">Terms & Conditions</a>
+          <a href="privacy.html">Privacy Policy</a>
+          <a href="legal.html">Legal Notice</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const drawer = document.getElementById('mobileDrawer');
+    const openBtn = document.getElementById('menuOpen');
+    const closeBtn = document.getElementById('menuClose');
+    openBtn.addEventListener('click', () => drawer.classList.add('open'));
+    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+  </script>
+</body>
+</html>

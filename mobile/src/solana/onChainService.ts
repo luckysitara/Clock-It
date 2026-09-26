@@ -1004,7 +1004,7 @@ export function initOracleWebSocketListener(network: SolanaNetwork = 'mainnet-be
  * 1. Default: ClockLend on-chain Oracle PDAs via Helius RPC / LaserStream WSS
  * 2. Fallback 1: Jupiter Price API (v3/v2)
  * 3. Fallback 2: CoinGecko API
- * 4. Fallback 3: Pyth canonical account / baseline cache
+ * 4. Fallback 3: baseline cache (Pyth removed in round 11)
  */
 export async function fetchLivePrices(
   network: SolanaNetwork = 'mainnet-beta'

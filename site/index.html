@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClockLend — Next-Gen P2P Credit Protocol on Solana Seeker</title>
+  <meta name="description" content="ClockLend is the Bybit P2P for micro-lending and social pawns on Solana Seeker. Native Seed Vault security, 1-tap express borrowing, and SKR dividend yields.">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="index.html" class="brand">
+        <img src="assets/logo.png" alt="ClockLend Logo">
+        <span>ClockLend</span>
+        <span class="badge-seeker">Seeker</span>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#how-it-works">How It Works</a></li>
+        <li><a href="#economics">SKR Staking</a></li>
+        <li><a href="#security">Security</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="https://github.com/luckysitara/Clock-It" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">GitHub</a>
+        <a href="#download" class="btn btn-primary btn-sm">Launch App</a>
+      </div>
+
+      <button class="mobile-toggle" id="menuOpen" aria-label="Open Navigation">☰</button>
+    </div>
+  </nav>
+
+  <!-- Mobile Drawer -->
+  <div class="mobile-nav-drawer" id="mobileDrawer">
+    <button class="close-btn" id="menuClose" aria-label="Close Navigation">✕</button>
+    <a href="#features" class="mobile-link">Features</a>
+    <a href="#how-it-works" class="mobile-link">How It Works</a>
+    <a href="#economics" class="mobile-link">SKR Staking</a>
+    <a href="#security" class="mobile-link">Security</a>
+    <a href="#faq" class="mobile-link">FAQ</a>
+    <a href="terms.html" class="mobile-link">Terms & Conditions</a>
+    <a href="privacy.html" class="mobile-link">Privacy Policy</a>
+    <a href="legal.html" class="mobile-link">Legal Notice</a>
+    <a href="#download" class="btn btn-primary" style="margin-top: 16px;">Download APK</a>
+  </div>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="container">
+      <div class="eyebrow">
+        <span>⚡</span> Built for Solana Seeker • CLOCK IN Hackathon
+      </div>
+      
+      <h1>
+        Credit for the Mobile Era.<br>
+        <span class="gradient-text">Instant. Non-Custodial. Pure Solana.</span>
+      </h1>
+      
+      <p class="hero-sub">
+        The Bybit P2P for micro-credit on Solana Seeker. Borrow instant USDC against SOL or SKR, deploy customized liquidity desks, and participate in peer-to-peer pawn collateral backed by hardware Seed Vault attestation.
+      </p>
+
+      <div class="hero-actions">
+        <a href="#download" class="btn btn-accent">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          Get ClockLend APK
+        </a>
+        <a href="https://explorer.solana.com/address/HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3?cluster=devnet" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+          Verify Smart Contract
+        </a>
+      </div>
+
+      <!-- Metrics Grid -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-value">100%</div>
+          <div class="metric-label">On-Chain Rust SBF</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">0%</div>
+          <div class="metric-label">Float Math Errors</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">50%</div>
+          <div class="metric-label">Fee Dividends to SKR</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">&lt; 1s</div>
+          <div class="metric-label">Atomic Settlement</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Core Features -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Core Capabilities</span>
+        <h2 class="section-title">Engineered from Hardware to Ledger</h2>
+        <p class="section-desc">ClockLend eliminates the friction of traditional DeFi lending by blending algorithmic matching with human-driven liquidity desks.</p>
+      </div>
+
+      <div class="features-grid">
+        <!-- Feature 1 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">⚡</div>
+          <h3>1-Tap P2P Express Match</h3>
+          <p>Instant algorithmic routing selects the lowest-APR on-chain pool with sufficient liquidity. No orderbook confusion or waiting—just instant USDC disbursed to your wallet.</p>
+        </div>
+
+        <!-- Feature 2 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">🏦</div>
+          <h3>Merchant Desks & Circle Pools</h3>
+          <p>Deploy solo liquidity desks or community circle pools with custom APR, minimum/maximum terms, and allowlists. Earn protocol interest directly to your wallet non-custodially.</p>
+        </div>
+
+        <!-- Feature 3 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">🤝</div>
+          <h3>1-on-1 Social Pawn Deck</h3>
+          <p>Peer-to-peer collateralized micro-financing. Lock SOL or SKR collateral at your own agreed price and duration, cutting out institutional spread entirely.</p>
+        </div>
+
+        <!-- Feature 4 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">🛡️</div>
+          <h3>24h Social Grace Period</h3>
+          <p>Protection against ruthless liquidation bots. If repayment slips past maturity, a 24-hour social grace window allows peer repayment before collateral can be claimed.</p>
+        </div>
+
+        <!-- Feature 5 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">📱</div>
+          <h3>Seeker Hardware Enclave</h3>
+          <p>Native integration with the Solana Seeker Seed Vault, MWA 2.0 biometric signing, screen-shielding via Android FLAG_SECURE, and Hermes bytecode obfuscation.</p>
+        </div>
+
+        <!-- Feature 6 -->
+        <div class="feature-card">
+          <div class="feature-icon-wrapper">💎</div>
+          <h3>SKR Protocol Yield Vault</h3>
+          <p>50% of every loan origination fee is automatically routed into the SKR Yield Vault. Stakers claim real USDC dividends with an escrow-bounded cooldown mechanism.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section class="section" id="how-it-works" style="background: rgba(10, 13, 22, 0.4);">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">User Journey</span>
+        <h2 class="section-title">Borrow in Under 10 Seconds</h2>
+        <p class="section-desc">Experience decentralized credit as simple as sending a text message.</p>
+      </div>
+
+      <div class="steps-grid">
+        <div class="step-card">
+          <div class="step-num">01</div>
+          <h4>Connect Seeker</h4>
+          <p>Authorize through Mobile Wallet Adapter 2.0. Your keys stay permanently sealed within your Seeker Seed Vault enclave.</p>
+        </div>
+        <div class="step-card">
+          <div class="step-num">02</div>
+          <h4>Select Collateral</h4>
+          <p>Choose SOL or SKR. Live feeds from Jupiter and CoinGecko calculate real-time borrowing power with 0% float variance.</p>
+        </div>
+        <div class="step-card">
+          <div class="step-num">03</div>
+          <h4>Instant Settlement</h4>
+          <p>Sign the atomic transaction. Escrow PDA locks collateral and immediately releases borrowed USDC into your wallet.</p>
+        </div>
+        <div class="step-card">
+          <div class="step-num">04</div>
+          <h4>Repay & Unlock</h4>
+          <p>Repay anytime during the term. Collateral is unlocked instantly, and your on-chain reputation score increases.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Economics & SKR Staking -->
+  <section class="section" id="economics">
+    <div class="container">
+      <div class="economics-box">
+        <div class="economics-content">
+          <span class="section-tag">Token Utility & Staking</span>
+          <h3>SKR Reputation Bond & Real Yield Dividends</h3>
+          <p>SKR is not a speculative vanity token—it is the foundational reputation and governance currency of ClockLend. Stake SKR to unlock institutional perks and earn protocol revenue.</p>
+          
+          <ul class="perks-list">
+            <li>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span><strong>90% Maximum LTV:</strong> Elevate your borrowing power from the standard 65% up to 90% across all desks.</span>
+            </li>
+            <li>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span><strong>50% APR Discounts:</strong> Slashed borrowing interest rates based on your verified on-chain tier.</span>
+            </li>
+            <li>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span><strong>50% Protocol Fee Split:</strong> Origination fees stream directly to the SKR Yield Vault as USDC dividends.</span>
+            </li>
+            <li>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span><strong>Verified Merchant Status:</strong> Back your liquidity desk with a slashable reputation bond for top algorithmic routing.</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="vault-preview">
+          <h4 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 20px; color: #fff;">On-Chain Vault Dynamics</h4>
+          <div class="vault-stat-row">
+            <span style="color: var(--text-muted);">Reward Distribution Token</span>
+            <span style="font-weight: 700; color: #fff;">USDC (SPL Native)</span>
+          </div>
+          <div class="vault-stat-row">
+            <span style="color: var(--text-muted);">Origination Fee Share</span>
+            <span style="font-weight: 700; color: var(--accent);">50% Automatic Split</span>
+          </div>
+          <div class="vault-stat-row">
+            <span style="color: var(--text-muted);">Claim Cooldown</span>
+            <span style="font-weight: 700; color: #fff;">1 Hour Anti-Flash Harvest</span>
+          </div>
+          <div class="vault-stat-row">
+            <span style="color: var(--text-muted);">Oracle Price Staleness Bound</span>
+            <span style="font-weight: 700; color: var(--cyan);">600s Fail-Closed</span>
+          </div>
+          <div class="vault-stat-row">
+            <span style="color: var(--text-muted);">Slashing Ratio on Default</span>
+            <span style="font-weight: 700; color: #f43f5e;">20% Escrow Penalty</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Security & Architecture -->
+  <section class="section" id="security" style="background: rgba(10, 13, 22, 0.4);">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Security & Audits</span>
+        <h2 class="section-title">Institutional Rigor by Design</h2>
+        <p class="section-desc">ClockLend was audited across 10 distinct re-audit passes with 103 deterministic on-chain test assertions.</p>
+      </div>
+
+      <div class="security-matrix">
+        <div class="security-card">
+          <h4>
+            <span style="color: var(--accent);">✓</span>
+            Pure Integer Fixed-Point Arithmetic
+          </h4>
+          <p>Zero floating-point math in the Solana SBF program. Prevents rounding exploits, IEEE-754 precision drift, and arithmetic underflow vulnerabilities.</p>
+        </div>
+
+        <div class="security-card">
+          <h4>
+            <span style="color: var(--accent);">✓</span>
+            Isolated PDA Escrow Vaults
+          </h4>
+          <p>Funds never pool into single omnibus accounts. Every loan and pawn offer derives unique cryptographic Program Derived Addresses with front-run defense.</p>
+        </div>
+
+        <div class="security-card">
+          <h4>
+            <span style="color: var(--accent);">✓</span>
+            Android Anti-Tamper Hardening
+          </h4>
+          <p>App refuses execution on rooted environments, Android emulators, or Frida/Xposed hooks. Protected by Android FLAG_SECURE against screen recording.</p>
+        </div>
+
+        <div class="security-card">
+          <h4>
+            <span style="color: var(--accent);">✓</span>
+            Fail-Closed Oracle Staleness Guard
+          </h4>
+          <p>Feeds older than 600 seconds automatically halt new borrow transactions, protecting both liquidity providers and borrowers from flash market dislocations.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ Section -->
+  <section class="section" id="faq">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Questions & Answers</span>
+        <h2 class="section-title">Frequently Asked Questions</h2>
+      </div>
+
+      <div class="faq-list">
+        <div class="faq-item">
+          <button class="faq-question">
+            <span>Do I need a Solana Seeker device to use ClockLend?</span>
+            <span class="faq-icon">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>While ClockLend is specially optimized for the Solana Seeker (leveraging Seed Vault hardware signing, SGT loyalty badges, and FLAG_SECURE privacy), any compatible Solana mobile wallet supporting the Mobile Wallet Adapter (MWA) standard can connect and interact with the protocol.</p>
+          </div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question">
+            <span>What happens if my loan expires past its due date?</span>
+            <span class="faq-icon">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>Unlike traditional DeFi platforms where liquidation bots immediately dump your collateral at the first tick, ClockLend provides an automated 24-hour Social Grace Period. During this window, you can repay the loan plus interest to rescue your collateral without penalty.</p>
+          </div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question">
+            <span>How does the SKR Staking yield work?</span>
+            <span class="faq-icon">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>Every time a borrower takes a loan through ClockLend, an origination fee is charged. Exactly 50% of this fee is instantly routed into the SkrYieldVault token account. Stakers earn proportional dividends in USDC based on their staked SKR shares, subject to a 1-hour anti-flash-loan cooldown.</p>
+          </div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question">
+            <span>Is ClockLend custodial?</span>
+            <span class="faq-icon">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>No. ClockLend is 100% non-custodial. No team member, admin, or third party has access to your deposited collateral or liquidity. All assets are held strictly by deterministic Program Derived Addresses governed exclusively by immutable on-chain smart contract code.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Banner -->
+  <section class="container" id="download">
+    <div class="cta-banner">
+      <h2>Ready to Experience Mobile-First Credit?</h2>
+      <p style="max-width: 600px; margin: 0 auto 32px; color: var(--text-muted);">
+        Deploy a desk, lock an instant micro-loan, or stake SKR to begin earning real on-chain fee dividends today.
+      </p>
+      <div style="display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
+        <a href="https://github.com/luckysitara/Clock-It/releases" target="_blank" rel="noopener noreferrer" class="btn btn-accent">
+          Download Android APK
+        </a>
+        <a href="https://github.com/luckysitara/Clock-It" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
+          Explore GitHub Repository
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <div class="brand">
+            <img src="assets/logo.png" alt="ClockLend">
+            <span>ClockLend</span>
+          </div>
+          <p>
+            The decentralized micro-credit and peer-to-peer social pawn protocol built natively for the Solana Seeker ecosystem.
+          </p>
+        </div>
+
+        <div class="footer-col">
+          <h5>Protocol</h5>
+          <ul>
+            <li><a href="#features">P2P Express Match</a></li>
+            <li><a href="#features">Merchant Desks</a></li>
+            <li><a href="#features">Social Pawn Deck</a></li>
+            <li><a href="#economics">SKR Yield Vault</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col">
+          <h5>Resources</h5>
+          <ul>
+            <li><a href="https://github.com/luckysitara/Clock-It" target="_blank" rel="noopener noreferrer">GitHub Repo</a></li>
+            <li><a href="https://explorer.solana.com/address/HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3?cluster=devnet" target="_blank" rel="noopener noreferrer">Solana Explorer</a></li>
+            <li><a href="https://solscan.io/account/HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3" target="_blank" rel="noopener noreferrer">Solscan Verifier</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col">
+          <h5>Legal & Policy</h5>
+          <ul>
+            <li><a href="terms.html">Terms & Conditions</a></li>
+            <li><a href="privacy.html">Privacy Policy</a></li>
+            <li><a href="legal.html">Legal & Compliance</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <div>© 2026 ClockLend Protocol. Released under MIT Open Source License.</div>
+        <div style="display: flex; gap: 24px;">
+          <span>Program ID: HAjGxuih...jsH3</span>
+          <span>Solana Seeker Native</span>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script>
+    // FAQ Accordion
+    document.querySelectorAll('.faq-question').forEach(button => {
+      button.addEventListener('click', () => {
+        const item = button.parentElement;
+        const isActive = item.classList.contains('active');
+        document.querySelectorAll('.faq-item').forEach(i => i.classList.remove('active'));
+        if (!isActive) item.classList.add('active');
+      });
+    });
+
+    // Mobile Drawer
+    const drawer = document.getElementById('mobileDrawer');
+    const openBtn = document.getElementById('menuOpen');
+    const closeBtn = document.getElementById('menuClose');
+    
+    openBtn.addEventListener('click', () => drawer.classList.add('open'));
+    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+    
+    document.querySelectorAll('.mobile-link').forEach(link => {
+      link.addEventListener('click', () => drawer.classList.remove('open'));
+    });
+  </script>
+</body>
+</html>

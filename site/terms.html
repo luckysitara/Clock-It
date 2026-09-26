@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terms & Conditions | ClockLend Protocol</title>
+  <meta name="description" content="ClockLend Protocol Terms and Conditions. Please review the legal agreement governing access to and use of our non-custodial smart contracts and application.">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="index.html" class="brand">
+        <img src="assets/logo.png" alt="ClockLend Logo">
+        <span>ClockLend</span>
+        <span class="badge-seeker">Seeker</span>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="index.html#how-it-works">How It Works</a></li>
+        <li><a href="index.html#economics">SKR Staking</a></li>
+        <li><a href="privacy.html">Privacy</a></li>
+        <li><a href="legal.html">Legal</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="index.html" class="btn btn-secondary btn-sm">← Back to Home</a>
+        <a href="index.html#download" class="btn btn-primary btn-sm">Launch App</a>
+      </div>
+
+      <button class="mobile-toggle" id="menuOpen" aria-label="Open Navigation">☰</button>
+    </div>
+  </nav>
+
+  <!-- Mobile Drawer -->
+  <div class="mobile-nav-drawer" id="mobileDrawer">
+    <button class="close-btn" id="menuClose" aria-label="Close Navigation">✕</button>
+    <a href="index.html" class="mobile-link">Home</a>
+    <a href="terms.html" class="mobile-link" style="color: var(--accent);">Terms & Conditions</a>
+    <a href="privacy.html" class="mobile-link">Privacy Policy</a>
+    <a href="legal.html" class="mobile-link">Legal Notice</a>
+  </div>
+
+  <main class="container policy-page">
+    <div class="policy-card">
+      <h1>Terms & Conditions</h1>
+      <span class="policy-date">Last Updated: September 26, 2026</span>
+
+      <div class="policy-alert" style="background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.3);">
+        <p><strong style="color: #fca5a5;">IMPORTANT LEGAL NOTICE:</strong> PLEASE READ THESE TERMS & CONDITIONS CAREFULLY. THEY CONSTITUTE A BINDING LEGAL AGREEMENT GOVERNING YOUR INTERACTION WITH THE CLOCKLEND SOFTWARE, PROTOCOL, SMART CONTRACTS, AND DIGITAL INTERFACES. BY ACCESSING THE PROTOCOL, YOU EXPRESSLY ACCEPT AND AGREE TO ALL PROVISIONS HEREIN.</p>
+      </div>
+
+      <div class="policy-body">
+        <h2>1. Acceptance of Terms</h2>
+        <p>By connecting a Solana digital asset wallet, interacting with the ClockLend smart contracts (Program ID: <code>HAjGxuih14imCMaWvCnJQ3nSdWmS8PQKzp74gyAgjsH3</code>), downloading the ClockLend application, or browsing this website, you ("User", "you", or "your") agree to comply with and be bound by these Terms & Conditions ("Terms"). If you do not agree to these Terms in their entirety, you must immediately disconnect your wallet and cease using the protocol.</p>
+
+        <h2>2. Description of the Protocol</h2>
+        <p>ClockLend is a suite of autonomous, open-source software programs running on the Solana blockchain that enables peer-to-peer micro-lending, decentralized liquidity pools, collateralized pawn contracts, and reputation token staking. ClockLend is not a bank, broker-dealer, lender, financial institution, custodian, or money transmitter.</p>
+        <p>All loan origination, collateral escrowing, fee routing, and liquidation logic execute automatically and deterministically through autonomous Program Derived Addresses (PDAs) on the Solana ledger without human intermediation.</p>
+
+        <h2>3. Eligibility and Prohibited Jurisdictions</h2>
+        <p>To access or interact with ClockLend, you represent and warrant that:</p>
+        <ul>
+          <li>You are at least 18 years of age or the age of legal majority in your jurisdiction.</li>
+          <li>You possess the legal capacity to enter into a binding agreement.</li>
+          <li>You are not a citizen, resident, or entity organized in any country or territory subject to comprehensive sanctions by the United States Office of Foreign Assets Control (OFAC), the United Nations Security Council, or the European Union (including, but not limited to, Cuba, Iran, North Korea, Syria, or the Crimea, Donetsk, and Luhansk regions of Ukraine).</li>
+          <li>You are not designated on any government sanctions list (including the OFAC Specially Designated Nationals and Blocked Persons List).</li>
+          <li>Your use of ClockLend does not violate any local laws, financial regulations, or securities restrictions in your jurisdiction.</li>
+        </ul>
+
+        <h2>4. Non-Custodial Architecture & User Responsibility</h2>
+        <p>ClockLend is strictly <strong>non-custodial</strong>. You maintain exclusive control of your cryptographic keys, assets, and wallet signatures at all times.</p>
+        <ul>
+          <li><strong>Seed Phrase Security:</strong> You are solely responsible for securing your wallet credentials and private keys. ClockLend developers and contributors never have access to your private keys and cannot recover lost funds under any circumstances.</li>
+          <li><strong>Transaction Irreversibility:</strong> Transactions on the Solana blockchain are irrevocable once confirmed. You are solely responsible for verifying transaction parameters, amounts, interest rates, and durations before signing via your wallet or Seed Vault.</li>
+        </ul>
+
+        <h2>5. Smart Contract Mechanics & Liquidation Terms</h2>
+
+        <h3>5.1. Collateral Escrow & Sizing</h3>
+        <p>Borrowers must deposit collateral (SOL or SKR) into a cryptographic escrow PDA to secure a loan. Maximum Loan-to-Value (LTV) limits are enforced deterministically on-chain based on real-time oracle price feeds (subject to a strict 600-second staleness bound). Staking SKR reputation bonds unlocks higher LTV tiers up to 90%.</p>
+
+        <h3>5.2. 24-Hour Social Grace Period & Default</h3>
+        <p>If a loan is not repaid by its scheduled maturity timestamp:</p>
+        <ul>
+          <li>The loan enters an automated <strong>24-Hour Social Grace Period</strong>. During this 24-hour window, the borrower retains the right to repay the full principal plus accrued interest to release their collateral.</li>
+          <li>If the borrower fails to repay prior to the expiration of the Social Grace Period, the loan transitions to Default. The pool authority or P2P funder may execute <code>ClaimDefault</code> to liquidate and claim the escrowed collateral.</li>
+          <li>For defaulted reputation borrowers, up to 20% of their staked SKR reputation bond is automatically slashed by the smart contract to compensate for default risk.</li>
+        </ul>
+
+        <h2>6. Protocol Fees & Dividend Distribution</h2>
+        <p>ClockLend applies transparent, code-enforced origination fees upon loan disbursement:</p>
+        <ul>
+          <li><strong>50% Protocol Treasury:</strong> Half of the fee is transferred to the decentralized protocol treasury PDA for ongoing maintenance and reserves.</li>
+          <li><strong>50% SKR Yield Vault:</strong> Exactly half of the fee is automatically streamed into the on-chain SkrYieldVault token account, distributed as USDC dividends to eligible SKR stakers.</li>
+          <li>A 1-hour anti-flash-loan cooldown applies to yield claims following any stake modification or reward disbursement.</li>
+        </ul>
+        <p>You are solely responsible for determining and satisfying any tax obligations arising from your protocol yield, lending profits, or borrowing activities.</p>
+
+        <h2>7. Prohibited Activities</h2>
+        <p>You agree not to engage in or attempt to engage in any of the following activities:</p>
+        <ul>
+          <li>Exploiting software vulnerabilities, smart contract bugs, or economic attack vectors to unlawfully extract protocol liquidity.</li>
+          <li>Employing bots, scripts, or automated tools to flood, spam, or denial-of-service the ClockLend RPC gateway.</li>
+          <li>Using the protocol for money laundering, terrorist financing, illicit arms trafficking, sanctions evasion, or fraudulent schemes.</li>
+          <li>Manipulating on-chain or off-chain price oracle feeds.</li>
+          <li>Reverse-engineering, modifying, or decompiling the application binary in violation of our intellectual property rights.</li>
+        </ul>
+
+        <h2>8. Intellectual Property & Open Source Licensing</h2>
+        <p>The ClockLend on-chain smart contract software is published under the open-source <strong>MIT License</strong>. However, the ClockLend name, brand mark, visual design assets, application interfaces, and documentation are proprietary assets of the ClockLend project contributors and may not be reproduced in a manner that implies official endorsement without prior written authorization.</p>
+
+        <h2>9. Disclaimer of Warranties</h2>
+        <p>CLOCKLEND IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, OR FREEDOM FROM BUGS, MALWARE, OR SMART CONTRACT VULNERABILITIES. WE DO NOT WARRANT THAT ACCESS TO THE PROTOCOL WILL BE CONTINUOUS, UNINTERRUPTED, OR FREE FROM PROTOCOL STALENESS OR CHAIN FORKS.</p>
+
+        <h2>10. Limitation of Liability</h2>
+        <p>TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL CLOCKLEND, ITS CORE CONTRIBUTORS, DEVELOPERS, AFFILIATES, OR AGENTS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, REVENUE, DIGITAL ASSETS, COLLATERAL, OR DATA, ARISING OUT OF OR IN CONNECTION WITH YOUR USE OR INABILITY TO USE THE PROTOCOL, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.</p>
+
+        <h2>11. Indemnification</h2>
+        <p>You agree to defend, indemnify, and hold harmless ClockLend, its contributors, and developers from and against any claims, liabilities, damages, losses, and expenses (including reasonable legal fees) arising out of or in any way connected with your breach of these Terms, your violation of applicable laws, or your misuse of the protocol.</p>
+
+        <h2>12. Governing Law & Dispute Resolution</h2>
+        <p>These Terms shall be governed by and construed in accordance with the principles of decentralized international commercial arbitration and general commercial law. Any disputes arising out of or relating to these Terms shall be resolved through binding, confidential arbitration conducted under the UNCITRAL Arbitration Rules.</p>
+
+        <h2>13. Modifications to Terms</h2>
+        <p>We reserve the right to amend these Terms at any time by posting the updated version to this site. Your continued use of the protocol following any revisions constitutes your acceptance of the modified Terms.</p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-bottom" style="border-top: none; padding-top: 0;">
+        <div>© 2026 ClockLend Protocol. Released under MIT Open Source License.</div>
+        <div style="display: flex; gap: 20px;">
+          <a href="terms.html">Terms & Conditions</a>
+          <a href="privacy.html">Privacy Policy</a>
+          <a href="legal.html">Legal Notice</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const drawer = document.getElementById('mobileDrawer');
+    const openBtn = document.getElementById('menuOpen');
+    const closeBtn = document.getElementById('menuClose');
+    openBtn.addEventListener('click', () => drawer.classList.add('open'));
+    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+  </script>
+</body>
+</html>

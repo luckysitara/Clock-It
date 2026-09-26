@@ -254,7 +254,7 @@ export async function signAndSendSeekerTransaction(
   const conn = getConnection(network);
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
   // Builders may have pre-set the blockhash/feePayer and collected ephemeral
-  // signer signatures over that exact message (Pyth attachment). Never
+  // signer signatures over that exact message. Never
   // overwrite those — the pre-collected signature would no longer match.
   const hadPreexistingBlockhash = !!transaction.recentBlockhash;
   if (!transaction.recentBlockhash) transaction.recentBlockhash = blockhash;
@@ -288,7 +288,7 @@ export async function signAndSendSeekerTransaction(
   });
 
   // Wait for confirmation on the active cluster. When the transaction carried
-  // its own pre-set blockhash (Pyth attachment), the fresh blockhash's
+  // its own pre-set blockhash, the fresh blockhash's
   // validity window does not apply — poll from the current height instead.
   if (hadPreexistingBlockhash) {
     const currentHeight = await conn.getBlockHeight('confirmed');
