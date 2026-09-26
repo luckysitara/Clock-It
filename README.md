@@ -503,4 +503,4 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 ---
 
 ## 📄 License
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details. Built with pride for the **Solana Mobile CLOCK IN Hackathon**.
+This project is proprietary software. All rights reserved. Built with pride for the **Solana Mobile CLOCK IN Hackathon**.
